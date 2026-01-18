@@ -11,16 +11,14 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v9.3 (AI Sync Fix):
- * * [功能修復] AI 分析連動與自動更新
- * 1. 狀態管理 (State Management):
- * - 新增 `analysisSymbol` 狀態，用於追蹤目前 AI 分析內容所屬的標的。
- * 2. 邏輯解耦 (Decoupling):
- * - `fetchHistoricalData` 不再直接呼叫 `generateSummary`，避免職責過重與重複呼叫。
- * - 改由 `useEffect` 統一管理：當 (有數據) 且 (分析標的 != 當前標的) 時，自動觸發 AI 分析。
- * 3. 體驗優化 (UX):
- * - 切換標的物 (`selectedHistorySymbol` 改變) 時，立即清除舊的 AI 分析結果 (`aiSummary`, `aiDetail`)。
- * - 確保切換到已快取的股票時，AI 分析也會自動重新生成或更新。
+ * 專業理財經理人技術筆記 (Technical Note) v9.4 (Bug Fixes):
+ * * [功能修復] 
+ * 1. 股價更新快取問題 (Cache Busting):
+ * - 在 `fetchRealTimePrices` 的 API URL 中加入 `&t=${Date.now()}`。
+ * - 強制瀏覽器與 Proxy 伺服器重新抓取，解決「點擊更新無反應」的問題。
+ * 2. 手機版定存顏色錯誤 (Mobile Color Logic):
+ * - 修正手機版卡片 `className` 邏輯。
+ * - 新增 `row['類別'] === '債券'` 與 `row['類別'] === '定存'` 的判斷，正確顯示綠色標籤。
  */
 
 // --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
@@ -202,7 +200,7 @@ const Dashboard = () => {
   const [isAiDetailing, setIsAiDetailing] = useState(false);
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
-  const [analysisSymbol, setAnalysisSymbol] = useState(null); // Track which symbol the analysis belongs to
+  const [analysisSymbol, setAnalysisSymbol] = useState(null); 
 
   // Functions defined INSIDE component
   const processData = (data, pricesMap) => {
@@ -239,7 +237,8 @@ const Dashboard = () => {
 
       while(attempts <= maxRetries && !success) {
         try {
-          const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`;
+          // Add timestamp for cache busting
+          const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
           const result = await fetchWithProxyFallback(targetUrl);
           const meta = result?.chart?.result?.[0]?.meta;
           
@@ -275,6 +274,7 @@ const Dashboard = () => {
     processData(data, newPrices);
   };
 
+  // AI 呼叫核心 (Fallback Logic)
   const callGeminiWithFallback = async (prompt) => {
     if (!geminiApiKey) {
       const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
@@ -318,7 +318,7 @@ const Dashboard = () => {
     setAiSummary(null);
     setAiDetail(null); 
     setIsDetailExpanded(false);
-    setAnalysisSymbol(symbol); // Reset symbol marker initially
+    setAnalysisSymbol(symbol); 
 
     const latest = data[data.length - 1];
     const stockName = tradableSymbols.find(t => t['標的'] === symbol)?.['名稱'] || symbol;
@@ -332,11 +332,10 @@ const Dashboard = () => {
     try {
       const text = await callGeminiWithFallback(prompt);
       setAiSummary(text);
-      // Ensure symbol is set (in case of race condition)
       setAnalysisSymbol(symbol); 
     } catch (err) {
       setAiSummary(err.message || "分析暫時無法使用。");
-      setAnalysisSymbol(symbol); // Still mark as handled even if error
+      setAnalysisSymbol(symbol); 
     } finally {
       setIsAiSummarizing(false);
     }
@@ -387,10 +386,8 @@ const Dashboard = () => {
     setHistoryLoading(true);
     setHistoryError(null);
     
-    // 不在此處呼叫 generateSummary，避免職責混淆，改由 useEffect 監聽數據變化來觸發
-    setAnalysisSymbol(null); // Reset analysis marker to indicate "not analyzed yet" for this new selection
+    setAnalysisSymbol(null); 
     
-    // Clear UI immediately
     setAiSummary(null);
     setAiDetail(null);
     setIsDetailExpanded(false);
@@ -411,7 +408,6 @@ const Dashboard = () => {
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
-        // Note: We don't call generateSummary here anymore. The useEffect will handle it.
       } else {
         throw new Error('No chart data found');
       }
@@ -469,14 +465,12 @@ const Dashboard = () => {
     else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); const firstStock = DEMO_DATA.find(d => d['類別'] === '股票' || d['類別'] === '債券'); if (firstStock) setSelectedHistorySymbol(firstStock['標的']); }
   }, []);
 
-  // Main Effect for History Tab: Handles both Data Fetching AND AI Generation Logic
   useEffect(() => {
     if (activeTab === 'history' && selectedHistorySymbol) {
       const key = `${selectedHistorySymbol}_${timeframe}`;
       const hasData = !!historicalData[key];
       const isAnalysisOutdated = analysisSymbol !== selectedHistorySymbol;
 
-      // 1. Clear UI immediately if switching symbols
       if (isAnalysisOutdated && aiSummary && !isAiSummarizing) {
          setAiSummary(null);
          setAiDetail(null);
@@ -484,13 +478,10 @@ const Dashboard = () => {
       }
 
       if (!hasData) {
-        // 2. No data found -> Fetch Data
         if (!historyLoading) {
            fetchHistoricalData(selectedHistorySymbol, timeframe);
         }
       } else {
-        // 3. Has Data -> Check if we need to Generate AI Summary
-        // Trigger condition: Analysis symbol doesn't match current symbol, AND we have API key, AND not currently generating
         if (isAnalysisOutdated && geminiApiKey && !isAiSummarizing) {
            generateSummary(selectedHistorySymbol, historicalData[key]);
         }
@@ -727,7 +718,9 @@ const Dashboard = () => {
               <button onClick={() => fetchRealTimePrices(rawData)} className="text-xs flex items-center text-blue-400 hover:text-blue-300 transition-colors"><RefreshCw className={`w-3 h-3 mr-1 ${priceLoading ? 'animate-spin' : ''}`} />{priceLoading ? '更新中...' : '立即更新股價'}</button>
             </div>
 
+            {/* Mobile Card View */}
             <div className="block md:hidden space-y-4">
+              {/* Mobile Sort Controls */}
               <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex items-center space-x-2 overflow-x-auto">
                 <span className="text-xs text-slate-400 whitespace-nowrap">排序依據:</span>
                 {[ { id: 'manual', label: '自訂' }, { id: 'buyPrice', label: '成本' }, { id: 'profitLoss', label: '損益' }, { id: 'roi', label: '報酬' } ].map(opt => (
@@ -741,7 +734,7 @@ const Dashboard = () => {
                     <div>
                       <div className="flex items-center space-x-2">
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : 'bg-purple-900 text-purple-200'}`}>{row['類別']}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : row['類別'] === '債券' ? 'bg-purple-900 text-purple-200' : 'bg-green-900 text-green-200'}`}>{row['類別']}</span>
                       </div>
                       <div className="text-sm text-slate-400 mt-1">{row['名稱']}</div>
                     </div>
@@ -766,6 +759,7 @@ const Dashboard = () => {
               ))}
             </div>
 
+            {/* Desktop Table View */}
             <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-700">
