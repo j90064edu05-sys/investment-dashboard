@@ -11,14 +11,18 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v9.4 (Bug Fixes):
- * * [功能修復] 
- * 1. 股價更新快取問題 (Cache Busting):
- * - 在 `fetchRealTimePrices` 的 API URL 中加入 `&t=${Date.now()}`。
- * - 強制瀏覽器與 Proxy 伺服器重新抓取，解決「點擊更新無反應」的問題。
- * 2. 手機版定存顏色錯誤 (Mobile Color Logic):
- * - 修正手機版卡片 `className` 邏輯。
- * - 新增 `row['類別'] === '債券'` 與 `row['類別'] === '定存'` 的判斷，正確顯示綠色標籤。
+ * 專業理財經理人技術筆記 (Technical Note) v10.0 (Context-Aware AI Analysis):
+ * * [功能升級] 依據標的物性質進行差異化分析
+ * 1. 新增 `detectAssetType(symbol, name, category)`:
+ * - 邏輯：
+ * - Category = '債券' -> BOND
+ * - Symbol 開頭 '00' (台股ETF特徵) 或 Name 含 'ETF'/'基金' -> ETF
+ * - 其他 -> STOCK
+ * 2. 升級 `generateSummary` & `generateDetail`:
+ * - 根據 Asset Type 動態切換 Prompt 的「角色設定 (Persona)」與「分析重點」。
+ * - STOCK: 關注技術面、均線、KD/MACD。
+ * - ETF: 關注追蹤指數、大盤連動、長線趨勢。
+ * - BOND: 關注利率政策、殖利率反向關係、避險屬性。
  */
 
 // --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
@@ -29,9 +33,9 @@ const DEMO_DATA = [
   { 日期: '2020-03-20', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 270, 股數: 500, 策略: '金字塔_S1', 金額: 135000 },
   { 日期: '2021-05-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 550, 股數: 200, 策略: 'K值超賣', 金額: 110000 },
   { 日期: '2022-01-10', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 600, 股數: 100, 策略: '金字塔_S2', 金額: 60000 },
-  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 },
+  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 }, // ETF
   { 日期: '2022-10-25', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 100, 股數: 1000, 策略: 'MA120有撐', 金額: 100000 },
-  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 },
+  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 }, // Bond
   { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 30, 股數: 10000, 策略: '基礎買入', 金額: 300000 },
 ];
 
@@ -73,6 +77,19 @@ const CustomStrategyDot = (props) => {
   const strategy = payload.buyAction['策略'];
   const config = STRATEGY_CONFIG[strategy] || STRATEGY_CONFIG['default'];
   return renderShape(config.shape, cx, cy, config.color, 6);
+};
+
+// 智慧資產類型偵測
+const detectAssetType = (symbol, name, category) => {
+  if (category === '債券' || name.includes('債')) return 'BOND';
+  // 台灣 ETF 通常以 00 開頭，或名稱包含 ETF/基金
+  if (category === '股票') {
+    if (symbol.startsWith('00') || name.toUpperCase().includes('ETF') || name.includes('基金')) {
+      return 'ETF';
+    }
+    return 'STOCK';
+  }
+  return 'STOCK'; // Default
 };
 
 // --- Proxy Fetch Helper ---
@@ -237,7 +254,6 @@ const Dashboard = () => {
 
       while(attempts <= maxRetries && !success) {
         try {
-          // Add timestamp for cache busting
           const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
           const result = await fetchWithProxyFallback(targetUrl);
           const meta = result?.chart?.result?.[0]?.meta;
@@ -274,7 +290,6 @@ const Dashboard = () => {
     processData(data, newPrices);
   };
 
-  // AI 呼叫核心 (Fallback Logic)
   const callGeminiWithFallback = async (prompt) => {
     if (!geminiApiKey) {
       const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
@@ -321,12 +336,31 @@ const Dashboard = () => {
     setAnalysisSymbol(symbol); 
 
     const latest = data[data.length - 1];
-    const stockName = tradableSymbols.find(t => t['標的'] === symbol)?.['名稱'] || symbol;
+    const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
+    const stockName = assetInfo?.['名稱'] || symbol;
+    const category = assetInfo?.['類別'] || '股票';
+    const assetType = detectAssetType(symbol, stockName, category);
+
+    // 差異化 Prompt
+    let roleDescription = "";
+    let focusPoints = "";
+
+    if (assetType === 'BOND') {
+      roleDescription = "專業總體經濟與債券分析師";
+      focusPoints = "重點關注：利率環境影響、殖利率走勢、債券價格支撐與避險屬性。";
+    } else if (assetType === 'ETF') {
+      roleDescription = "專業 ETF 策略分析師";
+      focusPoints = "重點關注：追蹤指數趨勢、大盤連動性、長線存股價值。";
+    } else {
+      roleDescription = "專業證券技術分析師";
+      focusPoints = "重點關注：股價趨勢、均線排列、KD/MACD 訊號、支撐壓力位。";
+    }
     
     const prompt = `
-      請以一位專業股票分析師的角色，針對 ${symbol} (${stockName}) 進行極簡短技術分析。
+      請以一位【${roleDescription}】的角色，針對 ${symbol} (${stockName}) [${assetType}] 進行極簡短技術分析。
+      ${focusPoints}
       數據：收盤 ${formatPrice(latest.close)}, MA20 ${latest.MA20 ? formatPrice(latest.MA20) : '-'}, MA60 ${latest.MA60 ? formatPrice(latest.MA60) : '-'}, KD(K=${latest.K ? formatPrice(latest.K) : '-'}, D=${latest.D ? formatPrice(latest.D) : '-'}), MACD(OSC=${latest.OSC ? formatPrice(latest.OSC) : '-'}).
-      限制：請用繁體中文，50 字以內，直接講重點（如：趨勢多空、關鍵支撐/壓力、KD交叉狀況）。
+      限制：請用繁體中文，50 字以內，直接講重點。
     `;
 
     try {
@@ -351,10 +385,40 @@ const Dashboard = () => {
     setIsDetailExpanded(true); 
 
     const latest = chartData[chartData.length - 1];
-    const stockName = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱'] || selectedHistorySymbol;
+    const assetInfo = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol);
+    const stockName = assetInfo?.['名稱'] || selectedHistorySymbol;
+    const category = assetInfo?.['類別'] || '股票';
+    const assetType = detectAssetType(selectedHistorySymbol, stockName, category);
     
+    let roleDescription = "";
+    let analysisStructure = "";
+
+    if (assetType === 'BOND') {
+      roleDescription = "專業總體經濟與債券分析師";
+      analysisStructure = `
+      1. **利率與總經環境**：分析 Fed 政策與利率對債券價格的影響。
+      2. **技術面分析**：目前價格在均線之上的強弱勢判斷。
+      3. **操作建議**：針對領息族與價差交易者的建議。
+      `;
+    } else if (assetType === 'ETF') {
+      roleDescription = "專業 ETF 策略分析師";
+      analysisStructure = `
+      1. **趨勢研判**：目前趨勢是多頭、空頭還是盤整？
+      2. **技術訊號**：KD 與 MACD 是否出現黃金交叉或背離？
+      3. **操作建議**：針對定期定額與波段操作者的建議。
+      `;
+    } else {
+      roleDescription = "專業證券技術分析師";
+      analysisStructure = `
+      1. **趨勢研判**：均線排列與多空方向。
+      2. **訊號解讀**：KD 與 MACD 的交叉與背離狀況。
+      3. **關鍵價位**：觀察支撐與壓力。
+      4. **操作建議**：針對持股者與空手者的具體建議。
+      `;
+    }
+
     const prompt = `
-      請以一位專業股票分析師的角色，提供 ${selectedHistorySymbol} (${stockName}) 的完整技術面分析報告。
+      請以一位【${roleDescription}】的角色，提供 ${selectedHistorySymbol} (${stockName}) [${assetType}] 的完整技術面分析報告。
       週期：${timeframe === '1y_1d' ? '日線' : timeframe === '5y_1wk' ? '週線' : '月線'}
       
       最新技術指標：
@@ -363,11 +427,8 @@ const Dashboard = () => {
       - 動能: KD(9,3,3) K=${latest.K ? formatPrice(latest.K) : 'N/A'}, D=${latest.D ? formatPrice(latest.D) : 'N/A'}
       - 趨勢: MACD(12,26,9) DIF=${latest.DIF ? formatPrice(latest.DIF) : 'N/A'}, MACD=${latest.Signal ? formatPrice(latest.Signal) : 'N/A'}, OSC=${latest.OSC ? formatPrice(latest.OSC) : 'N/A'}
 
-      輸出格式 (Markdown)：
-      1. **趨勢研判**：均線排列與多空方向。
-      2. **訊號解讀**：KD 與 MACD 的交叉與背離狀況。
-      3. **關鍵價位**：觀察支撐與壓力。
-      4. **操作建議**：針對持股者與空手者的具體建議。
+      請使用 Markdown 格式輸出，結構如下：
+      ${analysisStructure}
     `;
 
     try {
@@ -718,9 +779,7 @@ const Dashboard = () => {
               <button onClick={() => fetchRealTimePrices(rawData)} className="text-xs flex items-center text-blue-400 hover:text-blue-300 transition-colors"><RefreshCw className={`w-3 h-3 mr-1 ${priceLoading ? 'animate-spin' : ''}`} />{priceLoading ? '更新中...' : '立即更新股價'}</button>
             </div>
 
-            {/* Mobile Card View */}
             <div className="block md:hidden space-y-4">
-              {/* Mobile Sort Controls */}
               <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex items-center space-x-2 overflow-x-auto">
                 <span className="text-xs text-slate-400 whitespace-nowrap">排序依據:</span>
                 {[ { id: 'manual', label: '自訂' }, { id: 'buyPrice', label: '成本' }, { id: 'profitLoss', label: '損益' }, { id: 'roi', label: '報酬' } ].map(opt => (
@@ -759,7 +818,6 @@ const Dashboard = () => {
               ))}
             </div>
 
-            {/* Desktop Table View */}
             <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-700">
