@@ -11,19 +11,15 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v10.1 (Custom AI Model):
- * * [新增功能] 自訂 AI 模型選擇
- * 1. 新增 `AVAILABLE_MODELS` 常數，定義支援的模型清單。
- * 2. 狀態管理：
- * - 新增 `selectedModel` state。
- * - 初始化時從 `localStorage` 讀取 `gemini_model`。
- * 3. 邏輯更新 `callGeminiWithFallback`:
- * - 動態建構 `models` 陣列。
- * - 將使用者選擇的模型 (`selectedModel`) 置於陣列首位作為第一優先。
- * - 其餘模型自動作為備援 (Fallback)。
- * 4. 介面更新：
- * - 設定頁面新增模型選擇下拉選單。
- * - 儲存設定時一併儲存偏好模型。
+ * 專業理財經理人技術筆記 (Technical Note) v10.2 (Critical Fix):
+ * * [嚴重錯誤修復] 設定頁面空白 (White Screen on Config Tab)
+ * 1. 錯誤原因：
+ * - 函式定義為 `handleSaveSettings` (為了同時儲存 Key 與 Model)。
+ * - 但 JSX 按鈕仍指向舊名 `handleSaveApiKey` (未定義)。
+ * - 導致切換至設定頁籤時，React 因 ReferenceError 而崩潰。
+ * 2. 修正：
+ * - 將按鈕的 `onClick` 事件正確指向 `handleSaveSettings`。
+ * - 確保 `Cpu` 圖示已正確引入。
  */
 
 // --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
@@ -225,7 +221,7 @@ const Dashboard = () => {
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
-  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash'); // New state for model selection
+  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
 
   // Functions defined INSIDE component
   const processData = (data, pricesMap) => {
@@ -298,6 +294,7 @@ const Dashboard = () => {
     processData(data, newPrices);
   };
 
+  // AI 呼叫核心
   const callGeminiWithFallback = async (prompt) => {
     if (!geminiApiKey) {
       const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
@@ -305,7 +302,6 @@ const Dashboard = () => {
       throw new Error("請先至「設定」頁面儲存 API Key");
     }
 
-    // Dynamic model selection: User's choice first, then others
     const defaultModels = AVAILABLE_MODELS.map(m => m.id);
     const models = [selectedModel, ...defaultModels.filter(m => m !== selectedModel)];
 
@@ -328,7 +324,7 @@ const Dashboard = () => {
         const data = await response.json();
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text) {
-          setUsedModel(model); // Show actual used model
+          setUsedModel(model);
           return text;
         }
       } catch (err) {
@@ -352,7 +348,6 @@ const Dashboard = () => {
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(symbol, stockName, category);
 
-    // 差異化 Prompt
     let roleDescription = "";
     let focusPoints = "";
 
@@ -480,6 +475,13 @@ const Dashboard = () => {
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
+        
+        // 嘗試自動生成摘要 (若已設定 Key)
+        if (geminiApiKey) {
+          generateSummary(symbol, processedData);
+        } else {
+          setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
+        }
       } else {
         throw new Error('No chart data found');
       }
@@ -513,6 +515,7 @@ const Dashboard = () => {
 
   const handleFetchButton = () => { if (!sheetUrl) { alert("請輸入 URL"); return; } performFetch(sheetUrl); };
   
+  // Corrected Function Name
   const handleSaveSettings = () => {
     localStorage.setItem('gemini_api_key', geminiApiKey);
     localStorage.setItem('gemini_model', selectedModel); // Save model
@@ -807,7 +810,7 @@ const Dashboard = () => {
                     <div>
                       <div className="flex items-center space-x-2">
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : 'bg-purple-900 text-purple-200'}`}>{row['類別']}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : row['類別'] === '債券' ? 'bg-purple-900 text-purple-200' : 'bg-green-900 text-green-200'}`}>{row['類別']}</span>
                       </div>
                       <div className="text-sm text-slate-400 mt-1">{row['名稱']}</div>
                     </div>
@@ -876,7 +879,7 @@ const Dashboard = () => {
                 <label className="block text-sm font-medium text-slate-300 mb-2">Google Gemini API Key (AI 分析用)</label>
                 <div className="flex gap-2">
                     <input type="password" value={geminiApiKey} onChange={(e) => setGeminiApiKey(e.target.value)} placeholder="請輸入 API Key (例如: AIzaSy...)" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
-                    <button onClick={handleSaveApiKey} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-sm font-medium transition-colors"><Save className="w-4 h-4 mr-1 inline" />儲存</button>
+                    <button onClick={handleSaveSettings} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-sm font-medium transition-colors"><Save className="w-4 h-4 mr-1 inline" />儲存</button>
                 </div>
                 <p className="mt-2 text-xs text-slate-500">* 單機版需自行申請 API Key 才能使用 AI 功能。<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 ml-1 underline">前往申請</a></p>
               </div>
