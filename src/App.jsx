@@ -7,22 +7,23 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v10.0 (Context-Aware AI Analysis):
- * * [功能升級] 依據標的物性質進行差異化分析
- * 1. 新增 `detectAssetType(symbol, name, category)`:
- * - 邏輯：
- * - Category = '債券' -> BOND
- * - Symbol 開頭 '00' (台股ETF特徵) 或 Name 含 'ETF'/'基金' -> ETF
- * - 其他 -> STOCK
- * 2. 升級 `generateSummary` & `generateDetail`:
- * - 根據 Asset Type 動態切換 Prompt 的「角色設定 (Persona)」與「分析重點」。
- * - STOCK: 關注技術面、均線、KD/MACD。
- * - ETF: 關注追蹤指數、大盤連動、長線趨勢。
- * - BOND: 關注利率政策、殖利率反向關係、避險屬性。
+ * 專業理財經理人技術筆記 (Technical Note) v10.1 (Custom AI Model):
+ * * [新增功能] 自訂 AI 模型選擇
+ * 1. 新增 `AVAILABLE_MODELS` 常數，定義支援的模型清單。
+ * 2. 狀態管理：
+ * - 新增 `selectedModel` state。
+ * - 初始化時從 `localStorage` 讀取 `gemini_model`。
+ * 3. 邏輯更新 `callGeminiWithFallback`:
+ * - 動態建構 `models` 陣列。
+ * - 將使用者選擇的模型 (`selectedModel`) 置於陣列首位作為第一優先。
+ * - 其餘模型自動作為備援 (Fallback)。
+ * 4. 介面更新：
+ * - 設定頁面新增模型選擇下拉選單。
+ * - 儲存設定時一併儲存偏好模型。
  */
 
 // --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
@@ -52,6 +53,12 @@ const STRATEGY_CONFIG = {
   'MA120有撐':    { color: '#06B6D4', label: 'MA120有撐',    shape: 'square' },
   'default':      { color: '#64748B', label: '其他策略',     shape: 'cross' }
 };
+
+const AVAILABLE_MODELS = [
+  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash (快速/平衡)' },
+  { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro (深度/精準)' },
+  { id: 'gemini-2.5-flash-preview-09-2025', name: 'Gemini 2.5 Flash Preview (最新預覽)' },
+];
 
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value);
 const formatPercent = (value) => `${(value * 100).toFixed(2)}%`;
@@ -218,6 +225,7 @@ const Dashboard = () => {
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
+  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash'); // New state for model selection
 
   // Functions defined INSIDE component
   const processData = (data, pricesMap) => {
@@ -297,7 +305,10 @@ const Dashboard = () => {
       throw new Error("請先至「設定」頁面儲存 API Key");
     }
 
-    const models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.5-flash-preview-09-2025'];
+    // Dynamic model selection: User's choice first, then others
+    const defaultModels = AVAILABLE_MODELS.map(m => m.id);
+    const models = [selectedModel, ...defaultModels.filter(m => m !== selectedModel)];
+
     for (const model of models) {
       try {
         const response = await fetch(
@@ -317,7 +328,7 @@ const Dashboard = () => {
         const data = await response.json();
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text) {
-          setUsedModel(model);
+          setUsedModel(model); // Show actual used model
           return text;
         }
       } catch (err) {
@@ -502,9 +513,10 @@ const Dashboard = () => {
 
   const handleFetchButton = () => { if (!sheetUrl) { alert("請輸入 URL"); return; } performFetch(sheetUrl); };
   
-  const handleSaveApiKey = () => {
+  const handleSaveSettings = () => {
     localStorage.setItem('gemini_api_key', geminiApiKey);
-    alert("Gemini API Key 已儲存！您可以開始使用 AI 功能了。");
+    localStorage.setItem('gemini_model', selectedModel); // Save model
+    alert("設定已儲存！");
   };
 
   const getResponsiveFontSize = (text) => {
@@ -520,7 +532,9 @@ const Dashboard = () => {
   useEffect(() => {
     const savedUrl = localStorage.getItem('investment_sheet_url');
     const savedKey = localStorage.getItem('gemini_api_key');
+    const savedModel = localStorage.getItem('gemini_model');
     if (savedKey) setGeminiApiKey(savedKey);
+    if (savedModel) setSelectedModel(savedModel);
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } 
     else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); const firstStock = DEMO_DATA.find(d => d['類別'] === '股票' || d['類別'] === '債券'); if (firstStock) setSelectedHistorySymbol(firstStock['標的']); }
@@ -793,7 +807,7 @@ const Dashboard = () => {
                     <div>
                       <div className="flex items-center space-x-2">
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : row['類別'] === '債券' ? 'bg-purple-900 text-purple-200' : 'bg-green-900 text-green-200'}`}>{row['類別']}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : 'bg-purple-900 text-purple-200'}`}>{row['類別']}</span>
                       </div>
                       <div className="text-sm text-slate-400 mt-1">{row['名稱']}</div>
                     </div>
@@ -865,6 +879,24 @@ const Dashboard = () => {
                     <button onClick={handleSaveApiKey} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-sm font-medium transition-colors"><Save className="w-4 h-4 mr-1 inline" />儲存</button>
                 </div>
                 <p className="mt-2 text-xs text-slate-500">* 單機版需自行申請 API Key 才能使用 AI 功能。<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 ml-1 underline">前往申請</a></p>
+              </div>
+
+              {/* Model Selection Dropdown */}
+              <div className="mt-4">
+                <label className="block text-sm font-medium text-slate-300 mb-2">選擇 AI 模型</label>
+                <div className="flex gap-2 items-center">
+                  <Cpu className="w-5 h-5 text-slate-400" />
+                  <select 
+                    value={selectedModel} 
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="flex-1 px-4 py-2 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                  >
+                    {AVAILABLE_MODELS.map(model => (
+                      <option key={model.id} value={model.id}>{model.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="mt-1 text-xs text-slate-500 ml-7">* 預設使用 Flash 模型以節省額度，Pro 模型分析更精準但速度較慢。</p>
               </div>
 
               {error && <div className="p-3 bg-red-900/30 border border-red-500/50 text-red-300 rounded-md text-sm">{error}</div>}
