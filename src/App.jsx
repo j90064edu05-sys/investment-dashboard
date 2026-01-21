@@ -11,15 +11,15 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v10.2 (Critical Fix):
- * * [嚴重錯誤修復] 設定頁面空白 (White Screen on Config Tab)
- * 1. 錯誤原因：
- * - 函式定義為 `handleSaveSettings` (為了同時儲存 Key 與 Model)。
- * - 但 JSX 按鈕仍指向舊名 `handleSaveApiKey` (未定義)。
- * - 導致切換至設定頁籤時，React 因 ReferenceError 而崩潰。
- * 2. 修正：
- * - 將按鈕的 `onClick` 事件正確指向 `handleSaveSettings`。
- * - 確保 `Cpu` 圖示已正確引入。
+ * 專業理財經理人技術筆記 (Technical Note) v10.3 (Display Fix):
+ * * [介面修復] 持股明細顯示異常修復
+ * 1. 表格溢出問題 (Table Overflow):
+ * - 移除了表格外層容器的 `overflow-hidden`，避免 Tooltip 被裁切。
+ * - 將 `overflow-x-auto` 僅保留在表格捲動層，並確保 Tooltip 的 z-index 層級最高。
+ * 2. 數值安全 (Data Safety):
+ * - 在 render 階段加入 `|| 0` 保護，防止 `toFixed` 對 null/undefined 報錯。
+ * 3. 手機版佈局 (Mobile Layout):
+ * - 調整手機版卡片的 Flex 結構，確保排序按鈕與數值不會重疊。
  */
 
 // --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
@@ -30,9 +30,9 @@ const DEMO_DATA = [
   { 日期: '2020-03-20', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 270, 股數: 500, 策略: '金字塔_S1', 金額: 135000 },
   { 日期: '2021-05-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 550, 股數: 200, 策略: 'K值超賣', 金額: 110000 },
   { 日期: '2022-01-10', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 600, 股數: 100, 策略: '金字塔_S2', 金額: 60000 },
-  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 }, // ETF
+  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 },
   { 日期: '2022-10-25', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 100, 股數: 1000, 策略: 'MA120有撐', 金額: 100000 },
-  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 }, // Bond
+  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 },
   { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 30, 股數: 10000, 策略: '基礎買入', 金額: 300000 },
 ];
 
@@ -56,9 +56,9 @@ const AVAILABLE_MODELS = [
   { id: 'gemini-2.5-flash-preview-09-2025', name: 'Gemini 2.5 Flash Preview (最新預覽)' },
 ];
 
-const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value);
-const formatPercent = (value) => `${(value * 100).toFixed(2)}%`;
-const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : value;
+const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
+const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
+const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : (value || '0.00');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const renderShape = (shape, cx, cy, color, size = 6) => {
@@ -82,17 +82,15 @@ const CustomStrategyDot = (props) => {
   return renderShape(config.shape, cx, cy, config.color, 6);
 };
 
-// 智慧資產類型偵測
 const detectAssetType = (symbol, name, category) => {
   if (category === '債券' || name.includes('債')) return 'BOND';
-  // 台灣 ETF 通常以 00 開頭，或名稱包含 ETF/基金
   if (category === '股票') {
     if (symbol.startsWith('00') || name.toUpperCase().includes('ETF') || name.includes('基金')) {
       return 'ETF';
     }
     return 'STOCK';
   }
-  return 'STOCK'; // Default
+  return 'STOCK'; 
 };
 
 // --- Proxy Fetch Helper ---
@@ -226,9 +224,9 @@ const Dashboard = () => {
   // Functions defined INSIDE component
   const processData = (data, pricesMap) => {
     const enrichedData = data.map((item, index) => {
-      const shares = parseFloat(item['股數']);
-      const buyPrice = parseFloat(item['價格']);
-      const costBasis = parseFloat(item['金額']);
+      const shares = parseFloat(item['股數']) || 0;
+      const buyPrice = parseFloat(item['價格']) || 0;
+      const costBasis = parseFloat(item['金額']) || 0;
       const symbol = item['標的'];
       const category = item['類別'];
       let currentPrice = category === '定存' ? buyPrice : (pricesMap?.[symbol] || buyPrice);
@@ -294,7 +292,6 @@ const Dashboard = () => {
     processData(data, newPrices);
   };
 
-  // AI 呼叫核心
   const callGeminiWithFallback = async (prompt) => {
     if (!geminiApiKey) {
       const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
@@ -334,8 +331,44 @@ const Dashboard = () => {
     throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
   };
 
+  // Cache Helper Functions
+  const getAiCache = () => {
+    try {
+      return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}');
+    } catch {
+      return {};
+    }
+  };
+
+  const updateAiCache = (symbol, type, content) => {
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    const existing = cache[symbol] || {};
+    
+    let newEntry;
+    if (existing.date === today) {
+       newEntry = { ...existing, [type]: content };
+    } else {
+       newEntry = { date: today, [type]: content };
+    }
+
+    const newCache = { ...cache, [symbol]: newEntry };
+    localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
+  };
+
   const generateSummary = async (symbol, data) => {
     if (!data || data.length === 0) return;
+
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    if (cache[symbol] && cache[symbol].date === today && cache[symbol].summary) {
+      setAiSummary(cache[symbol].summary);
+      setAnalysisSymbol(symbol);
+      setAiDetail(null); 
+      setIsDetailExpanded(false);
+      return;
+    }
+
     setIsAiSummarizing(true);
     setAiSummary(null);
     setAiDetail(null); 
@@ -372,7 +405,8 @@ const Dashboard = () => {
     try {
       const text = await callGeminiWithFallback(prompt);
       setAiSummary(text);
-      setAnalysisSymbol(symbol); 
+      setAnalysisSymbol(symbol);
+      updateAiCache(symbol, 'summary', text); 
     } catch (err) {
       setAiSummary(err.message || "分析暫時無法使用。");
       setAnalysisSymbol(symbol); 
@@ -383,6 +417,15 @@ const Dashboard = () => {
 
   const generateDetail = async () => {
     if (!selectedHistorySymbol) return;
+
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    if (cache[selectedHistorySymbol] && cache[selectedHistorySymbol].date === today && cache[selectedHistorySymbol].detail) {
+      setAiDetail(cache[selectedHistorySymbol].detail);
+      setIsDetailExpanded(true);
+      return;
+    }
+
     const key = `${selectedHistorySymbol}_${timeframe}`;
     const chartData = historicalData[key];
     if (!chartData || chartData.length === 0) return;
@@ -440,6 +483,7 @@ const Dashboard = () => {
     try {
       const text = await callGeminiWithFallback(prompt);
       setAiDetail(text);
+      updateAiCache(selectedHistorySymbol, 'detail', text); 
     } catch (err) {
       setAiDetail(err.message || "詳細分析生成失敗，請稍後再試。");
     } finally {
@@ -476,7 +520,6 @@ const Dashboard = () => {
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
         
-        // 嘗試自動生成摘要 (若已設定 Key)
         if (geminiApiKey) {
           generateSummary(symbol, processedData);
         } else {
@@ -515,7 +558,6 @@ const Dashboard = () => {
 
   const handleFetchButton = () => { if (!sheetUrl) { alert("請輸入 URL"); return; } performFetch(sheetUrl); };
   
-  // Corrected Function Name
   const handleSaveSettings = () => {
     localStorage.setItem('gemini_api_key', geminiApiKey);
     localStorage.setItem('gemini_model', selectedModel); // Save model
@@ -538,6 +580,18 @@ const Dashboard = () => {
     const savedModel = localStorage.getItem('gemini_model');
     if (savedKey) setGeminiApiKey(savedKey);
     if (savedModel) setSelectedModel(savedModel);
+
+    // Clean up old cache
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    let cacheModified = false;
+    Object.keys(cache).forEach(key => {
+      if (cache[key].date !== today) {
+        delete cache[key];
+        cacheModified = true;
+      }
+    });
+    if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } 
     else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); const firstStock = DEMO_DATA.find(d => d['類別'] === '股票' || d['類別'] === '債券'); if (firstStock) setSelectedHistorySymbol(firstStock['標的']); }
@@ -835,7 +889,7 @@ const Dashboard = () => {
               ))}
             </div>
 
-            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
+            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg">
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-700">
                   <thead className="bg-slate-900/50">
