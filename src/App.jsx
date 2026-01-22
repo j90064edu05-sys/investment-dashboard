@@ -11,35 +11,15 @@ import {
 } from 'lucide-react';
 
 /**
-<<<<<<< HEAD
- * 專業理財經理人技術筆記 (Technical Note) v11.0 (Net Profit Logic):
- * * [核心算法更新] 淨損益計算 (Net P/L)
- * 1. 稅費邏輯 (Tax & Fee):
- * - 手續費 (Fee): 市值 * 0.001425 * 折扣 (discount)。
- * - 交易稅 (Tax): 
- * - ETF ('00'開頭/名稱含ETF): 0.1%
- * - 股票 (預設): 0.3%
- * - 債券: 0%
- * 2. 資料結構更新:
- * - `processData` 計算出 `grossProfit` (帳面) 與 `netProfit` (淨利)。
- * - `profitLoss` 欄位現在呈現 `netProfit`。
- * 3. 介面呈現:
- * - Tooltip 新增「預估稅金」與「預估手續費」欄位。
- * - 設定頁面新增「手續費折扣」輸入框。
-=======
- * 專業理財經理人技術筆記 (Technical Note) v10.3 (Display Fix):
- * * [介面修復] 持股明細顯示異常修復
- * 1. 表格溢出問題 (Table Overflow):
- * - 移除了表格外層容器的 `overflow-hidden`，避免 Tooltip 被裁切。
- * - 將 `overflow-x-auto` 僅保留在表格捲動層，並確保 Tooltip 的 z-index 層級最高。
- * 2. 數值安全 (Data Safety):
- * - 在 render 階段加入 `|| 0` 保護，防止 `toFixed` 對 null/undefined 報錯。
- * 3. 手機版佈局 (Mobile Layout):
- * - 調整手機版卡片的 Flex 結構，確保排序按鈕與數值不會重疊。
->>>>>>> 88ff2de97f7ca616e1fe7c10bd4d07a357168673
+ * 專業理財經理人技術筆記 (Technical Note) v11.1 (Syntax Fix):
+ * * [嚴重錯誤修復] 
+ * 1. 修復 "getAiCache has already been declared"：
+ * - 將 `getAiCache`、`updateAiCache` 與 `getTodayDate` 移至 Dashboard 元件外部，確保全域唯一且不會在 Render 時重複宣告。
+ * 2. 清理 Git 衝突標記：
+ * - 移除所有可能的 `<<<<<<<`, `=======`, `>>>>>>>` 標記，確保程式碼結構完整。
  */
 
-// --- 靜態配置與輔助函式 ---
+// --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
 
 const DEMO_DATA = [
   { 日期: '2015-01-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 140, 股數: 1000, 策略: '基礎買入', 金額: 140000 },
@@ -47,9 +27,9 @@ const DEMO_DATA = [
   { 日期: '2020-03-20', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 270, 股數: 500, 策略: '金字塔_S1', 金額: 135000 },
   { 日期: '2021-05-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 550, 股數: 200, 策略: 'K值超賣', 金額: 110000 },
   { 日期: '2022-01-10', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 600, 股數: 100, 策略: '金字塔_S2', 金額: 60000 },
-  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 },
+  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 }, // ETF
   { 日期: '2022-10-25', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 100, 股數: 1000, 策略: 'MA120有撐', 金額: 100000 },
-  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 },
+  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 }, // Bond
   { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 30, 股數: 10000, 策略: '基礎買入', 金額: 300000 },
 ];
 
@@ -77,6 +57,7 @@ const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'curre
 const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
 const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : (value || '0.00');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const getTodayDate = () => new Date().toISOString().split('T')[0];
 
 const renderShape = (shape, cx, cy, color, size = 6) => {
   const stroke = "#fff";
@@ -99,6 +80,7 @@ const CustomStrategyDot = (props) => {
   return renderShape(config.shape, cx, cy, config.color, 6);
 };
 
+// 智慧資產類型偵測
 const detectAssetType = (symbol, name, category) => {
   if (category === '債券' || name.includes('債')) return 'BOND';
   if (category === '股票') {
@@ -108,6 +90,31 @@ const detectAssetType = (symbol, name, category) => {
     return 'STOCK';
   }
   return 'STOCK'; 
+};
+
+// Cache Helper Functions
+const getAiCache = () => {
+  try {
+    return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}');
+  } catch {
+    return {};
+  }
+};
+
+const updateAiCache = (symbol, type, content) => {
+  const today = getTodayDate();
+  const cache = getAiCache();
+  const existing = cache[symbol] || {};
+  
+  let newEntry;
+  if (existing.date === today) {
+     newEntry = { ...existing, [type]: content };
+  } else {
+     newEntry = { date: today, [type]: content };
+  }
+
+  const newCache = { ...cache, [symbol]: newEntry };
+  localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
 };
 
 // --- Proxy Fetch Helper ---
@@ -239,7 +246,7 @@ const Dashboard = () => {
   const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
 
   // Fee Settings
-  const [feeDiscount, setFeeDiscount] = useState(1); // 1 = no discount, 0.6 = 6折
+  const [feeDiscount, setFeeDiscount] = useState(1); // 1 = no discount
 
   // Functions defined INSIDE component
   const processData = (data, pricesMap) => {
@@ -254,36 +261,23 @@ const Dashboard = () => {
       let currentPrice = category === '定存' ? buyPrice : (pricesMap?.[symbol] || buyPrice);
       const marketValue = shares * currentPrice;
       
-      // Net Profit Calculation
-      // 1. Handling Fee: 0.1425% * Discount
-      // Usually min 20 TWD, but we simplify for aggregation
       const estimateFee = Math.round(marketValue * 0.001425 * feeDiscount);
       
-      // 2. Tax Calculation
-      // ETF: 0.1%, Stock: 0.3%, Bond: 0%
       const assetType = detectAssetType(symbol, name, category);
-      let taxRate = 0.003; // Default Stock
+      let taxRate = 0.003; 
       if (assetType === 'ETF') taxRate = 0.001;
       else if (assetType === 'BOND') taxRate = 0;
       
-      // Fix for "定存" category -> No tax/fee usually, or handled differently. 
-      // Assuming '定存' (Cash) has no transaction tax/fee for valuation purposes in this context
       if (category === '定存') {
          taxRate = 0;
       }
       
-      // Apply tax only if not '定存' (Cash usually 0 fee/tax in this view)
-      // Actually, standard logic:
       const estimateTax = category === '定存' ? 0 : Math.round(marketValue * taxRate);
       const feeFinal = category === '定存' ? 0 : estimateFee;
 
-      // Gross Profit (Book Value)
       const grossProfit = marketValue - costBasis;
-      
-      // Net Profit (Realized Estimate)
       const netProfit = grossProfit - feeFinal - estimateTax;
-
-      const roi = costBasis > 0 ? netProfit / costBasis : 0; // ROI based on Net Profit
+      const roi = costBasis > 0 ? netProfit / costBasis : 0;
 
       return { 
         ...item, 
@@ -293,8 +287,8 @@ const Dashboard = () => {
         currentPrice, 
         costBasis, 
         marketValue, 
-        profitLoss: netProfit, // Main display uses Net
-        grossProfit,           // Keep for tooltip
+        profitLoss: netProfit, 
+        grossProfit,           
         estimateFee: feeFinal,
         estimateTax,
         roi, 
@@ -397,35 +391,10 @@ const Dashboard = () => {
     throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
   };
 
-  // Cache Helper Functions
-  const getAiCache = () => {
-    try {
-      return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}');
-    } catch {
-      return {};
-    }
-  };
-
-  const updateAiCache = (symbol, type, content) => {
-    const today = new Date().toISOString().split('T')[0];
-    const cache = getAiCache();
-    const existing = cache[symbol] || {};
-    
-    let newEntry;
-    if (existing.date === today) {
-       newEntry = { ...existing, [type]: content };
-    } else {
-       newEntry = { date: today, [type]: content };
-    }
-
-    const newCache = { ...cache, [symbol]: newEntry };
-    localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
-  };
-
   const generateSummary = async (symbol, data) => {
     if (!data || data.length === 0) return;
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = getTodayDate();
     const cache = getAiCache();
     if (cache[symbol] && cache[symbol].date === today && cache[symbol].summary) {
       setAiSummary(cache[symbol].summary);
@@ -484,7 +453,7 @@ const Dashboard = () => {
   const generateDetail = async () => {
     if (!selectedHistorySymbol) return;
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = getTodayDate();
     const cache = getAiCache();
     if (cache[selectedHistorySymbol] && cache[selectedHistorySymbol].date === today && cache[selectedHistorySymbol].detail) {
       setAiDetail(cache[selectedHistorySymbol].detail);
@@ -500,7 +469,8 @@ const Dashboard = () => {
     setIsDetailExpanded(true); 
 
     const latest = chartData[chartData.length - 1];
-    const stockName = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱'] || selectedHistorySymbol;
+    const assetInfo = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol);
+    const stockName = assetInfo?.['名稱'] || selectedHistorySymbol;
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(selectedHistorySymbol, stockName, category);
     
@@ -556,39 +526,32 @@ const Dashboard = () => {
     }
   };
 
-  // Cache & Fetch
-  const getAiCache = () => { try { return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}'); } catch { return {}; } };
-  const updateAiCache = (symbol, type, content) => {
-    const today = new Date().toISOString().split('T')[0];
-    const cache = getAiCache();
-    const existing = cache[symbol] || {};
-    let newEntry = existing.date === today ? { ...existing, [type]: content } : { date: today, [type]: content };
-    const newCache = { ...cache, [symbol]: newEntry };
-    localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
-  };
-
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
-    setHistoryLoading(true); setHistoryError(null); setAnalysisSymbol(null); setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false);
+
+    setHistoryLoading(true);
+    setHistoryError(null);
+    setAnalysisSymbol(null); 
+    setAiSummary(null);
+    setAiDetail(null);
+    setIsDetailExpanded(false);
+
     try {
       let range = '5y'; let interval = '1wk';
       if (tf === '1y_1d') { range = '2y'; interval = '1d'; } 
       if (tf === '10y_1mo') { range = '10y'; interval = '1mo'; }
       if (tf === '5y_1wk') { range = '5y'; interval = '1wk'; }
+
       const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
       const result = await fetchWithProxyFallback(targetUrl);
       const chartData = result?.chart?.result?.[0];
+      
       if (chartData && chartData.timestamp) {
         const timestamps = chartData.timestamp;
         const quote = chartData.indicators.quote[0];
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
-<<<<<<< HEAD
-        if (geminiApiKey) generateSummary(symbol, processedData);
-        else setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
-      } else { throw new Error('No chart data found'); }
-=======
         
         if (geminiApiKey) {
           generateSummary(symbol, processedData);
@@ -598,11 +561,12 @@ const Dashboard = () => {
       } else {
         throw new Error('No chart data found');
       }
->>>>>>> 88ff2de97f7ca616e1fe7c10bd4d07a357168673
     } catch (err) {
       console.warn(`無法取得 ${symbol} 的歷史數據:`, err);
       setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。");
-    } finally { setHistoryLoading(false); }
+    } finally {
+      setHistoryLoading(false);
+    }
   };
 
   const performFetch = async (url) => {
@@ -632,10 +596,7 @@ const Dashboard = () => {
     localStorage.setItem('gemini_model', selectedModel);
     localStorage.setItem('fee_discount', feeDiscount);
     alert("設定已儲存！");
-    // Trigger recalculation if data exists
-    if (rawData.length > 0) {
-      processData(rawData, realTimePrices);
-    }
+    if (rawData.length > 0) processData(rawData, realTimePrices);
   };
 
   const getResponsiveFontSize = (text) => {
@@ -662,18 +623,6 @@ const Dashboard = () => {
     const cache = getAiCache();
     let cacheModified = false;
     Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } });
-    if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
-
-    // Clean up old cache
-    const today = new Date().toISOString().split('T')[0];
-    const cache = getAiCache();
-    let cacheModified = false;
-    Object.keys(cache).forEach(key => {
-      if (cache[key].date !== today) {
-        delete cache[key];
-        cacheModified = true;
-      }
-    });
     if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } 
@@ -923,7 +872,6 @@ const Dashboard = () => {
               <button onClick={() => fetchRealTimePrices(rawData)} className="text-xs flex items-center text-blue-400 hover:text-blue-300 transition-colors"><RefreshCw className={`w-3 h-3 mr-1 ${priceLoading ? 'animate-spin' : ''}`} />{priceLoading ? '更新中...' : '立即更新股價'}</button>
             </div>
 
-            {/* Mobile Card View */}
             <div className="block md:hidden space-y-4">
               <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex items-center space-x-2 overflow-x-auto">
                 <span className="text-xs text-slate-400 whitespace-nowrap">排序依據:</span>
@@ -963,14 +911,8 @@ const Dashboard = () => {
               ))}
             </div>
 
-<<<<<<< HEAD
-            {/* Desktop Table View */}
-            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> {/* Removed overflow-hidden from container */}
-              <div className="overflow-x-auto"> {/* Scroll is handled here */}
-=======
-            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg">
+            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> {/* Removed overflow-hidden */}
               <div className="overflow-x-auto">
->>>>>>> 88ff2de97f7ca616e1fe7c10bd4d07a357168673
                 <table className="min-w-full divide-y divide-slate-700">
                   <thead className="bg-slate-900/50">
                     <tr>
@@ -996,7 +938,7 @@ const Dashboard = () => {
                             <div className="space-y-1">
                                 <div className="flex justify-between text-xs"><span className="text-slate-300">總成本:</span><span className="text-white font-medium">{formatCurrency(row.costBasis)}</span></div>
                                 <div className="flex justify-between text-xs"><span className="text-slate-300">總市值:</span><span className="text-yellow-400 font-medium">{formatCurrency(row.marketValue)}</span></div>
-                                <div className="flex justify-between text-xs pt-1 border-t border-slate-600/50"><span className="text-slate-400">帳面損益:</span><span className={row.grossProfit >= 0 ? 'text-red-300' : 'text-green-300'}>{formatCurrency(row.grossProfit)}</span></div>
+                                <div className="flex justify-between text-xs pt-1 border-t border-slate-600/50"><span className="text-slate-400">帳面損益:</span><span className={(row.grossProfit || 0) >= 0 ? 'text-red-300' : 'text-green-300'}>{formatCurrency(row.grossProfit)}</span></div>
                                 <div className="flex justify-between text-xs"><span className="text-slate-400">預估手續費:</span><span className="text-slate-300">-{formatCurrency(row.estimateFee)}</span></div>
                                 <div className="flex justify-between text-xs"><span className="text-slate-400">預估稅金:</span><span className="text-slate-300">-{formatCurrency(row.estimateTax)}</span></div>
                             </div>
