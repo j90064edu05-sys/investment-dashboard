@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 
 /**
+<<<<<<< HEAD
  * 專業理財經理人技術筆記 (Technical Note) v11.0 (Net Profit Logic):
  * * [核心算法更新] 淨損益計算 (Net P/L)
  * 1. 稅費邏輯 (Tax & Fee):
@@ -25,6 +26,17 @@ import {
  * 3. 介面呈現:
  * - Tooltip 新增「預估稅金」與「預估手續費」欄位。
  * - 設定頁面新增「手續費折扣」輸入框。
+=======
+ * 專業理財經理人技術筆記 (Technical Note) v10.3 (Display Fix):
+ * * [介面修復] 持股明細顯示異常修復
+ * 1. 表格溢出問題 (Table Overflow):
+ * - 移除了表格外層容器的 `overflow-hidden`，避免 Tooltip 被裁切。
+ * - 將 `overflow-x-auto` 僅保留在表格捲動層，並確保 Tooltip 的 z-index 層級最高。
+ * 2. 數值安全 (Data Safety):
+ * - 在 render 階段加入 `|| 0` 保護，防止 `toFixed` 對 null/undefined 報錯。
+ * 3. 手機版佈局 (Mobile Layout):
+ * - 調整手機版卡片的 Flex 結構，確保排序按鈕與數值不會重疊。
+>>>>>>> 88ff2de97f7ca616e1fe7c10bd4d07a357168673
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -87,7 +99,6 @@ const CustomStrategyDot = (props) => {
   return renderShape(config.shape, cx, cy, config.color, 6);
 };
 
-// 智慧資產類型偵測
 const detectAssetType = (symbol, name, category) => {
   if (category === '債券' || name.includes('債')) return 'BOND';
   if (category === '股票') {
@@ -386,8 +397,44 @@ const Dashboard = () => {
     throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
   };
 
+  // Cache Helper Functions
+  const getAiCache = () => {
+    try {
+      return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}');
+    } catch {
+      return {};
+    }
+  };
+
+  const updateAiCache = (symbol, type, content) => {
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    const existing = cache[symbol] || {};
+    
+    let newEntry;
+    if (existing.date === today) {
+       newEntry = { ...existing, [type]: content };
+    } else {
+       newEntry = { date: today, [type]: content };
+    }
+
+    const newCache = { ...cache, [symbol]: newEntry };
+    localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
+  };
+
   const generateSummary = async (symbol, data) => {
     if (!data || data.length === 0) return;
+
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    if (cache[symbol] && cache[symbol].date === today && cache[symbol].summary) {
+      setAiSummary(cache[symbol].summary);
+      setAnalysisSymbol(symbol);
+      setAiDetail(null); 
+      setIsDetailExpanded(false);
+      return;
+    }
+
     setIsAiSummarizing(true);
     setAiSummary(null);
     setAiDetail(null); 
@@ -436,6 +483,15 @@ const Dashboard = () => {
 
   const generateDetail = async () => {
     if (!selectedHistorySymbol) return;
+
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    if (cache[selectedHistorySymbol] && cache[selectedHistorySymbol].date === today && cache[selectedHistorySymbol].detail) {
+      setAiDetail(cache[selectedHistorySymbol].detail);
+      setIsDetailExpanded(true);
+      return;
+    }
+
     const key = `${selectedHistorySymbol}_${timeframe}`;
     const chartData = historicalData[key];
     if (!chartData || chartData.length === 0) return;
@@ -528,9 +584,21 @@ const Dashboard = () => {
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
+<<<<<<< HEAD
         if (geminiApiKey) generateSummary(symbol, processedData);
         else setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
       } else { throw new Error('No chart data found'); }
+=======
+        
+        if (geminiApiKey) {
+          generateSummary(symbol, processedData);
+        } else {
+          setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
+        }
+      } else {
+        throw new Error('No chart data found');
+      }
+>>>>>>> 88ff2de97f7ca616e1fe7c10bd4d07a357168673
     } catch (err) {
       console.warn(`無法取得 ${symbol} 的歷史數據:`, err);
       setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。");
@@ -594,6 +662,18 @@ const Dashboard = () => {
     const cache = getAiCache();
     let cacheModified = false;
     Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } });
+    if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
+
+    // Clean up old cache
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    let cacheModified = false;
+    Object.keys(cache).forEach(key => {
+      if (cache[key].date !== today) {
+        delete cache[key];
+        cacheModified = true;
+      }
+    });
     if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } 
@@ -883,9 +963,14 @@ const Dashboard = () => {
               ))}
             </div>
 
+<<<<<<< HEAD
             {/* Desktop Table View */}
             <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> {/* Removed overflow-hidden from container */}
               <div className="overflow-x-auto"> {/* Scroll is handled here */}
+=======
+            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg">
+              <div className="overflow-x-auto">
+>>>>>>> 88ff2de97f7ca616e1fe7c10bd4d07a357168673
                 <table className="min-w-full divide-y divide-slate-700">
                   <thead className="bg-slate-900/50">
                     <tr>
