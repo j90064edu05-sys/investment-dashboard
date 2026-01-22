@@ -7,22 +7,27 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v10.2 (Critical Fix):
- * * [嚴重錯誤修復] 設定頁面空白 (White Screen on Config Tab)
- * 1. 錯誤原因：
- * - 函式定義為 `handleSaveSettings` (為了同時儲存 Key 與 Model)。
- * - 但 JSX 按鈕仍指向舊名 `handleSaveApiKey` (未定義)。
- * - 導致切換至設定頁籤時，React 因 ReferenceError 而崩潰。
- * 2. 修正：
- * - 將按鈕的 `onClick` 事件正確指向 `handleSaveSettings`。
- * - 確保 `Cpu` 圖示已正確引入。
+ * 專業理財經理人技術筆記 (Technical Note) v11.0 (Net Profit Logic):
+ * * [核心算法更新] 淨損益計算 (Net P/L)
+ * 1. 稅費邏輯 (Tax & Fee):
+ * - 手續費 (Fee): 市值 * 0.001425 * 折扣 (discount)。
+ * - 交易稅 (Tax): 
+ * - ETF ('00'開頭/名稱含ETF): 0.1%
+ * - 股票 (預設): 0.3%
+ * - 債券: 0%
+ * 2. 資料結構更新:
+ * - `processData` 計算出 `grossProfit` (帳面) 與 `netProfit` (淨利)。
+ * - `profitLoss` 欄位現在呈現 `netProfit`。
+ * 3. 介面呈現:
+ * - Tooltip 新增「預估稅金」與「預估手續費」欄位。
+ * - 設定頁面新增「手續費折扣」輸入框。
  */
 
-// --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
+// --- 靜態配置與輔助函式 ---
 
 const DEMO_DATA = [
   { 日期: '2015-01-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 140, 股數: 1000, 策略: '基礎買入', 金額: 140000 },
@@ -30,9 +35,9 @@ const DEMO_DATA = [
   { 日期: '2020-03-20', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 270, 股數: 500, 策略: '金字塔_S1', 金額: 135000 },
   { 日期: '2021-05-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 550, 股數: 200, 策略: 'K值超賣', 金額: 110000 },
   { 日期: '2022-01-10', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 600, 股數: 100, 策略: '金字塔_S2', 金額: 60000 },
-  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 }, // ETF
+  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 },
   { 日期: '2022-10-25', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 100, 股數: 1000, 策略: 'MA120有撐', 金額: 100000 },
-  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 }, // Bond
+  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 },
   { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 30, 股數: 10000, 策略: '基礎買入', 金額: 300000 },
 ];
 
@@ -56,9 +61,9 @@ const AVAILABLE_MODELS = [
   { id: 'gemini-2.5-flash-preview-09-2025', name: 'Gemini 2.5 Flash Preview (最新預覽)' },
 ];
 
-const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value);
-const formatPercent = (value) => `${(value * 100).toFixed(2)}%`;
-const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : value;
+const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
+const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
+const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : (value || '0.00');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const renderShape = (shape, cx, cy, color, size = 6) => {
@@ -85,14 +90,13 @@ const CustomStrategyDot = (props) => {
 // 智慧資產類型偵測
 const detectAssetType = (symbol, name, category) => {
   if (category === '債券' || name.includes('債')) return 'BOND';
-  // 台灣 ETF 通常以 00 開頭，或名稱包含 ETF/基金
   if (category === '股票') {
     if (symbol.startsWith('00') || name.toUpperCase().includes('ETF') || name.includes('基金')) {
       return 'ETF';
     }
     return 'STOCK';
   }
-  return 'STOCK'; // Default
+  return 'STOCK'; 
 };
 
 // --- Proxy Fetch Helper ---
@@ -223,19 +227,68 @@ const Dashboard = () => {
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
   const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
 
+  // Fee Settings
+  const [feeDiscount, setFeeDiscount] = useState(1); // 1 = no discount, 0.6 = 6折
+
   // Functions defined INSIDE component
   const processData = (data, pricesMap) => {
     const enrichedData = data.map((item, index) => {
-      const shares = parseFloat(item['股數']);
-      const buyPrice = parseFloat(item['價格']);
-      const costBasis = parseFloat(item['金額']);
+      const shares = parseFloat(item['股數']) || 0;
+      const buyPrice = parseFloat(item['價格']) || 0;
+      const costBasis = parseFloat(item['金額']) || 0;
       const symbol = item['標的'];
       const category = item['類別'];
+      const name = item['名稱'] || '';
+
       let currentPrice = category === '定存' ? buyPrice : (pricesMap?.[symbol] || buyPrice);
       const marketValue = shares * currentPrice;
-      const profitLoss = marketValue - costBasis;
-      const roi = costBasis > 0 ? profitLoss / costBasis : 0;
-      return { ...item, id: index, shares, buyPrice, currentPrice, costBasis, marketValue, profitLoss, roi, isRealData: !!(pricesMap?.[symbol]) };
+      
+      // Net Profit Calculation
+      // 1. Handling Fee: 0.1425% * Discount
+      // Usually min 20 TWD, but we simplify for aggregation
+      const estimateFee = Math.round(marketValue * 0.001425 * feeDiscount);
+      
+      // 2. Tax Calculation
+      // ETF: 0.1%, Stock: 0.3%, Bond: 0%
+      const assetType = detectAssetType(symbol, name, category);
+      let taxRate = 0.003; // Default Stock
+      if (assetType === 'ETF') taxRate = 0.001;
+      else if (assetType === 'BOND') taxRate = 0;
+      
+      // Fix for "定存" category -> No tax/fee usually, or handled differently. 
+      // Assuming '定存' (Cash) has no transaction tax/fee for valuation purposes in this context
+      if (category === '定存') {
+         taxRate = 0;
+      }
+      
+      // Apply tax only if not '定存' (Cash usually 0 fee/tax in this view)
+      // Actually, standard logic:
+      const estimateTax = category === '定存' ? 0 : Math.round(marketValue * taxRate);
+      const feeFinal = category === '定存' ? 0 : estimateFee;
+
+      // Gross Profit (Book Value)
+      const grossProfit = marketValue - costBasis;
+      
+      // Net Profit (Realized Estimate)
+      const netProfit = grossProfit - feeFinal - estimateTax;
+
+      const roi = costBasis > 0 ? netProfit / costBasis : 0; // ROI based on Net Profit
+
+      return { 
+        ...item, 
+        id: index, 
+        shares, 
+        buyPrice, 
+        currentPrice, 
+        costBasis, 
+        marketValue, 
+        profitLoss: netProfit, // Main display uses Net
+        grossProfit,           // Keep for tooltip
+        estimateFee: feeFinal,
+        estimateTax,
+        roi, 
+        isRealData: !!(pricesMap?.[symbol]) 
+      };
     });
     setPortfolioData(enrichedData);
     setRawData(data);
@@ -294,7 +347,6 @@ const Dashboard = () => {
     processData(data, newPrices);
   };
 
-  // AI 呼叫核心
   const callGeminiWithFallback = async (prompt) => {
     if (!geminiApiKey) {
       const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
@@ -372,7 +424,8 @@ const Dashboard = () => {
     try {
       const text = await callGeminiWithFallback(prompt);
       setAiSummary(text);
-      setAnalysisSymbol(symbol); 
+      setAnalysisSymbol(symbol);
+      updateAiCache(symbol, 'summary', text); 
     } catch (err) {
       setAiSummary(err.message || "分析暫時無法使用。");
       setAnalysisSymbol(symbol); 
@@ -391,8 +444,7 @@ const Dashboard = () => {
     setIsDetailExpanded(true); 
 
     const latest = chartData[chartData.length - 1];
-    const assetInfo = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol);
-    const stockName = assetInfo?.['名稱'] || selectedHistorySymbol;
+    const stockName = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱'] || selectedHistorySymbol;
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(selectedHistorySymbol, stockName, category);
     
@@ -440,6 +492,7 @@ const Dashboard = () => {
     try {
       const text = await callGeminiWithFallback(prompt);
       setAiDetail(text);
+      updateAiCache(selectedHistorySymbol, 'detail', text); 
     } catch (err) {
       setAiDetail(err.message || "詳細分析生成失敗，請稍後再試。");
     } finally {
@@ -447,50 +500,41 @@ const Dashboard = () => {
     }
   };
 
+  // Cache & Fetch
+  const getAiCache = () => { try { return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}'); } catch { return {}; } };
+  const updateAiCache = (symbol, type, content) => {
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    const existing = cache[symbol] || {};
+    let newEntry = existing.date === today ? { ...existing, [type]: content } : { date: today, [type]: content };
+    const newCache = { ...cache, [symbol]: newEntry };
+    localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
+  };
+
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
-
-    setHistoryLoading(true);
-    setHistoryError(null);
-    
-    setAnalysisSymbol(null); 
-    
-    setAiSummary(null);
-    setAiDetail(null);
-    setIsDetailExpanded(false);
-
+    setHistoryLoading(true); setHistoryError(null); setAnalysisSymbol(null); setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false);
     try {
       let range = '5y'; let interval = '1wk';
       if (tf === '1y_1d') { range = '2y'; interval = '1d'; } 
       if (tf === '10y_1mo') { range = '10y'; interval = '1mo'; }
       if (tf === '5y_1wk') { range = '5y'; interval = '1wk'; }
-
       const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
       const result = await fetchWithProxyFallback(targetUrl);
       const chartData = result?.chart?.result?.[0];
-      
       if (chartData && chartData.timestamp) {
         const timestamps = chartData.timestamp;
         const quote = chartData.indicators.quote[0];
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
-        
-        // 嘗試自動生成摘要 (若已設定 Key)
-        if (geminiApiKey) {
-          generateSummary(symbol, processedData);
-        } else {
-          setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
-        }
-      } else {
-        throw new Error('No chart data found');
-      }
+        if (geminiApiKey) generateSummary(symbol, processedData);
+        else setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
+      } else { throw new Error('No chart data found'); }
     } catch (err) {
       console.warn(`無法取得 ${symbol} 的歷史數據:`, err);
       setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。");
-    } finally {
-      setHistoryLoading(false);
-    }
+    } finally { setHistoryLoading(false); }
   };
 
   const performFetch = async (url) => {
@@ -515,11 +559,15 @@ const Dashboard = () => {
 
   const handleFetchButton = () => { if (!sheetUrl) { alert("請輸入 URL"); return; } performFetch(sheetUrl); };
   
-  // Corrected Function Name
   const handleSaveSettings = () => {
     localStorage.setItem('gemini_api_key', geminiApiKey);
-    localStorage.setItem('gemini_model', selectedModel); // Save model
+    localStorage.setItem('gemini_model', selectedModel);
+    localStorage.setItem('fee_discount', feeDiscount);
     alert("設定已儲存！");
+    // Trigger recalculation if data exists
+    if (rawData.length > 0) {
+      processData(rawData, realTimePrices);
+    }
   };
 
   const getResponsiveFontSize = (text) => {
@@ -536,8 +584,17 @@ const Dashboard = () => {
     const savedUrl = localStorage.getItem('investment_sheet_url');
     const savedKey = localStorage.getItem('gemini_api_key');
     const savedModel = localStorage.getItem('gemini_model');
+    const savedDiscount = localStorage.getItem('fee_discount');
+
     if (savedKey) setGeminiApiKey(savedKey);
     if (savedModel) setSelectedModel(savedModel);
+    if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount));
+
+    const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
+    let cacheModified = false;
+    Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } });
+    if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } 
     else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); const firstStock = DEMO_DATA.find(d => d['類別'] === '股票' || d['類別'] === '債券'); if (firstStock) setSelectedHistorySymbol(firstStock['標的']); }
@@ -548,29 +605,16 @@ const Dashboard = () => {
       const key = `${selectedHistorySymbol}_${timeframe}`;
       const hasData = !!historicalData[key];
       const isAnalysisOutdated = analysisSymbol !== selectedHistorySymbol;
-
-      if (isAnalysisOutdated && aiSummary && !isAiSummarizing) {
-         setAiSummary(null);
-         setAiDetail(null);
-         setIsDetailExpanded(false);
-      }
-
-      if (!hasData) {
-        if (!historyLoading) {
-           fetchHistoricalData(selectedHistorySymbol, timeframe);
-        }
-      } else {
-        if (isAnalysisOutdated && geminiApiKey && !isAiSummarizing) {
-           generateSummary(selectedHistorySymbol, historicalData[key]);
-        }
-      }
+      if (isAnalysisOutdated && aiSummary && !isAiSummarizing) { setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false); }
+      if (!hasData) { if (!historyLoading) fetchHistoricalData(selectedHistorySymbol, timeframe); } 
+      else { if (isAnalysisOutdated && geminiApiKey && !isAiSummarizing) generateSummary(selectedHistorySymbol, historicalData[key]); }
     }
   }, [activeTab, selectedHistorySymbol, timeframe, historicalData, analysisSymbol, geminiApiKey, isAiSummarizing, historyLoading, aiSummary]);
 
   const summary = useMemo(() => {
     const totalCost = portfolioData.reduce((sum, item) => sum + item.costBasis, 0);
     const totalValue = portfolioData.reduce((sum, item) => sum + item.marketValue, 0);
-    const totalPL = totalValue - totalCost;
+    const totalPL = portfolioData.reduce((sum, item) => sum + item.profitLoss, 0); // Sum of NET profit
     const totalROI = totalCost > 0 ? totalPL / totalCost : 0;
     return { totalCost, totalValue, totalPL, totalROI };
   }, [portfolioData]);
@@ -586,15 +630,18 @@ const Dashboard = () => {
     const map = new Map();
     portfolioData.forEach(item => {
       const key = item['標的'];
-      if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, marketValue: 0, dates: new Set() }); }
+      if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, marketValue: 0, profitLoss: 0, estimateFee: 0, estimateTax: 0, dates: new Set() }); }
       const entry = map.get(key);
-      entry.shares += item.shares; entry.costBasis += item.costBasis; entry.marketValue += item.marketValue; entry.dates.add(item['日期']);
+      entry.shares += item.shares; entry.costBasis += item.costBasis; entry.marketValue += item.marketValue; 
+      entry.profitLoss += item.profitLoss; // Accumulate NET profit
+      entry.estimateFee += item.estimateFee;
+      entry.estimateTax += item.estimateTax;
+      entry.dates.add(item['日期']);
       if (item.currentPrice !== item.buyPrice) entry.currentPrice = item.currentPrice;
     });
     return Array.from(map.values()).map(item => {
-      const profitLoss = item.marketValue - item.costBasis;
-      const roi = item.costBasis > 0 ? profitLoss / item.costBasis : 0;
-      return { ...item, buyPrice: item.shares > 0 ? item.costBasis / item.shares : 0, profitLoss, roi, dates: Array.from(item.dates).sort().slice(-1)[0] };
+      const roi = item.costBasis > 0 ? item.profitLoss / item.costBasis : 0;
+      return { ...item, buyPrice: item.shares > 0 ? item.costBasis / item.shares : 0, roi, dates: Array.from(item.dates).sort().slice(-1)[0] };
     });
   }, [portfolioData]);
 
@@ -707,7 +754,7 @@ const Dashboard = () => {
           {[
             { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' },
             { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' },
-            { label: '未實現損益', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' },
+            { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' },
             { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' }
           ].map((item, idx) => {
             const fontSizeClass = getResponsiveFontSize(item.value);
@@ -796,6 +843,7 @@ const Dashboard = () => {
               <button onClick={() => fetchRealTimePrices(rawData)} className="text-xs flex items-center text-blue-400 hover:text-blue-300 transition-colors"><RefreshCw className={`w-3 h-3 mr-1 ${priceLoading ? 'animate-spin' : ''}`} />{priceLoading ? '更新中...' : '立即更新股價'}</button>
             </div>
 
+            {/* Mobile Card View */}
             <div className="block md:hidden space-y-4">
               <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex items-center space-x-2 overflow-x-auto">
                 <span className="text-xs text-slate-400 whitespace-nowrap">排序依據:</span>
@@ -821,8 +869,8 @@ const Dashboard = () => {
                   </div>
                   
                   <div className="grid grid-cols-2 gap-4 text-sm mb-3">
-                    <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{row.currentPrice.toFixed(2)}</span></div>
-                    <div><span className="text-slate-500 block text-xs">成本</span><span className="text-slate-300">{row.buyPrice.toFixed(2)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{formatPrice(row.currentPrice)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">成本</span><span className="text-slate-300">{formatPrice(row.buyPrice)}</span></div>
                     <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
                     <div><span className="text-slate-500 block text-xs">股數</span><span className="text-slate-300">{row.shares.toLocaleString()}</span></div>
                   </div>
@@ -835,13 +883,14 @@ const Dashboard = () => {
               ))}
             </div>
 
-            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
-              <div className="overflow-x-auto">
+            {/* Desktop Table View */}
+            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> {/* Removed overflow-hidden from container */}
+              <div className="overflow-x-auto"> {/* Scroll is handled here */}
                 <table className="min-w-full divide-y divide-slate-700">
                   <thead className="bg-slate-900/50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider w-20">排序</th>
-                      {[ { label: '標的代號', key: '標的' }, { label: '名稱/類別', key: '類別' }, { label: '平均成本', key: 'buyPrice' }, { label: 'Yahoo即時價', key: 'currentPrice' }, { label: '總股數', key: 'shares' }, { label: '總損益', key: 'profitLoss' }, { label: '報酬率', key: 'roi' } ].map(header => (
+                      {[ { label: '標的代號', key: '標的' }, { label: '名稱/類別', key: '類別' }, { label: '平均成本', key: 'buyPrice' }, { label: 'Yahoo即時價', key: 'currentPrice' }, { label: '總股數', key: 'shares' }, { label: '總損益 (淨)', key: 'profitLoss' }, { label: '報酬率 (淨)', key: 'roi' } ].map(header => (
                         <th key={header.key} onClick={() => requestSort(header.key)} className={`px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider cursor-pointer hover:text-white transition-colors group ${header.label.includes('代號') || header.label.includes('名稱') ? 'text-left' : 'text-right'}`}><div className={`flex items-center ${header.label.includes('代號') || header.label.includes('名稱') ? 'justify-start' : 'justify-end'}`}>{header.label}<SortIcon columnKey={header.key} /></div></th>
                       ))}
                     </tr>
@@ -852,12 +901,22 @@ const Dashboard = () => {
                         <td className="px-6 py-4 whitespace-nowrap"><div className="flex flex-col space-y-1">{index > 0 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], -1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowUp className="w-3 h-3" /></button>}{index < sortedHoldings.length - 1 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], 1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowDown className="w-3 h-3" /></button>}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-white font-medium flex items-center">{row['標的']}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}</div><div className="text-xs text-slate-500">最近交易: {row['日期']}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-slate-200">{row['名稱']}</div><span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mt-1 ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : row['類別'] === '債券' ? 'bg-purple-900 text-purple-200' : 'bg-green-900 text-green-200'}`}>{row['類別']}</span></td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.buyPrice.toFixed(2)}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{row.currentPrice.toFixed(2)}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{formatPrice(row.buyPrice)}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{formatPrice(row.currentPrice)}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.shares.toLocaleString()}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold relative group">
                           <span className={`cursor-help border-b border-dotted ${row.profitLoss >= 0 ? 'text-red-500 border-red-500' : 'text-green-500 border-green-500'}`}>{row.profitLoss > 0 ? '+' : ''}{formatCurrency(row.profitLoss)}</span>
-                          <div className={`absolute right-0 z-50 w-48 p-3 bg-slate-700 border border-slate-600 rounded-lg shadow-xl text-left pointer-events-none hidden group-hover:block ${index < 2 ? 'top-full mt-2' : 'bottom-full mb-2'}`}><div className="text-xs text-slate-400 mb-1">損益詳情</div><div className="flex justify-between text-xs mb-1"><span className="text-slate-300">總成本:</span><span className="text-white font-medium">{formatCurrency(row.costBasis)}</span></div><div className="flex justify-between text-xs"><span className="text-slate-300">總市值:</span><span className="text-yellow-400 font-medium">{formatCurrency(row.marketValue)}</span></div><div className={`absolute right-4 border-4 border-transparent ${index < 2 ? 'bottom-full -mb-1 border-b-slate-600' : 'top-full -mt-1 border-t-slate-600'}`}></div></div>
+                          <div className={`absolute right-0 z-50 w-56 p-3 bg-slate-700 border border-slate-600 rounded-lg shadow-xl text-left pointer-events-none hidden group-hover:block ${index < 2 ? 'top-full mt-2' : 'bottom-full mb-2'}`}>
+                            <div className="text-xs text-slate-400 mb-2 font-semibold border-b border-slate-600 pb-1">損益結構 (Net P/L)</div>
+                            <div className="space-y-1">
+                                <div className="flex justify-between text-xs"><span className="text-slate-300">總成本:</span><span className="text-white font-medium">{formatCurrency(row.costBasis)}</span></div>
+                                <div className="flex justify-between text-xs"><span className="text-slate-300">總市值:</span><span className="text-yellow-400 font-medium">{formatCurrency(row.marketValue)}</span></div>
+                                <div className="flex justify-between text-xs pt-1 border-t border-slate-600/50"><span className="text-slate-400">帳面損益:</span><span className={row.grossProfit >= 0 ? 'text-red-300' : 'text-green-300'}>{formatCurrency(row.grossProfit)}</span></div>
+                                <div className="flex justify-between text-xs"><span className="text-slate-400">預估手續費:</span><span className="text-slate-300">-{formatCurrency(row.estimateFee)}</span></div>
+                                <div className="flex justify-between text-xs"><span className="text-slate-400">預估稅金:</span><span className="text-slate-300">-{formatCurrency(row.estimateTax)}</span></div>
+                            </div>
+                            <div className={`absolute right-4 border-4 border-transparent ${index < 2 ? 'bottom-full -mb-1 border-b-slate-600' : 'top-full -mt-1 border-t-slate-600'}`}></div>
+                          </div>
                         </td>
                         <td className={`px-6 py-4 whitespace-nowrap text-right text-sm font-bold ${row.roi >= 0 ? 'text-red-500' : 'text-green-500'}`}>{formatPercent(row.roi)}</td>
                       </tr>
@@ -875,6 +934,15 @@ const Dashboard = () => {
             <div className="space-y-4">
               <div><label className="block text-sm font-medium text-slate-300 mb-2">Google Sheets CSV 連結</label><div className="flex rounded-md shadow-sm"><input type="text" value={sheetUrl} onChange={(e) => setSheetUrl(e.target.value)} placeholder="https://docs.google.com/spreadsheets/d/.../pub?output=csv" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" /></div></div>
               
+              <div className="pt-4 border-t border-slate-700">
+                <h4 className="text-sm font-semibold text-slate-300 mb-4 flex items-center"><Calculator className="w-4 h-4 mr-2" /> 交易成本設定</h4>
+                <div>
+                   <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
+                   <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
+                   <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
+                </div>
+              </div>
+
               <div className="pt-4 border-t border-slate-700">
                 <label className="block text-sm font-medium text-slate-300 mb-2">Google Gemini API Key (AI 分析用)</label>
                 <div className="flex gap-2">
