@@ -11,15 +11,16 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v11.1 (Syntax Fix):
+ * 專業理財經理人技術筆記 (Technical Note) v11.2 (Scope Fix):
  * * [嚴重錯誤修復] 
- * 1. 修復 "getAiCache has already been declared"：
- * - 將 `getAiCache`、`updateAiCache` 與 `getTodayDate` 移至 Dashboard 元件外部，確保全域唯一且不會在 Render 時重複宣告。
- * 2. 清理 Git 衝突標記：
- * - 移除所有可能的 `<<<<<<<`, `=======`, `>>>>>>>` 標記，確保程式碼結構完整。
+ * 1. ReferenceError 修復：
+ * - 將 `getAiCache`, `updateAiCache`, `getTodayDate` 移至 Component 外部。
+ * - 確保這些 Helper 函式在 Component 渲染前就已定義，解決作用域 (Scope) 問題。
+ * 2. React Child Error 防護：
+ * - 在 `CustomStrategyDot` 加入 `payload` 的安全檢查，防止因數據尚未載入完全時導致渲染錯誤。
  */
 
-// --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
+// --- 靜態配置 ---
 
 const DEMO_DATA = [
   { 日期: '2015-01-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 140, 股數: 1000, 策略: '基礎買入', 金額: 140000 },
@@ -27,9 +28,9 @@ const DEMO_DATA = [
   { 日期: '2020-03-20', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 270, 股數: 500, 策略: '金字塔_S1', 金額: 135000 },
   { 日期: '2021-05-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 550, 股數: 200, 策略: 'K值超賣', 金額: 110000 },
   { 日期: '2022-01-10', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 600, 股數: 100, 策略: '金字塔_S2', 金額: 60000 },
-  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 }, // ETF
+  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 },
   { 日期: '2022-10-25', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 100, 股數: 1000, 策略: 'MA120有撐', 金額: 100000 },
-  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 }, // Bond
+  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 },
   { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 30, 股數: 10000, 策略: '基礎買入', 金額: 300000 },
 ];
 
@@ -53,46 +54,16 @@ const AVAILABLE_MODELS = [
   { id: 'gemini-2.5-flash-preview-09-2025', name: 'Gemini 2.5 Flash Preview (最新預覽)' },
 ];
 
+// --- 輔助函式 (Global Scope) ---
+
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
 const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
 const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : (value || '0.00');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// *** Moved these functions OUTSIDE the component to fix ReferenceError ***
 const getTodayDate = () => new Date().toISOString().split('T')[0];
 
-const renderShape = (shape, cx, cy, color, size = 6) => {
-  const stroke = "#fff";
-  const strokeWidth = 1.5;
-  switch (shape) {
-    case 'circle': return <circle cx={cx} cy={cy} r={size} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
-    case 'triangle': return <path d={`M${cx},${cy-size} L${cx+size},${cy+size*0.8} L${cx-size},${cy+size*0.8} Z`} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
-    case 'diamond': return <path d={`M${cx},${cy-size} L${cx+size},${cy} L${cx},${cy+size} L${cx-size},${cy} Z`} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
-    case 'star': const s = size * 1.2; return <path d={`M${cx},${cy-s} L${cx+s*0.3},${cy-s*0.3} L${cx+s},${cy-s*0.3} L${cx+s*0.5},${cy+s*0.2} L${cx+s*0.7},${cy+s} L${cx},${cy+s*0.5} L${cx-s*0.7},${cy+s} L${cx-s*0.5},${cy+s*0.2} L${cx-s},${cy-s*0.3} L${cx-s*0.3},${cy-s*0.3} Z`} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
-    case 'square': return <rect x={cx-size} y={cy-size} width={size*2} height={size*2} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
-    default: return <g stroke={color} strokeWidth={2}><line x1={cx-size} y1={cy-size} x2={cx+size} y2={cy+size} /><line x1={cx-size} y1={cy+size} x2={cx+size} y2={cy-size} /></g>;
-  }
-};
-
-const CustomStrategyDot = (props) => {
-  const { cx, cy, payload } = props;
-  if (!payload.buyAction) return null;
-  const strategy = payload.buyAction['策略'];
-  const config = STRATEGY_CONFIG[strategy] || STRATEGY_CONFIG['default'];
-  return renderShape(config.shape, cx, cy, config.color, 6);
-};
-
-// 智慧資產類型偵測
-const detectAssetType = (symbol, name, category) => {
-  if (category === '債券' || name.includes('債')) return 'BOND';
-  if (category === '股票') {
-    if (symbol.startsWith('00') || name.toUpperCase().includes('ETF') || name.includes('基金')) {
-      return 'ETF';
-    }
-    return 'STOCK';
-  }
-  return 'STOCK'; 
-};
-
-// Cache Helper Functions
 const getAiCache = () => {
   try {
     return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}');
@@ -117,7 +88,39 @@ const updateAiCache = (symbol, type, content) => {
   localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
 };
 
-// --- Proxy Fetch Helper ---
+const renderShape = (shape, cx, cy, color, size = 6) => {
+  const stroke = "#fff";
+  const strokeWidth = 1.5;
+  switch (shape) {
+    case 'circle': return <circle cx={cx} cy={cy} r={size} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
+    case 'triangle': return <path d={`M${cx},${cy-size} L${cx+size},${cy+size*0.8} L${cx-size},${cy+size*0.8} Z`} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
+    case 'diamond': return <path d={`M${cx},${cy-size} L${cx+size},${cy} L${cx},${cy+size} L${cx-size},${cy} Z`} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
+    case 'star': const s = size * 1.2; return <path d={`M${cx},${cy-s} L${cx+s*0.3},${cy-s*0.3} L${cx+s},${cy-s*0.3} L${cx+s*0.5},${cy+s*0.2} L${cx+s*0.7},${cy+s} L${cx},${cy+s*0.5} L${cx-s*0.7},${cy+s} L${cx-s*0.5},${cy+s*0.2} L${cx-s},${cy-s*0.3} L${cx-s*0.3},${cy-s*0.3} Z`} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
+    case 'square': return <rect x={cx-size} y={cy-size} width={size*2} height={size*2} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
+    default: return <g stroke={color} strokeWidth={2}><line x1={cx-size} y1={cy-size} x2={cx+size} y2={cy+size} /><line x1={cx-size} y1={cy+size} x2={cx+size} y2={cy-size} /></g>;
+  }
+};
+
+const CustomStrategyDot = (props) => {
+  const { cx, cy, payload } = props;
+  // Added safety check for payload
+  if (!payload || !payload.buyAction) return null;
+  const strategy = payload.buyAction['策略'];
+  const config = STRATEGY_CONFIG[strategy] || STRATEGY_CONFIG['default'];
+  return renderShape(config.shape, cx, cy, config.color, 6);
+};
+
+const detectAssetType = (symbol, name, category) => {
+  if (category === '債券' || name.includes('債')) return 'BOND';
+  if (category === '股票') {
+    if (symbol.startsWith('00') || name.toUpperCase().includes('ETF') || name.includes('基金')) {
+      return 'ETF';
+    }
+    return 'STOCK';
+  }
+  return 'STOCK'; 
+};
+
 const fetchWithProxyFallback = async (targetUrl) => {
   const proxies = [
     (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
@@ -136,7 +139,6 @@ const fetchWithProxyFallback = async (targetUrl) => {
   throw new Error('All proxies failed');
 };
 
-// --- 技術指標計算 ---
 const calculateSMA = (data, period) => {
   return data.map((item, index, arr) => {
     if (index < period - 1) return { ...item, [`MA${period}`]: null };
@@ -210,7 +212,7 @@ const loadPapaParse = () => {
   });
 };
 
-// --- 主要元件 (Defined INSIDE component) ---
+// --- 主要元件 ---
 
 const Dashboard = () => {
   const [sheetUrl, setSheetUrl] = useState('');
@@ -248,7 +250,6 @@ const Dashboard = () => {
   // Fee Settings
   const [feeDiscount, setFeeDiscount] = useState(1); // 1 = no discount
 
-  // Functions defined INSIDE component
   const processData = (data, pricesMap) => {
     const enrichedData = data.map((item, index) => {
       const shares = parseFloat(item['股數']) || 0;
@@ -531,7 +532,9 @@ const Dashboard = () => {
 
     setHistoryLoading(true);
     setHistoryError(null);
+    
     setAnalysisSymbol(null); 
+    
     setAiSummary(null);
     setAiDetail(null);
     setIsDetailExpanded(false);
@@ -886,7 +889,7 @@ const Dashboard = () => {
                     <div>
                       <div className="flex items-center space-x-2">
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : row['類別'] === '債券' ? 'bg-purple-900 text-purple-200' : 'bg-green-900 text-green-200'}`}>{row['類別']}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : 'bg-purple-900 text-purple-200'}`}>{row['類別']}</span>
                       </div>
                       <div className="text-sm text-slate-400 mt-1">{row['名稱']}</div>
                     </div>
@@ -912,7 +915,7 @@ const Dashboard = () => {
             </div>
 
             <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> {/* Removed overflow-hidden */}
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto"> {/* Scroll is handled here */}
                 <table className="min-w-full divide-y divide-slate-700">
                   <thead className="bg-slate-900/50">
                     <tr>
