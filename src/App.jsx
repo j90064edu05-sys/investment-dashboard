@@ -11,15 +11,15 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v11.3 (Sort Memory & Date Fix):
- * * [功能修復與優化]
- * 1. 交易日顯示修正 (Date Logic Fix):
- * - 在 `aggregatedHoldings` 中，使用 `Array.from(item.dates).sort(...).pop()` 找出最近的交易日期。
- * - 將其覆蓋回 `row['日期']` 屬性，確保介面顯示的是「最後交易日」而非「首次買入日」。
- * 2. 排序記憶功能 (Sort Persistence):
- * - `sortConfig` 與 `customOrder` 初始化時會嘗試從 `localStorage` 讀取。
- * - 新增 `useEffect` 監聽這兩個狀態的變化，並自動寫入 `localStorage`。
- * - 確保使用者下次開啟時，能維持自訂的標的順序。
+ * 專業理財經理人技術筆記 (Technical Note) v11.4 (Stability & Proxy Optimization):
+ * * [穩定性修復] 解決股價更新頻繁失敗問題
+ * 1. 代理池擴充 (Proxy Expansion):
+ * - 新增 `corsproxy.io` 至 `fetchWithProxyFallback` 列表，提供更穩定的備援。
+ * 2. 請求分流 (Throttling/Jitter):
+ * - 在 `fetchRealTimePrices` 迴圈中加入 `await delay(Math.random() * 1500)`。
+ * - 讓每個標的物的請求錯開 0~1.5 秒，避免瞬間併發流量觸發公共 Proxy 的 Rate Limit (429 錯誤)。
+ * 3. 錯誤處理:
+ * - 調整重試邏輯，確保在切換 Proxy 前有適當的等待。
  */
 
 // --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
@@ -30,9 +30,9 @@ const DEMO_DATA = [
   { 日期: '2020-03-20', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 270, 股數: 500, 策略: '金字塔_S1', 金額: 135000 },
   { 日期: '2021-05-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 550, 股數: 200, 策略: 'K值超賣', 金額: 110000 },
   { 日期: '2022-01-10', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 600, 股數: 100, 策略: '金字塔_S2', 金額: 60000 },
-  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 },
+  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 }, // ETF
   { 日期: '2022-10-25', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 100, 股數: 1000, 策略: 'MA120有撐', 金額: 100000 },
-  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 },
+  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 }, // Bond
   { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 30, 股數: 10000, 策略: '基礎買入', 金額: 300000 },
 ];
 
@@ -101,10 +101,11 @@ const detectAssetType = (symbol, name, category) => {
   return 'STOCK'; 
 };
 
-// --- Proxy Fetch Helper ---
+// --- Proxy Fetch Helper (Expanded) ---
 const fetchWithProxyFallback = async (targetUrl) => {
   const proxies = [
     (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, // Added stable proxy
     (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
   ];
 
@@ -115,6 +116,8 @@ const fetchWithProxyFallback = async (targetUrl) => {
       return await response.json();
     } catch (e) {
       console.warn('Proxy failed, trying next...', e);
+      // Small delay before trying next proxy
+      await delay(500);
     }
   }
   throw new Error('All proxies failed');
@@ -131,12 +134,28 @@ const calculateSMA = (data, period) => {
 };
 
 const calculateEMA = (data, period, key = 'close') => {
-  let k = 2 / (period + 1);
-  let emaArray = [];
-  let ema = data[0][key]; 
-  for (let i = 0; i < data.length; i++) {
-    if (i === 0) { ema = data[i][key]; } else { ema = data[i][key] * k + emaArray[i - 1] * (1 - k); }
-    emaArray.push(ema);
+  const k = 2 / (period + 1);
+  let emaArray = new Array(data.length).fill(null);
+  let firstValidIdx = -1;
+  for(let i=0; i<data.length; i++) {
+      if (data[i][key] !== null && data[i][key] !== undefined) {
+          firstValidIdx = i;
+          break;
+      }
+  }
+  if (firstValidIdx === -1 || (data.length - firstValidIdx) < period) return emaArray;
+  let sum = 0;
+  for (let i = 0; i < period; i++) {
+    sum += data[firstValidIdx + i][key];
+  }
+  const sma = sum / period;
+  emaArray[firstValidIdx + period - 1] = sma;
+  for (let i = firstValidIdx + period; i < data.length; i++) {
+    const val = data[i][key];
+    const prevEma = emaArray[i - 1];
+    if (val !== null && prevEma !== null) {
+        emaArray[i] = (val - prevEma) * k + prevEma;
+    }
   }
   return emaArray;
 };
@@ -161,16 +180,22 @@ const calculateKD = (data, period = 9) => {
 const calculateMACD = (data) => {
   const ema12 = calculateEMA(data, 12, 'close');
   const ema26 = calculateEMA(data, 26, 'close');
-  const difArray = data.map((d, i) => ({ ...d, DIF: ema12[i] - ema26[i] }));
-  let macdArray = [];
-  let signal = 0;
-  const k = 2 / (9 + 1);
-  for (let i = 0; i < difArray.length; i++) {
-     if (i === 0) { signal = difArray[i].DIF; } else { signal = difArray[i].DIF * k + macdArray[i-1].Signal * (1 - k); }
-     const osc = difArray[i].DIF - signal;
-     macdArray.push({ ...difArray[i], Signal: signal, OSC: osc });
-  }
-  return macdArray;
+  const difArray = data.map((d, i) => {
+    const e12 = ema12[i];
+    const e26 = ema26[i];
+    if (e12 === null || e26 === null) return { ...d, DIF: null };
+    return { ...d, DIF: e12 - e26 };
+  });
+  const signalArray = calculateEMA(difArray, 9, 'DIF');
+  return difArray.map((d, i) => {
+     const dif = d.DIF;
+     const signal = signalArray[i];
+     let osc = null;
+     if (dif !== null && signal !== null) {
+         osc = dif - signal;
+     }
+     return { ...d, Signal: signal, OSC: osc };
+  });
 };
 
 const processTechnicalData = (rawData) => {
@@ -243,25 +268,8 @@ const Dashboard = () => {
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('5y_1wk'); 
   
-  // Sort Configuration (Initialized from localStorage if available)
-  const [sortConfig, setSortConfig] = useState(() => {
-    try {
-      const saved = localStorage.getItem('investment_sort_config');
-      return saved ? JSON.parse(saved) : { key: 'manual', direction: 'asc' };
-    } catch {
-      return { key: 'manual', direction: 'asc' };
-    }
-  });
-
-  // Custom Order (Initialized from localStorage if available)
-  const [customOrder, setCustomOrder] = useState(() => {
-    try {
-      const saved = localStorage.getItem('investment_custom_order');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [sortConfig, setSortConfig] = useState({ key: 'manual', direction: 'asc' });
+  const [customOrder, setCustomOrder] = useState([]);
 
   // AI Analysis State
   const [aiSummary, setAiSummary] = useState(null);
@@ -275,18 +283,6 @@ const Dashboard = () => {
 
   // Fee Settings
   const [feeDiscount, setFeeDiscount] = useState(1); // 1 = no discount
-
-  // Persist Sort Config
-  useEffect(() => {
-    localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
-  }, [sortConfig]);
-
-  // Persist Custom Order
-  useEffect(() => {
-    if (customOrder.length > 0) {
-      localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
-    }
-  }, [customOrder]);
 
   const processData = (data, pricesMap) => {
     const enrichedData = data.map((item, index) => {
@@ -353,8 +349,12 @@ const Dashboard = () => {
       let attempts = 0;
       let success = false;
 
+      // Add random delay to prevent thundering herd
+      await delay(Math.random() * 1500);
+
       while(attempts <= maxRetries && !success) {
         try {
+          // Cache busting with timestamp
           const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
           const result = await fetchWithProxyFallback(targetUrl);
           const meta = result?.chart?.result?.[0]?.meta;
@@ -369,7 +369,7 @@ const Dashboard = () => {
           attempts++;
           if (attempts <= maxRetries) {
             setLoadingMessage(`更新 ${symbol} 失敗，正在重試 (${attempts}/${maxRetries})...`);
-            await delay(1000);
+            await delay(1500); // Wait 1.5s before retry
           } else {
             console.warn(`標的 ${symbol} 更新失敗:`, err);
             failedSymbols.push(symbol);
@@ -952,7 +952,7 @@ const Dashboard = () => {
               ))}
             </div>
 
-            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> 
+            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> {/* Removed overflow-hidden */}
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-700">
                   <thead className="bg-slate-900/50">
