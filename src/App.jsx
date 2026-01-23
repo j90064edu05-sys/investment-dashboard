@@ -11,16 +11,15 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v10.5 (Color Consistency):
- * * [視覺優化] 顏色一致性整合
- * 1. 建立 `CATEGORY_STYLES` 設定檔：
- * - 將「股票」、「債券」、「定存」的顏色定義集中管理。
- * - `color`: 用於 Recharts 圖表 (Hex Code)。
- * - `badge`: 用於 UI 標籤 (Tailwind Classes)。
- * 2. 應用範圍：
- * - 資產配置圓餅圖 (Pie Chart) -> 使用 `color`。
- * - 持股明細列表 (Table & Card) -> 使用 `badge`。
- * - 確保兩邊視覺體驗完全同步。
+ * 專業理財經理人技術筆記 (Technical Note) v11.3 (Sort Memory & Date Fix):
+ * * [功能修復與優化]
+ * 1. 交易日顯示修正 (Date Logic Fix):
+ * - 在 `aggregatedHoldings` 中，使用 `Array.from(item.dates).sort(...).pop()` 找出最近的交易日期。
+ * - 將其覆蓋回 `row['日期']` 屬性，確保介面顯示的是「最後交易日」而非「首次買入日」。
+ * 2. 排序記憶功能 (Sort Persistence):
+ * - `sortConfig` 與 `customOrder` 初始化時會嘗試從 `localStorage` 讀取。
+ * - 新增 `useEffect` 監聽這兩個狀態的變化，並自動寫入 `localStorage`。
+ * - 確保使用者下次開啟時，能維持自訂的標的順序。
  */
 
 // --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
@@ -37,15 +36,8 @@ const DEMO_DATA = [
   { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 30, 股數: 10000, 策略: '基礎買入', 金額: 300000 },
 ];
 
-// 色彩與樣式統一配置
-const CATEGORY_STYLES = {
-  '股票': { color: '#3B82F6', badge: 'bg-blue-900 text-blue-200' },       // Blue
-  '債券': { color: '#A855F7', badge: 'bg-purple-900 text-purple-200' },   // Purple
-  '定存': { color: '#22C55E', badge: 'bg-green-900 text-green-200' },     // Green
-  'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }   // Slate
-};
-
-const COLORS = ['#3B82F6', '#A855F7', '#22C55E', '#F59E0B', '#EF4444', '#EC4899', '#6366F1']; // Fallback colors
+const COLORS = ['#3B82F6', '#8B5CF6', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#6366F1'];
+const CATEGORY_COLORS = { '股票': '#3B82F6', '債券': '#8B5CF6', '定存': '#10B981' };
 
 const STRATEGY_CONFIG = {
   '基礎買入':     { color: '#EF4444', label: '基礎買入',     shape: 'circle' },
@@ -56,6 +48,14 @@ const STRATEGY_CONFIG = {
   'MA60有撐':     { color: '#8B5CF6', label: 'MA60有撐',     shape: 'star' },
   'MA120有撐':    { color: '#06B6D4', label: 'MA120有撐',    shape: 'square' },
   'default':      { color: '#64748B', label: '其他策略',     shape: 'cross' }
+};
+
+// 色彩與樣式統一配置
+const CATEGORY_STYLES = {
+  '股票': { color: '#3B82F6', badge: 'bg-blue-900 text-blue-200' },       // Blue
+  '債券': { color: '#A855F7', badge: 'bg-purple-900 text-purple-200' },   // Purple
+  '定存': { color: '#22C55E', badge: 'bg-green-900 text-green-200' },     // Green
+  'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }   // Slate
 };
 
 const AVAILABLE_MODELS = [
@@ -243,8 +243,25 @@ const Dashboard = () => {
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('5y_1wk'); 
   
-  const [sortConfig, setSortConfig] = useState({ key: 'manual', direction: 'asc' });
-  const [customOrder, setCustomOrder] = useState([]);
+  // Sort Configuration (Initialized from localStorage if available)
+  const [sortConfig, setSortConfig] = useState(() => {
+    try {
+      const saved = localStorage.getItem('investment_sort_config');
+      return saved ? JSON.parse(saved) : { key: 'manual', direction: 'asc' };
+    } catch {
+      return { key: 'manual', direction: 'asc' };
+    }
+  });
+
+  // Custom Order (Initialized from localStorage if available)
+  const [customOrder, setCustomOrder] = useState(() => {
+    try {
+      const saved = localStorage.getItem('investment_custom_order');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // AI Analysis State
   const [aiSummary, setAiSummary] = useState(null);
@@ -258,6 +275,18 @@ const Dashboard = () => {
 
   // Fee Settings
   const [feeDiscount, setFeeDiscount] = useState(1); // 1 = no discount
+
+  // Persist Sort Config
+  useEffect(() => {
+    localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
+  }, [sortConfig]);
+
+  // Persist Custom Order
+  useEffect(() => {
+    if (customOrder.length > 0) {
+      localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
+    }
+  }, [customOrder]);
 
   const processData = (data, pricesMap) => {
     const enrichedData = data.map((item, index) => {
@@ -680,7 +709,9 @@ const Dashboard = () => {
     });
     return Array.from(map.values()).map(item => {
       const roi = item.costBasis > 0 ? item.profitLoss / item.costBasis : 0;
-      return { ...item, buyPrice: item.shares > 0 ? item.costBasis / item.shares : 0, roi, dates: Array.from(item.dates).sort().slice(-1)[0] };
+      // Date Fix: Get the latest date (lexicographical sort works for ISO dates)
+      const latestDate = Array.from(item.dates).sort().pop();
+      return { ...item, buyPrice: item.shares > 0 ? item.costBasis / item.shares : 0, roi, '日期': latestDate };
     });
   }, [portfolioData]);
 
@@ -882,7 +913,6 @@ const Dashboard = () => {
               <button onClick={() => fetchRealTimePrices(rawData)} className="text-xs flex items-center text-blue-400 hover:text-blue-300 transition-colors"><RefreshCw className={`w-3 h-3 mr-1 ${priceLoading ? 'animate-spin' : ''}`} />{priceLoading ? '更新中...' : '立即更新股價'}</button>
             </div>
 
-            {/* Mobile Card View */}
             <div className="block md:hidden space-y-4">
               <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex items-center space-x-2 overflow-x-auto">
                 <span className="text-xs text-slate-400 whitespace-nowrap">排序依據:</span>
@@ -922,7 +952,6 @@ const Dashboard = () => {
               ))}
             </div>
 
-            {/* Desktop Table View */}
             <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> 
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-700">
