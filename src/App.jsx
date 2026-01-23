@@ -11,18 +11,17 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v11.4 (Stability & Proxy Optimization):
- * * [穩定性修復] 解決股價更新頻繁失敗問題
- * 1. 代理池擴充 (Proxy Expansion):
- * - 新增 `corsproxy.io` 至 `fetchWithProxyFallback` 列表，提供更穩定的備援。
- * 2. 請求分流 (Throttling/Jitter):
- * - 在 `fetchRealTimePrices` 迴圈中加入 `await delay(Math.random() * 1500)`。
- * - 讓每個標的物的請求錯開 0~1.5 秒，避免瞬間併發流量觸發公共 Proxy 的 Rate Limit (429 錯誤)。
- * 3. 錯誤處理:
- * - 調整重試邏輯，確保在切換 Proxy 前有適當的等待。
+ * 專業理財經理人技術筆記 (Technical Note) v11.5 (Sort & Date Fix):
+ * * [功能修復]
+ * 1. 交易日顯示邏輯修正 (Date Logic Fix):
+ * - 在 `aggregatedHoldings` 中，將日期字串轉為 `Date` 物件的時間戳記 (getTime) 進行數值排序。
+ * - 解決字串排序下 '2023/1/2' 被視為大於 '2023/1/10' 的錯誤。
+ * 2. 排序記憶強化 (Sort Persistence):
+ * - 優化 `useEffect` 同步邏輯：加入 `JSON.stringify` 比對，防止因物件參照不同而導致的無效更新與重置。
+ * - 確保 `customOrder` 在資料更新（如股價跳動）時能穩定維持，不會被重置。
  */
 
-// --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
+// --- 靜態配置與輔助函式 ---
 
 const DEMO_DATA = [
   { 日期: '2015-01-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 140, 股數: 1000, 策略: '基礎買入', 金額: 140000 },
@@ -30,9 +29,9 @@ const DEMO_DATA = [
   { 日期: '2020-03-20', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 270, 股數: 500, 策略: '金字塔_S1', 金額: 135000 },
   { 日期: '2021-05-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 550, 股數: 200, 策略: 'K值超賣', 金額: 110000 },
   { 日期: '2022-01-10', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 600, 股數: 100, 策略: '金字塔_S2', 金額: 60000 },
-  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 }, // ETF
+  { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 },
   { 日期: '2022-10-25', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 100, 股數: 1000, 策略: 'MA120有撐', 金額: 100000 },
-  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 }, // Bond
+  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 },
   { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 30, 股數: 10000, 策略: '基礎買入', 金額: 300000 },
 ];
 
@@ -50,12 +49,11 @@ const STRATEGY_CONFIG = {
   'default':      { color: '#64748B', label: '其他策略',     shape: 'cross' }
 };
 
-// 色彩與樣式統一配置
 const CATEGORY_STYLES = {
-  '股票': { color: '#3B82F6', badge: 'bg-blue-900 text-blue-200' },       // Blue
-  '債券': { color: '#A855F7', badge: 'bg-purple-900 text-purple-200' },   // Purple
-  '定存': { color: '#22C55E', badge: 'bg-green-900 text-green-200' },     // Green
-  'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }   // Slate
+  '股票': { color: '#3B82F6', badge: 'bg-blue-900 text-blue-200' },       
+  '債券': { color: '#A855F7', badge: 'bg-purple-900 text-purple-200' },   
+  '定存': { color: '#22C55E', badge: 'bg-green-900 text-green-200' },     
+  'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }   
 };
 
 const AVAILABLE_MODELS = [
@@ -68,6 +66,17 @@ const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'curre
 const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
 const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : (value || '0.00');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const getTodayDate = () => new Date().toISOString().split('T')[0];
+
+const getAiCache = () => { try { return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}'); } catch { return {}; } };
+const updateAiCache = (symbol, type, content) => {
+  const today = getTodayDate();
+  const cache = getAiCache();
+  const existing = cache[symbol] || {};
+  let newEntry = existing.date === today ? { ...existing, [type]: content } : { date: today, [type]: content };
+  const newCache = { ...cache, [symbol]: newEntry };
+  localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
+};
 
 const renderShape = (shape, cx, cy, color, size = 6) => {
   const stroke = "#fff";
@@ -93,37 +102,28 @@ const CustomStrategyDot = (props) => {
 const detectAssetType = (symbol, name, category) => {
   if (category === '債券' || name.includes('債')) return 'BOND';
   if (category === '股票') {
-    if (symbol.startsWith('00') || name.toUpperCase().includes('ETF') || name.includes('基金')) {
-      return 'ETF';
-    }
+    if (symbol.startsWith('00') || name.toUpperCase().includes('ETF') || name.includes('基金')) { return 'ETF'; }
     return 'STOCK';
   }
   return 'STOCK'; 
 };
 
-// --- Proxy Fetch Helper (Expanded) ---
 const fetchWithProxyFallback = async (targetUrl) => {
   const proxies = [
     (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, // Added stable proxy
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
     (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
   ];
-
   for (const proxyGen of proxies) {
     try {
       const response = await fetch(proxyGen(targetUrl));
       if (!response.ok) throw new Error('Proxy error');
       return await response.json();
-    } catch (e) {
-      console.warn('Proxy failed, trying next...', e);
-      // Small delay before trying next proxy
-      await delay(500);
-    }
+    } catch (e) { console.warn('Proxy failed, trying next...', e); await delay(500); }
   }
   throw new Error('All proxies failed');
 };
 
-// --- 技術指標計算 ---
 const calculateSMA = (data, period) => {
   return data.map((item, index, arr) => {
     if (index < period - 1) return { ...item, [`MA${period}`]: null };
@@ -137,25 +137,16 @@ const calculateEMA = (data, period, key = 'close') => {
   const k = 2 / (period + 1);
   let emaArray = new Array(data.length).fill(null);
   let firstValidIdx = -1;
-  for(let i=0; i<data.length; i++) {
-      if (data[i][key] !== null && data[i][key] !== undefined) {
-          firstValidIdx = i;
-          break;
-      }
-  }
+  for(let i=0; i<data.length; i++) { if (data[i][key] !== null && data[i][key] !== undefined) { firstValidIdx = i; break; } }
   if (firstValidIdx === -1 || (data.length - firstValidIdx) < period) return emaArray;
   let sum = 0;
-  for (let i = 0; i < period; i++) {
-    sum += data[firstValidIdx + i][key];
-  }
+  for (let i = 0; i < period; i++) { sum += data[firstValidIdx + i][key]; }
   const sma = sum / period;
   emaArray[firstValidIdx + period - 1] = sma;
   for (let i = firstValidIdx + period; i < data.length; i++) {
     const val = data[i][key];
     const prevEma = emaArray[i - 1];
-    if (val !== null && prevEma !== null) {
-        emaArray[i] = (val - prevEma) * k + prevEma;
-    }
+    if (val !== null && prevEma !== null) { emaArray[i] = (val - prevEma) * k + prevEma; }
   }
   return emaArray;
 };
@@ -181,19 +172,14 @@ const calculateMACD = (data) => {
   const ema12 = calculateEMA(data, 12, 'close');
   const ema26 = calculateEMA(data, 26, 'close');
   const difArray = data.map((d, i) => {
-    const e12 = ema12[i];
-    const e26 = ema26[i];
+    const e12 = ema12[i]; const e26 = ema26[i];
     if (e12 === null || e26 === null) return { ...d, DIF: null };
     return { ...d, DIF: e12 - e26 };
   });
   const signalArray = calculateEMA(difArray, 9, 'DIF');
   return difArray.map((d, i) => {
-     const dif = d.DIF;
-     const signal = signalArray[i];
-     let osc = null;
-     if (dif !== null && signal !== null) {
-         osc = dif - signal;
-     }
+     const dif = d.DIF; const signal = signalArray[i]; let osc = null;
+     if (dif !== null && signal !== null) { osc = dif - signal; }
      return { ...d, Signal: signal, OSC: osc };
   });
 };
@@ -217,33 +203,6 @@ const loadPapaParse = () => {
     script.onerror = reject;
     document.head.appendChild(script);
   });
-};
-
-// --- Cache Helpers ---
-const getTodayDate = () => new Date().toISOString().split('T')[0];
-
-const getAiCache = () => {
-  try {
-    return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}');
-  } catch {
-    return {};
-  }
-};
-
-const updateAiCache = (symbol, type, content) => {
-  const today = getTodayDate();
-  const cache = getAiCache();
-  const existing = cache[symbol] || {};
-  
-  let newEntry;
-  if (existing.date === today) {
-     newEntry = { ...existing, [type]: content };
-  } else {
-     newEntry = { date: today, [type]: content };
-  }
-
-  const newCache = { ...cache, [symbol]: newEntry };
-  localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
 };
 
 // --- 主要元件 ---
@@ -282,7 +241,7 @@ const Dashboard = () => {
   const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
 
   // Fee Settings
-  const [feeDiscount, setFeeDiscount] = useState(1); // 1 = no discount
+  const [feeDiscount, setFeeDiscount] = useState(1); 
 
   const processData = (data, pricesMap) => {
     const enrichedData = data.map((item, index) => {
@@ -295,7 +254,6 @@ const Dashboard = () => {
 
       let currentPrice = category === '定存' ? buyPrice : (pricesMap?.[symbol] || buyPrice);
       const marketValue = shares * currentPrice;
-      
       const estimateFee = Math.round(marketValue * 0.001425 * feeDiscount);
       
       const assetType = detectAssetType(symbol, name, category);
@@ -303,9 +261,7 @@ const Dashboard = () => {
       if (assetType === 'ETF') taxRate = 0.001;
       else if (assetType === 'BOND') taxRate = 0;
       
-      if (category === '定存') {
-         taxRate = 0;
-      }
+      if (category === '定存') taxRate = 0;
       
       const estimateTax = category === '定存' ? 0 : Math.round(marketValue * taxRate);
       const feeFinal = category === '定存' ? 0 : estimateFee;
@@ -315,19 +271,7 @@ const Dashboard = () => {
       const roi = costBasis > 0 ? netProfit / costBasis : 0;
 
       return { 
-        ...item, 
-        id: index, 
-        shares, 
-        buyPrice, 
-        currentPrice, 
-        costBasis, 
-        marketValue, 
-        profitLoss: netProfit, 
-        grossProfit,           
-        estimateFee: feeFinal,
-        estimateTax,
-        roi, 
-        isRealData: !!(pricesMap?.[symbol]) 
+        ...item, id: index, shares, buyPrice, currentPrice, costBasis, marketValue, profitLoss: netProfit, grossProfit, estimateFee: feeFinal, estimateTax, roi, isRealData: !!(pricesMap?.[symbol]) 
       };
     });
     setPortfolioData(enrichedData);
@@ -344,58 +288,39 @@ const Dashboard = () => {
 
     const promises = uniqueSymbols.map(async (symbol) => {
       if (!symbol || symbol.includes('TD') || symbol === '定存') return;
-
       const maxRetries = 2;
       let attempts = 0;
       let success = false;
-
-      // Add random delay to prevent thundering herd
       await delay(Math.random() * 1500);
 
       while(attempts <= maxRetries && !success) {
         try {
-          // Cache busting with timestamp
           const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
           const result = await fetchWithProxyFallback(targetUrl);
           const meta = result?.chart?.result?.[0]?.meta;
-          
-          if (meta && meta.regularMarketPrice) {
-            newPrices[symbol] = meta.regularMarketPrice;
-            success = true;
-          } else {
-            throw new Error('Data format error');
-          }
+          if (meta && meta.regularMarketPrice) { newPrices[symbol] = meta.regularMarketPrice; success = true; } 
+          else { throw new Error('Data format error'); }
         } catch (err) {
           attempts++;
-          if (attempts <= maxRetries) {
-            setLoadingMessage(`更新 ${symbol} 失敗，正在重試 (${attempts}/${maxRetries})...`);
-            await delay(1500); // Wait 1.5s before retry
-          } else {
-            console.warn(`標的 ${symbol} 更新失敗:`, err);
-            failedSymbols.push(symbol);
-          }
+          if (attempts <= maxRetries) { setLoadingMessage(`更新 ${symbol} 失敗，正在重試 (${attempts}/${maxRetries})...`); await delay(1500); } 
+          else { console.warn(`標的 ${symbol} 更新失敗:`, err); failedSymbols.push(symbol); }
         }
       }
     });
 
     await Promise.all(promises);
-    
     setRealTimePrices(prev => ({ ...prev, ...newPrices }));
     setPriceLoading(false);
     setLastUpdated(new Date()); 
-    
-    if (failedSymbols.length > 0) {
-      setUpdateError(`更新失敗的標的: ${failedSymbols.join(', ')}`);
-    }
-
+    if (failedSymbols.length > 0) setUpdateError(`更新失敗的標的: ${failedSymbols.join(', ')}`);
     processData(data, newPrices);
   };
 
   const callGeminiWithFallback = async (prompt) => {
     if (!geminiApiKey) {
-      const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
+      const confirm = window.confirm("尚未設定 AI 金鑰。是否前往設定？");
       if (confirm) setActiveTab('config');
-      throw new Error("請先至「設定」頁面儲存 API Key");
+      throw new Error("請先至設定頁面儲存 API Key");
     }
 
     const defaultModels = AVAILABLE_MODELS.map(m => m.id);
@@ -403,51 +328,27 @@ const Dashboard = () => {
 
     for (const model of models) {
       try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-          }
-        );
-
-        if (!response.ok) {
-          console.warn(`Model ${model} failed: ${response.status}`);
-          continue;
-        }
-
+        });
+        if (!response.ok) continue;
         const data = await response.json();
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) {
-          setUsedModel(model);
-          return text;
-        }
-      } catch (err) {
-        console.error(`Error calling ${model}:`, err);
-      }
+        if (text) { setUsedModel(model); return text; }
+      } catch (err) { console.error(`Error calling ${model}:`, err); }
     }
-    throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
+    throw new Error("AI 服務連線失敗");
   };
 
   const generateSummary = async (symbol, data) => {
     if (!data || data.length === 0) return;
-
     const today = getTodayDate();
     const cache = getAiCache();
     if (cache[symbol] && cache[symbol].date === today && cache[symbol].summary) {
-      setAiSummary(cache[symbol].summary);
-      setAnalysisSymbol(symbol);
-      setAiDetail(null); 
-      setIsDetailExpanded(false);
-      return;
+      setAiSummary(cache[symbol].summary); setAnalysisSymbol(symbol); setAiDetail(null); setIsDetailExpanded(false); return;
     }
-
-    setIsAiSummarizing(true);
-    setAiSummary(null);
-    setAiDetail(null); 
-    setIsDetailExpanded(false);
-    setAnalysisSymbol(symbol); 
+    setIsAiSummarizing(true); setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false); setAnalysisSymbol(symbol); 
 
     const latest = data[data.length - 1];
     const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
@@ -455,57 +356,27 @@ const Dashboard = () => {
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(symbol, stockName, category);
 
-    let roleDescription = "";
-    let focusPoints = "";
-
-    if (assetType === 'BOND') {
-      roleDescription = "專業總體經濟與債券分析師";
-      focusPoints = "重點關注：利率環境影響、殖利率走勢、債券價格支撐與避險屬性。";
-    } else if (assetType === 'ETF') {
-      roleDescription = "專業 ETF 策略分析師";
-      focusPoints = "重點關注：追蹤指數趨勢、大盤連動性、長線存股價值。";
-    } else {
-      roleDescription = "專業證券技術分析師";
-      focusPoints = "重點關注：股價趨勢、均線排列、KD/MACD 訊號、支撐壓力位。";
-    }
-    
-    const prompt = `
-      請以一位【${roleDescription}】的角色，針對 ${symbol} (${stockName}) [${assetType}] 進行極簡短技術分析。
-      ${focusPoints}
-      數據：收盤 ${formatPrice(latest.close)}, MA20 ${latest.MA20 ? formatPrice(latest.MA20) : '-'}, MA60 ${latest.MA60 ? formatPrice(latest.MA60) : '-'}, KD(K=${latest.K ? formatPrice(latest.K) : '-'}, D=${latest.D ? formatPrice(latest.D) : '-'}), MACD(OSC=${latest.OSC ? formatPrice(latest.OSC) : '-'}).
-      限制：請用繁體中文，50 字以內，直接講重點。
-    `;
+    let roleDescription = assetType === 'BOND' ? "專業總體經濟與債券分析師" : assetType === 'ETF' ? "專業 ETF 策略分析師" : "專業證券技術分析師";
+    const prompt = `請以一位【${roleDescription}】的角色，針對 ${symbol} (${stockName}) [${assetType}] 進行極簡短技術分析。數據：收盤 ${formatPrice(latest.close)}, MA20 ${latest.MA20 ? formatPrice(latest.MA20) : '-'}, MA60 ${latest.MA60 ? formatPrice(latest.MA60) : '-'}, KD(K=${latest.K ? formatPrice(latest.K) : '-'}, D=${latest.D ? formatPrice(latest.D) : '-'}), MACD(OSC=${latest.OSC ? formatPrice(latest.OSC) : '-'}). 限制：繁體中文，50 字以內重點。`;
 
     try {
       const text = await callGeminiWithFallback(prompt);
-      setAiSummary(text);
-      setAnalysisSymbol(symbol);
-      updateAiCache(symbol, 'summary', text); 
-    } catch (err) {
-      setAiSummary(err.message || "分析暫時無法使用。");
-      setAnalysisSymbol(symbol); 
-    } finally {
-      setIsAiSummarizing(false);
-    }
+      setAiSummary(text); setAnalysisSymbol(symbol); updateAiCache(symbol, 'summary', text); 
+    } catch (err) { setAiSummary(err.message || "分析暫時無法使用。"); setAnalysisSymbol(symbol); } 
+    finally { setIsAiSummarizing(false); }
   };
 
   const generateDetail = async () => {
     if (!selectedHistorySymbol) return;
-
     const today = getTodayDate();
     const cache = getAiCache();
     if (cache[selectedHistorySymbol] && cache[selectedHistorySymbol].date === today && cache[selectedHistorySymbol].detail) {
-      setAiDetail(cache[selectedHistorySymbol].detail);
-      setIsDetailExpanded(true);
-      return;
+      setAiDetail(cache[selectedHistorySymbol].detail); setIsDetailExpanded(true); return;
     }
-
     const key = `${selectedHistorySymbol}_${timeframe}`;
     const chartData = historicalData[key];
     if (!chartData || chartData.length === 0) return;
-
-    setIsAiDetailing(true);
-    setIsDetailExpanded(true); 
+    setIsAiDetailing(true); setIsDetailExpanded(true); 
 
     const latest = chartData[chartData.length - 1];
     const assetInfo = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol);
@@ -513,67 +384,19 @@ const Dashboard = () => {
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(selectedHistorySymbol, stockName, category);
     
-    let roleDescription = "";
-    let analysisStructure = "";
-
-    if (assetType === 'BOND') {
-      roleDescription = "專業總體經濟與債券分析師";
-      analysisStructure = `
-      1. **利率與總經環境**：分析 Fed 政策與利率對債券價格的影響。
-      2. **技術面分析**：目前價格在均線之上的強弱勢判斷。
-      3. **操作建議**：針對領息族與價差交易者的建議。
-      `;
-    } else if (assetType === 'ETF') {
-      roleDescription = "專業 ETF 策略分析師";
-      analysisStructure = `
-      1. **趨勢研判**：目前趨勢是多頭、空頭還是盤整？
-      2. **技術訊號**：KD 與 MACD 是否出現黃金交叉或背離？
-      3. **操作建議**：針對定期定額與波段操作者的建議。
-      `;
-    } else {
-      roleDescription = "專業證券技術分析師";
-      analysisStructure = `
-      1. **趨勢研判**：均線排列與多空方向。
-      2. **訊號解讀**：KD 與 MACD 的交叉與背離狀況。
-      3. **關鍵價位**：觀察支撐與壓力。
-      4. **操作建議**：針對持股者與空手者的具體建議。
-      `;
-    }
-
-    const prompt = `
-      請以一位【${roleDescription}】的角色，提供 ${selectedHistorySymbol} (${stockName}) [${assetType}] 的完整技術面分析報告。
-      週期：${timeframe === '1y_1d' ? '日線' : timeframe === '5y_1wk' ? '週線' : '月線'}
-      
-      最新技術指標：
-      - 價格: ${formatPrice(latest.close)}
-      - 均線: MA20=${latest.MA20 ? formatPrice(latest.MA20) : 'N/A'}, MA60=${latest.MA60 ? formatPrice(latest.MA60) : 'N/A'}, MA120=${latest.MA120 ? formatPrice(latest.MA120) : 'N/A'}
-      - 動能: KD(9,3,3) K=${latest.K ? formatPrice(latest.K) : 'N/A'}, D=${latest.D ? formatPrice(latest.D) : 'N/A'}
-      - 趨勢: MACD(12,26,9) DIF=${latest.DIF ? formatPrice(latest.DIF) : 'N/A'}, MACD=${latest.Signal ? formatPrice(latest.Signal) : 'N/A'}, OSC=${latest.OSC ? formatPrice(latest.OSC) : 'N/A'}
-
-      請使用 Markdown 格式輸出，結構如下：
-      ${analysisStructure}
-    `;
+    let roleDescription = assetType === 'BOND' ? "專業總體經濟與債券分析師" : assetType === 'ETF' ? "專業 ETF 策略分析師" : "專業證券技術分析師";
+    const prompt = `請以一位【${roleDescription}】的角色，提供 ${selectedHistorySymbol} (${stockName}) [${assetType}] 的完整技術面分析報告。週期：${timeframe}。最新技術指標：價格 ${formatPrice(latest.close)}, MA20/60/120, KD, MACD。請使用 Markdown 格式輸出。`;
 
     try {
       const text = await callGeminiWithFallback(prompt);
-      setAiDetail(text);
-      updateAiCache(selectedHistorySymbol, 'detail', text); 
-    } catch (err) {
-      setAiDetail(err.message || "詳細分析生成失敗，請稍後再試。");
-    } finally {
-      setIsAiDetailing(false);
-    }
+      setAiDetail(text); updateAiCache(selectedHistorySymbol, 'detail', text); 
+    } catch (err) { setAiDetail(err.message || "詳細分析生成失敗。"); } 
+    finally { setIsAiDetailing(false); }
   };
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
-
-    setHistoryLoading(true);
-    setHistoryError(null);
-    setAnalysisSymbol(null); 
-    setAiSummary(null);
-    setAiDetail(null);
-    setIsDetailExpanded(false);
+    setHistoryLoading(true); setHistoryError(null); setAnalysisSymbol(null); setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false);
 
     try {
       let range = '5y'; let interval = '1wk';
@@ -591,21 +414,13 @@ const Dashboard = () => {
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
-        
-        if (geminiApiKey) {
-          generateSummary(symbol, processedData);
-        } else {
-          setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
-        }
-      } else {
-        throw new Error('No chart data found');
-      }
+        if (geminiApiKey) generateSummary(symbol, processedData);
+        else setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
+      } else { throw new Error('No chart data found'); }
     } catch (err) {
       console.warn(`無法取得 ${symbol} 的歷史數據:`, err);
       setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。");
-    } finally {
-      setHistoryLoading(false);
-    }
+    } finally { setHistoryLoading(false); }
   };
 
   const performFetch = async (url) => {
@@ -634,6 +449,8 @@ const Dashboard = () => {
     localStorage.setItem('gemini_api_key', geminiApiKey);
     localStorage.setItem('gemini_model', selectedModel);
     localStorage.setItem('fee_discount', feeDiscount);
+    localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
+    if (customOrder.length > 0) localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
     alert("設定已儲存！");
     if (rawData.length > 0) processData(rawData, realTimePrices);
   };
@@ -653,10 +470,14 @@ const Dashboard = () => {
     const savedKey = localStorage.getItem('gemini_api_key');
     const savedModel = localStorage.getItem('gemini_model');
     const savedDiscount = localStorage.getItem('fee_discount');
+    const savedSort = localStorage.getItem('investment_sort_config');
+    const savedOrder = localStorage.getItem('investment_custom_order');
 
     if (savedKey) setGeminiApiKey(savedKey);
     if (savedModel) setSelectedModel(savedModel);
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount));
+    if (savedSort) setSortConfig(JSON.parse(savedSort));
+    if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
 
     const today = new Date().toISOString().split('T')[0];
     const cache = getAiCache();
@@ -671,18 +492,15 @@ const Dashboard = () => {
   useEffect(() => {
     if (activeTab === 'history' && selectedHistorySymbol) {
       const key = `${selectedHistorySymbol}_${timeframe}`;
-      const hasData = !!historicalData[key];
-      const isAnalysisOutdated = analysisSymbol !== selectedHistorySymbol;
-      if (isAnalysisOutdated && aiSummary && !isAiSummarizing) { setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false); }
-      if (!hasData) { if (!historyLoading) fetchHistoricalData(selectedHistorySymbol, timeframe); } 
-      else { if (isAnalysisOutdated && geminiApiKey && !isAiSummarizing) generateSummary(selectedHistorySymbol, historicalData[key]); }
+      if (!historicalData[key]) { fetchHistoricalData(selectedHistorySymbol, timeframe); } 
+      else { if (!aiSummary && geminiApiKey) generateSummary(selectedHistorySymbol, historicalData[key]); }
     }
   }, [activeTab, selectedHistorySymbol, timeframe, historicalData, analysisSymbol, geminiApiKey, isAiSummarizing, historyLoading, aiSummary]);
 
   const summary = useMemo(() => {
     const totalCost = portfolioData.reduce((sum, item) => sum + item.costBasis, 0);
     const totalValue = portfolioData.reduce((sum, item) => sum + item.marketValue, 0);
-    const totalPL = portfolioData.reduce((sum, item) => sum + item.profitLoss, 0); // Sum of NET profit
+    const totalPL = portfolioData.reduce((sum, item) => sum + item.profitLoss, 0); 
     const totalROI = totalCost > 0 ? totalPL / totalCost : 0;
     return { totalCost, totalValue, totalPL, totalROI };
   }, [portfolioData]);
@@ -701,7 +519,7 @@ const Dashboard = () => {
       if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, marketValue: 0, profitLoss: 0, estimateFee: 0, estimateTax: 0, dates: new Set() }); }
       const entry = map.get(key);
       entry.shares += item.shares; entry.costBasis += item.costBasis; entry.marketValue += item.marketValue; 
-      entry.profitLoss += item.profitLoss; // Accumulate NET profit
+      entry.profitLoss += item.profitLoss; 
       entry.estimateFee += item.estimateFee;
       entry.estimateTax += item.estimateTax;
       entry.dates.add(item['日期']);
@@ -709,8 +527,9 @@ const Dashboard = () => {
     });
     return Array.from(map.values()).map(item => {
       const roi = item.costBasis > 0 ? item.profitLoss / item.costBasis : 0;
-      // Date Fix: Get the latest date (lexicographical sort works for ISO dates)
-      const latestDate = Array.from(item.dates).sort().pop();
+      // Date Fix: Sorted timestamps to get the latest date
+      const sortedDates = Array.from(item.dates).sort((a, b) => new Date(a) - new Date(b));
+      const latestDate = sortedDates[sortedDates.length - 1];
       return { ...item, buyPrice: item.shares > 0 ? item.costBasis / item.shares : 0, roi, '日期': latestDate };
     });
   }, [portfolioData]);
@@ -722,10 +541,25 @@ const Dashboard = () => {
         if (prev.length === 0) return currentSymbols;
         const existing = prev.filter(s => currentSymbols.includes(s));
         const newSymbols = currentSymbols.filter(s => !prev.includes(s));
-        return [...existing, ...newSymbols];
+        const combined = [...existing, ...newSymbols];
+        // Only update if different to avoid loop, though shallow check is hard. JSON stringify is safe here.
+        if (JSON.stringify(prev) !== JSON.stringify(combined)) return combined;
+        return prev;
       });
     }
   }, [aggregatedHoldings]);
+
+  // Sync customOrder to localStorage whenever it changes
+  useEffect(() => {
+    if (customOrder.length > 0) {
+      localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
+    }
+  }, [customOrder]);
+
+  // Sync sortConfig to localStorage whenever it changes
+  useEffect(() => {
+    localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
+  }, [sortConfig]);
 
   const sortedHoldings = useMemo(() => {
     let sortableItems = [...aggregatedHoldings];
@@ -938,10 +772,10 @@ const Dashboard = () => {
                   </div>
                   
                   <div className="grid grid-cols-2 gap-4 text-sm mb-3">
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">現價</span><span className="text-white font-medium ml-2 md:ml-0">{formatPrice(row.currentPrice)}</span></div>
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">成本</span><span className="text-slate-300 ml-2 md:ml-0">{formatPrice(row.buyPrice)}</span></div>
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">市值</span><span className="text-white ml-2 md:ml-0">{formatCurrency(row.marketValue)}</span></div>
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">股數</span><span className="text-slate-300 ml-2 md:ml-0">{row.shares.toLocaleString()}</span></div>
+                    <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{formatPrice(row.currentPrice)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">成本</span><span className="text-slate-300">{formatPrice(row.buyPrice)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">股數</span><span className="text-slate-300">{row.shares.toLocaleString()}</span></div>
                   </div>
 
                   <div className="flex justify-end space-x-2 pt-2 border-t border-slate-700/50">
@@ -1047,6 +881,7 @@ const Dashboard = () => {
     </div>
   );
 };
+
 
 export default function App() {
   return <Dashboard />;
