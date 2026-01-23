@@ -11,16 +11,19 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v11.2 (Scope Fix):
- * * [嚴重錯誤修復] 
- * 1. ReferenceError 修復：
- * - 將 `getAiCache`, `updateAiCache`, `getTodayDate` 移至 Component 外部。
- * - 確保這些 Helper 函式在 Component 渲染前就已定義，解決作用域 (Scope) 問題。
- * 2. React Child Error 防護：
- * - 在 `CustomStrategyDot` 加入 `payload` 的安全檢查，防止因數據尚未載入完全時導致渲染錯誤。
+ * 專業理財經理人技術筆記 (Technical Note) v10.5 (Color Consistency):
+ * * [視覺優化] 顏色一致性整合
+ * 1. 建立 `CATEGORY_STYLES` 設定檔：
+ * - 將「股票」、「債券」、「定存」的顏色定義集中管理。
+ * - `color`: 用於 Recharts 圖表 (Hex Code)。
+ * - `badge`: 用於 UI 標籤 (Tailwind Classes)。
+ * 2. 應用範圍：
+ * - 資產配置圓餅圖 (Pie Chart) -> 使用 `color`。
+ * - 持股明細列表 (Table & Card) -> 使用 `badge`。
+ * - 確保兩邊視覺體驗完全同步。
  */
 
-// --- 靜態配置 ---
+// --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
 
 const DEMO_DATA = [
   { 日期: '2015-01-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 140, 股數: 1000, 策略: '基礎買入', 金額: 140000 },
@@ -34,8 +37,15 @@ const DEMO_DATA = [
   { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 30, 股數: 10000, 策略: '基礎買入', 金額: 300000 },
 ];
 
-const COLORS = ['#3B82F6', '#8B5CF6', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#6366F1'];
-const CATEGORY_COLORS = { '股票': '#3B82F6', '債券': '#8B5CF6', '定存': '#10B981' };
+// 色彩與樣式統一配置
+const CATEGORY_STYLES = {
+  '股票': { color: '#3B82F6', badge: 'bg-blue-900 text-blue-200' },       // Blue
+  '債券': { color: '#A855F7', badge: 'bg-purple-900 text-purple-200' },   // Purple
+  '定存': { color: '#22C55E', badge: 'bg-green-900 text-green-200' },     // Green
+  'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }   // Slate
+};
+
+const COLORS = ['#3B82F6', '#A855F7', '#22C55E', '#F59E0B', '#EF4444', '#EC4899', '#6366F1']; // Fallback colors
 
 const STRATEGY_CONFIG = {
   '基礎買入':     { color: '#EF4444', label: '基礎買入',     shape: 'circle' },
@@ -54,39 +64,10 @@ const AVAILABLE_MODELS = [
   { id: 'gemini-2.5-flash-preview-09-2025', name: 'Gemini 2.5 Flash Preview (最新預覽)' },
 ];
 
-// --- 輔助函式 (Global Scope) ---
-
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
 const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
 const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : (value || '0.00');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-// *** Moved these functions OUTSIDE the component to fix ReferenceError ***
-const getTodayDate = () => new Date().toISOString().split('T')[0];
-
-const getAiCache = () => {
-  try {
-    return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}');
-  } catch {
-    return {};
-  }
-};
-
-const updateAiCache = (symbol, type, content) => {
-  const today = getTodayDate();
-  const cache = getAiCache();
-  const existing = cache[symbol] || {};
-  
-  let newEntry;
-  if (existing.date === today) {
-     newEntry = { ...existing, [type]: content };
-  } else {
-     newEntry = { date: today, [type]: content };
-  }
-
-  const newCache = { ...cache, [symbol]: newEntry };
-  localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
-};
 
 const renderShape = (shape, cx, cy, color, size = 6) => {
   const stroke = "#fff";
@@ -103,7 +84,6 @@ const renderShape = (shape, cx, cy, color, size = 6) => {
 
 const CustomStrategyDot = (props) => {
   const { cx, cy, payload } = props;
-  // Added safety check for payload
   if (!payload || !payload.buyAction) return null;
   const strategy = payload.buyAction['策略'];
   const config = STRATEGY_CONFIG[strategy] || STRATEGY_CONFIG['default'];
@@ -121,6 +101,7 @@ const detectAssetType = (symbol, name, category) => {
   return 'STOCK'; 
 };
 
+// --- Proxy Fetch Helper ---
 const fetchWithProxyFallback = async (targetUrl) => {
   const proxies = [
     (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
@@ -139,6 +120,7 @@ const fetchWithProxyFallback = async (targetUrl) => {
   throw new Error('All proxies failed');
 };
 
+// --- 技術指標計算 ---
 const calculateSMA = (data, period) => {
   return data.map((item, index, arr) => {
     if (index < period - 1) return { ...item, [`MA${period}`]: null };
@@ -210,6 +192,33 @@ const loadPapaParse = () => {
     script.onerror = reject;
     document.head.appendChild(script);
   });
+};
+
+// --- Cache Helpers ---
+const getTodayDate = () => new Date().toISOString().split('T')[0];
+
+const getAiCache = () => {
+  try {
+    return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}');
+  } catch {
+    return {};
+  }
+};
+
+const updateAiCache = (symbol, type, content) => {
+  const today = getTodayDate();
+  const cache = getAiCache();
+  const existing = cache[symbol] || {};
+  
+  let newEntry;
+  if (existing.date === today) {
+     newEntry = { ...existing, [type]: content };
+  } else {
+     newEntry = { date: today, [type]: content };
+  }
+
+  const newCache = { ...cache, [symbol]: newEntry };
+  localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
 };
 
 // --- 主要元件 ---
@@ -532,9 +541,7 @@ const Dashboard = () => {
 
     setHistoryLoading(true);
     setHistoryError(null);
-    
     setAnalysisSymbol(null); 
-    
     setAiSummary(null);
     setAiDetail(null);
     setIsDetailExpanded(false);
@@ -859,7 +866,7 @@ const Dashboard = () => {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
               <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><PieIcon className="w-5 h-5 mr-2 text-blue-400" /> 資產類別配置</h3>
-              <div className="h-80 w-full"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">{allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_COLORS[entry.name] || COLORS[index % COLORS.length]} />)}</Pie><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} /><Legend content={(props) => <ul className="flex flex-wrap justify-center gap-4 mt-4">{props.payload.map((entry, index) => <li key={`item-${index}`} className="flex items-center text-sm text-slate-300"><span className="block w-3 h-3 rounded-full mr-2" style={{ backgroundColor: entry.color }}></span>{entry.value} <span className="ml-1 text-slate-400">({formatPercent(allocationData.find(d => d.name === entry.value)?.percentage)})</span></li>)}</ul>} verticalAlign="bottom" /></PieChart></ResponsiveContainer></div>
+              <div className="h-80 w-full"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">{allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}</Pie><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} /><Legend content={(props) => <ul className="flex flex-wrap justify-center gap-4 mt-4">{props.payload.map((entry, index) => <li key={`item-${index}`} className="flex items-center text-sm text-slate-300"><span className="block w-3 h-3 rounded-full mr-2" style={{ backgroundColor: entry.color }}></span>{entry.value} <span className="ml-1 text-slate-400">({formatPercent(allocationData.find(d => d.name === entry.value)?.percentage)})</span></li>)}</ul>} verticalAlign="bottom" /></PieChart></ResponsiveContainer></div>
             </div>
             <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
               <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><BarChart2 className="w-5 h-5 mr-2 text-purple-400" /> 持股標的分佈 (不含定存)</h3>
@@ -875,6 +882,7 @@ const Dashboard = () => {
               <button onClick={() => fetchRealTimePrices(rawData)} className="text-xs flex items-center text-blue-400 hover:text-blue-300 transition-colors"><RefreshCw className={`w-3 h-3 mr-1 ${priceLoading ? 'animate-spin' : ''}`} />{priceLoading ? '更新中...' : '立即更新股價'}</button>
             </div>
 
+            {/* Mobile Card View */}
             <div className="block md:hidden space-y-4">
               <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex items-center space-x-2 overflow-x-auto">
                 <span className="text-xs text-slate-400 whitespace-nowrap">排序依據:</span>
@@ -889,21 +897,21 @@ const Dashboard = () => {
                     <div>
                       <div className="flex items-center space-x-2">
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : 'bg-purple-900 text-purple-200'}`}>{row['類別']}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span>
                       </div>
                       <div className="text-sm text-slate-400 mt-1">{row['名稱']}</div>
                     </div>
                     <div className="flex flex-col items-end">
-                      <span className={`text-lg font-bold ${row.profitLoss >= 0 ? 'text-red-500' : 'text-green-500'}`}>{formatPercent(row.roi)}</span>
-                      <span className={`text-xs ${row.profitLoss >= 0 ? 'text-red-400' : 'text-green-400'}`}>{row.profitLoss > 0 ? '+' : ''}{formatCurrency(row.profitLoss)}</span>
+                      <span className={`text-lg font-bold ${(row.roi || 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>{formatPercent(row.roi)}</span>
+                      <span className={`text-xs ${(row.profitLoss || 0) >= 0 ? 'text-red-400' : 'text-green-400'}`}>{(row.profitLoss || 0) > 0 ? '+' : ''}{formatCurrency(row.profitLoss)}</span>
                     </div>
                   </div>
                   
                   <div className="grid grid-cols-2 gap-4 text-sm mb-3">
-                    <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{formatPrice(row.currentPrice)}</span></div>
-                    <div><span className="text-slate-500 block text-xs">成本</span><span className="text-slate-300">{formatPrice(row.buyPrice)}</span></div>
-                    <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
-                    <div><span className="text-slate-500 block text-xs">股數</span><span className="text-slate-300">{row.shares.toLocaleString()}</span></div>
+                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">現價</span><span className="text-white font-medium ml-2 md:ml-0">{formatPrice(row.currentPrice)}</span></div>
+                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">成本</span><span className="text-slate-300 ml-2 md:ml-0">{formatPrice(row.buyPrice)}</span></div>
+                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">市值</span><span className="text-white ml-2 md:ml-0">{formatCurrency(row.marketValue)}</span></div>
+                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">股數</span><span className="text-slate-300 ml-2 md:ml-0">{row.shares.toLocaleString()}</span></div>
                   </div>
 
                   <div className="flex justify-end space-x-2 pt-2 border-t border-slate-700/50">
@@ -914,8 +922,9 @@ const Dashboard = () => {
               ))}
             </div>
 
-            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> {/* Removed overflow-hidden */}
-              <div className="overflow-x-auto"> {/* Scroll is handled here */}
+            {/* Desktop Table View */}
+            <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> 
+              <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-700">
                   <thead className="bg-slate-900/50">
                     <tr>
@@ -930,12 +939,12 @@ const Dashboard = () => {
                       <tr key={row['標的']} className="hover:bg-slate-700/50 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap"><div className="flex flex-col space-y-1">{index > 0 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], -1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowUp className="w-3 h-3" /></button>}{index < sortedHoldings.length - 1 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], 1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowDown className="w-3 h-3" /></button>}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-white font-medium flex items-center">{row['標的']}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}</div><div className="text-xs text-slate-500">最近交易: {row['日期']}</div></td>
-                        <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-slate-200">{row['名稱']}</div><span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mt-1 ${row['類別'] === '股票' ? 'bg-blue-900 text-blue-200' : row['類別'] === '債券' ? 'bg-purple-900 text-purple-200' : 'bg-green-900 text-green-200'}`}>{row['類別']}</span></td>
+                        <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-slate-200">{row['名稱']}</div><span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mt-1 ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span></td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{formatPrice(row.buyPrice)}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{formatPrice(row.currentPrice)}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.shares.toLocaleString()}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold relative group">
-                          <span className={`cursor-help border-b border-dotted ${row.profitLoss >= 0 ? 'text-red-500 border-red-500' : 'text-green-500 border-green-500'}`}>{row.profitLoss > 0 ? '+' : ''}{formatCurrency(row.profitLoss)}</span>
+                          <span className={`cursor-help border-b border-dotted ${(row.profitLoss || 0) >= 0 ? 'text-red-500 border-red-500' : 'text-green-500 border-green-500'}`}>{(row.profitLoss || 0) > 0 ? '+' : ''}{formatCurrency(row.profitLoss)}</span>
                           <div className={`absolute right-0 z-50 w-56 p-3 bg-slate-700 border border-slate-600 rounded-lg shadow-xl text-left pointer-events-none hidden group-hover:block ${index < 2 ? 'top-full mt-2' : 'bottom-full mb-2'}`}>
                             <div className="text-xs text-slate-400 mb-2 font-semibold border-b border-slate-600 pb-1">損益結構 (Net P/L)</div>
                             <div className="space-y-1">
@@ -948,7 +957,7 @@ const Dashboard = () => {
                             <div className={`absolute right-4 border-4 border-transparent ${index < 2 ? 'bottom-full -mb-1 border-b-slate-600' : 'top-full -mt-1 border-t-slate-600'}`}></div>
                           </div>
                         </td>
-                        <td className={`px-6 py-4 whitespace-nowrap text-right text-sm font-bold ${row.roi >= 0 ? 'text-red-500' : 'text-green-500'}`}>{formatPercent(row.roi)}</td>
+                        <td className={`px-6 py-4 whitespace-nowrap text-right text-sm font-bold ${(row.roi || 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>{formatPercent(row.roi)}</td>
                       </tr>
                     ))}
                   </tbody>
