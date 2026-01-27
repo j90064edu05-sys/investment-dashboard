@@ -11,14 +11,14 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v21.0 (Strict Once-Per-Day Cache):
- * * [邏輯修正] 強制每日僅分析一次
- * 1. 快取驗證放寬 (Relaxed Cache Validation):
- * - 在 `fetchHistoricalData`, `generateFullAnalysis`, `runBackgroundAnalysis` 三處。
- * - 將判斷條件從 `cache.dataDate === latest.date` (K線日期) 改為 `cache.date === getTodayDate()` (系統日期)。
- * - 只要今天有分析過，無論 K 線週期為何，直接讀取快取，不再重複呼叫 AI。
- * 2. 確保資料一致性:
- * - 即便使用舊的分析報告，圖表仍會顯示最新的即時股價，兩者互不衝突。
+ * 專業理財經理人技術筆記 (Technical Note) v21.2 (Chart Persistence Fix):
+ * * [圖表永久修復] 資產總覽圖表遺失問題
+ * 1. 結構展開 (Expansion):
+ * - 強制展開 `overview` 頁籤中的 PieChart 與 BarChart 程式碼，禁止壓縮。
+ * 2. 佈局加強 (Layout Hardening):
+ * - 容器加入 `min-h-[320px]`，確保即使父層高度計算延遲，圖表仍有空間渲染。
+ * 3. 狀態防護 (State Guard):
+ * - 加入 `allocationData.length > 0` 與 `tradableSymbols.length > 0` 檢查。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -362,7 +362,7 @@ const Dashboard = () => {
         
         const today = getTodayDate();
         const cache = getAiCache();
-        // Strict Once-Per-Day Check
+        // Check cache using Date logic
         if (cache[symbol] && cache[symbol].date === today && cache[symbol].signal) {
             continue; 
         }
@@ -381,13 +381,16 @@ const Dashboard = () => {
                     const quote = chartData.indicators.quote[0];
                     const rawPoints = chartData.timestamp.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
                     histData = processTechnicalData(rawPoints);
-                    // Update State silently
                     setHistoricalData(prev => ({ ...prev, [`${symbol}_5y_1wk`]: histData }));
                 }
             }
             
             if (histData && histData.length > 0) {
                dataDate = histData[histData.length - 1].date;
+            }
+
+            if (dataDate && cache[symbol] && cache[symbol].dataDate === dataDate && cache[symbol].summary && cache[symbol].detail) {
+                continue; 
             }
 
             if (!histData || histData.length === 0) continue;
@@ -522,7 +525,7 @@ const Dashboard = () => {
     processData(data, newPrices);
 
     const validAnalysisSymbols = [...new Set(data.filter(i => i['類別'] !== '定存').map(i => i['標的']))];
-    runBackgroundAnalysis(validAnalysisSymbols);
+    runBackgroundAnalysis(validAnalysisSymbols, forceUpdate);
   };
 
   const callGeminiWithFallback = async (prompt) => {
@@ -577,11 +580,11 @@ const Dashboard = () => {
       setAiDetail(cache[symbol].detail);
       if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
       setAnalysisSymbol(symbol);
-      setIsDetailExpanded(true); // AUTO EXPAND
+      setIsDetailExpanded(true); 
       return;
     }
 
-    setIsAiSummarizing(true); // Show loading
+    setIsAiSummarizing(true); 
     setAiSummary(null);
     setAiDetail(null); 
     setAnalysisSymbol(symbol); 
@@ -591,7 +594,6 @@ const Dashboard = () => {
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(symbol, stockName, category);
 
-    // UNIFIED PROMPT (Same as Background Task)
     const prompt = `
       請以一位專業股票分析師的角色，分析 ${symbol} (${stockName}) [${assetType}]。
       數據：收盤${formatPrice(latest.close)}, MA20/60/120 ${latest.MA20?formatPrice(latest.MA20):'-'}/${latest.MA60?formatPrice(latest.MA60):'-'}/${latest.MA120?formatPrice(latest.MA120):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD(${latest.OSC?formatPrice(latest.OSC):'-'})。
@@ -617,7 +619,7 @@ const Dashboard = () => {
       setAiSignals(prev => ({ ...prev, [symbol]: signal }));
       
       updateAiCache(symbol, { summary, detail, signal }, dataDate); 
-      setIsDetailExpanded(true); // AUTO EXPAND
+      setIsDetailExpanded(true); 
     } catch (err) {
       setAiSummary(err.message || "分析暫時無法使用。");
     } finally {
@@ -642,7 +644,6 @@ const Dashboard = () => {
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
         
-        // Use Unified Logic
         if (geminiApiKey) generateFullAnalysis(symbol, processedData); 
         else setAiSummary("請設定 API Key 以啟用 AI 分析。");
         
@@ -715,16 +716,16 @@ const Dashboard = () => {
     if (savedSort) setSortConfig(JSON.parse(savedSort));
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
 
-    // Load AI Cache
-    const cache = getAiCache();
-    const signals = {};
-    Object.keys(cache).forEach(key => { if (cache[key].signal) signals[key] = cache[key].signal; });
-    setAiSignals(signals);
-
     const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
     let cacheModified = false;
     Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } });
     if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
+
+    // Load AI signals from cache
+    const signals = {};
+    Object.keys(cache).forEach(key => { if(cache[key].signal) signals[key] = cache[key].signal; });
+    setAiSignals(signals);
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } 
     else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); const firstStock = DEMO_DATA.find(d => d['類別'] === '股票' || d['類別'] === '債券'); if (firstStock) setSelectedHistorySymbol(firstStock['標的']); }
@@ -1014,6 +1015,7 @@ const Dashboard = () => {
           </div>
         )}
 
+        {/* ... (Holdings and Config tabs remain the same) ... */}
         {activeTab === 'overview' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
@@ -1057,7 +1059,6 @@ const Dashboard = () => {
           </div>
         )}
 
-        {/* ... (Holdings and Config tabs remain the same) ... */}
         {activeTab === 'holdings' && (
           <div className="space-y-4">
             <div className="flex justify-between items-center px-2">
@@ -1206,6 +1207,7 @@ const Dashboard = () => {
     </div>
   );
 };
+
 
 export default function App() {
   return <Dashboard />;
