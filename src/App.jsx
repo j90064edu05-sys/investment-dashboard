@@ -11,17 +11,17 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v13.1 (Cost Logic Update):
- * * [核心修正] 外幣資產成本計算
- * 1. 成本邏輯變更:
- * - 依據使用者需求：「匯入的資料中，金額為新台幣」。
- * - `costBasisTwd` 直接取用 CSV 的 `金額` (costBasisRaw)，不再乘上匯率。
- * - 移除了 `costInTwd` 設定開關，現在預設即為「金額=台幣」。
- * 2. 市值邏輯:
- * - `marketValueTwd` = 股數 * 現價(USD) * 即時匯率。
- * - 損益 = 市值(TWD) - 成本(TWD)。這樣能自動包含「價差」與「匯差」。
- * 3. 範例資料 (Demo Data):
- * - 更新 NVDA 與 USD-TD 的金額為合理的台幣數值 (e.g. 10股 NVDA @300USD 約 90,000 TWD)。
+ * 專業理財經理人技術筆記 (Technical Note) v13.2 (USD Display Fix):
+ * * [顯示優化] 美股價格顯示調整
+ * 1. 顯示邏輯 (Display Logic):
+ * - 對於美股 (isUS = true) 的標的：
+ * - 「平均成本」與「Yahoo即時價」現在顯示 **美金 (USD)** 原幣金額。
+ * - 「總市值」、「總損益」維持 **新台幣 (TWD)** 顯示，以利總資產計算。
+ * 2. 資料流變更 (Data Flow):
+ * - `processData`: 傳遞 `buyPriceRaw` (USD) 與 `currentPriceRaw` (USD)。
+ * - `aggregatedHoldings`: 針對美股，累加美金成本以計算美金平均成本。
+ * 3. 視覺提示:
+ * - 美股價格前方增加 `$` 符號以資區別。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -309,14 +309,16 @@ const Dashboard = () => {
           currentPriceRaw = category === '定存' ? buyPriceRaw : (pricesMap?.[symbol] || buyPriceRaw);
       }
 
+      const buyPriceTwd = buyPriceRaw * fxRate;
+      const currentPriceTwd = currentPriceRaw * fxRate;
+      
       // 核心修正：金額欄位(costBasisRaw) 已是新台幣，不需乘匯率
       const costBasisTwd = costBasisRaw; 
 
-      // 顯示用的買入價 (參考用)
-      const buyPriceTwd = buyPriceRaw * fxRate;
+      // 顯示用的買入價 (參考用) - 這裡用原始輸入的價格 (美金)
+      // 若要顯示美金平均成本，需在 aggregation 處理
       
       // 現價與市值需隨匯率浮動
-      const currentPriceTwd = currentPriceRaw * fxRate;
       const marketValueTwd = shares * currentPriceTwd;
       
       const assetType = detectAssetType(symbol, name, category);
@@ -337,15 +339,25 @@ const Dashboard = () => {
       const grossProfit = marketValueTwd - costBasisTwd;
       const netProfit = grossProfit - feeFinal - estimateTax;
       
-      // 使用 TWD 總成本計算出的平均成本
+      // 使用 TWD 總成本計算出的平均成本 (for consistency in non-US items)
       const calculatedBuyPriceTwd = shares > 0 ? costBasisTwd / shares : 0;
       
       const roi = costBasisTwd > 0 ? netProfit / costBasisTwd : 0;
 
       return { 
         ...item, id: index, shares, isUS, isTD,
-        buyPrice: calculatedBuyPriceTwd, currentPrice: currentPriceTwd, costBasis: costBasisTwd, marketValue: marketValueTwd, 
-        profitLoss: netProfit, grossProfit, estimateFee: feeFinal, estimateTax, roi, 
+        // Keep raw input price for US/TD items for display
+        buyPrice: calculatedBuyPriceTwd, // Internal use
+        buyPriceRaw, // Display use (USD)
+        currentPrice: currentPriceTwd, 
+        currentPriceRaw, // Display use (USD)
+        costBasis: costBasisTwd, 
+        marketValue: marketValueTwd, 
+        profitLoss: netProfit, 
+        grossProfit,           
+        estimateFee: feeFinal,
+        estimateTax,
+        roi, 
         isRealData: !!(pricesMap?.[symbol] || (isTD && pricesMap?.[isTD ? (symbol.replace('-TD','')==='USD'?'TWD=X':`${symbol.replace('-TD','')}TWD=X`) : '']))
       };
     });
@@ -427,7 +439,8 @@ const Dashboard = () => {
     setLoadingMessage('更新即時股價中...'); 
     processData(data, newPrices);
   };
-
+  
+  // ... (AI functions same as before) ...
   const callGeminiWithFallback = async (prompt) => {
     if (!geminiApiKey) {
       const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
@@ -469,59 +482,35 @@ const Dashboard = () => {
 
   const generateSummary = async (symbol, data) => {
     if (!data || data.length === 0) return;
-
     const today = getTodayDate();
     const cache = getAiCache();
     if (cache[symbol] && cache[symbol].date === today && cache[symbol].summary) {
-      setAiSummary(cache[symbol].summary);
-      setAnalysisSymbol(symbol);
-      setAiDetail(null); 
-      setIsDetailExpanded(false);
-      // Load cached signal
+      setAiSummary(cache[symbol].summary); setAnalysisSymbol(symbol); setAiDetail(null); setIsDetailExpanded(false);
       if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
       return;
     }
-
-    setIsAiSummarizing(true);
-    setAiSummary(null);
-    setAiDetail(null); 
-    setIsDetailExpanded(false);
-    setAnalysisSymbol(symbol); 
+    setIsAiSummarizing(true); setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false); setAnalysisSymbol(symbol); 
 
     const latest = data[data.length - 1];
     const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
     const stockName = assetInfo?.['名稱'] || symbol;
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(symbol, stockName, category);
-
     let roleDescription = assetType === 'BOND' ? "專業總體經濟與債券分析師" : assetType === 'ETF' ? "專業 ETF 策略分析師" : "專業證券技術分析師";
     const prompt = `請以一位【${roleDescription}】的角色，針對 ${symbol} (${stockName}) [${assetType}] 進行極簡短技術分析。數據：收盤 ${formatPrice(latest.close)}, MA20 ${latest.MA20 ? formatPrice(latest.MA20) : '-'}, MA60 ${latest.MA60 ? formatPrice(latest.MA60) : '-'}, KD(K=${latest.K ? formatPrice(latest.K) : '-'}, D=${latest.D ? formatPrice(latest.D) : '-'}), MACD(OSC=${latest.OSC ? formatPrice(latest.OSC) : '-'}). 限制：繁體中文，50 字以內重點。最後請務必根據分析結果，在結尾附上操作建議標籤：若建議加碼請附上 [ACTION:ADD]，若建議減碼請附上 [ACTION:REDUCE]，若建議觀望或持有請附上 [ACTION:HOLD]。`;
-
     try {
       const text = await callGeminiWithFallback(prompt);
-      let signal = 'HOLD';
-      let cleanText = text;
-      if (text.includes('[ACTION:ADD]')) signal = 'ADD';
-      else if (text.includes('[ACTION:REDUCE]')) signal = 'REDUCE';
-      else if (text.includes('[ACTION:HOLD]')) signal = 'HOLD';
+      let signal = 'HOLD'; let cleanText = text;
+      if (text.includes('[ACTION:ADD]')) signal = 'ADD'; else if (text.includes('[ACTION:REDUCE]')) signal = 'REDUCE'; else if (text.includes('[ACTION:HOLD]')) signal = 'HOLD';
       cleanText = text.replace(/\[ACTION:(ADD|REDUCE|HOLD)\]/g, '').trim();
-
-      setAiSummary(cleanText);
-      setAnalysisSymbol(symbol);
-      setAiSignals(prev => ({ ...prev, [symbol]: signal }));
-      updateAiCache(symbol, 'summary', cleanText); 
-      updateAiCache(symbol, 'signal', signal);
-    } catch (err) {
-      setAiSummary(err.message || "分析暫時無法使用。");
-      setAnalysisSymbol(symbol); 
-    } finally {
-      setIsAiSummarizing(false);
-    }
+      setAiSummary(cleanText); setAnalysisSymbol(symbol); setAiSignals(prev => ({ ...prev, [symbol]: signal }));
+      updateAiCache(symbol, 'summary', cleanText); updateAiCache(symbol, 'signal', signal);
+    } catch (err) { setAiSummary(err.message || "分析暫時無法使用。"); setAnalysisSymbol(symbol); } 
+    finally { setIsAiSummarizing(false); }
   };
 
   const generateDetail = async () => {
     if (!selectedHistorySymbol) return;
-
     const today = getTodayDate();
     const cache = getAiCache();
     if (cache[selectedHistorySymbol] && cache[selectedHistorySymbol].date === today && cache[selectedHistorySymbol].detail) {
@@ -540,42 +529,28 @@ const Dashboard = () => {
     
     let roleDescription = assetType === 'BOND' ? "專業總體經濟與債券分析師" : assetType === 'ETF' ? "專業 ETF 策略分析師" : "專業證券技術分析師";
     const prompt = `請以一位【${roleDescription}】的角色，提供 ${selectedHistorySymbol} (${stockName}) [${assetType}] 的完整技術面分析報告。週期：${timeframe}。最新技術指標：價格 ${formatPrice(latest.close)}, MA20/60/120, KD, MACD。請使用 Markdown 格式輸出。`;
-
-    try {
-      const text = await callGeminiWithFallback(prompt);
-      setAiDetail(text); updateAiCache(selectedHistorySymbol, 'detail', text); 
-    } catch (err) { setAiDetail(err.message || "詳細分析生成失敗。"); } 
-    finally { setIsAiDetailing(false); }
+    try { const text = await callGeminiWithFallback(prompt); setAiDetail(text); updateAiCache(selectedHistorySymbol, 'detail', text); } 
+    catch (err) { setAiDetail(err.message || "詳細分析生成失敗。"); } finally { setIsAiDetailing(false); }
   };
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
-
     setHistoryLoading(true); setHistoryError(null); setAnalysisSymbol(null); setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false);
-
     try {
       let range = '5y'; let interval = '1wk';
-      if (tf === '1y_1d') { range = '2y'; interval = '1d'; } 
-      if (tf === '10y_1mo') { range = '10y'; interval = '1mo'; }
-      if (tf === '5y_1wk') { range = '5y'; interval = '1wk'; }
-
+      if (tf === '1y_1d') { range = '2y'; interval = '1d'; } if (tf === '10y_1mo') { range = '10y'; interval = '1mo'; } if (tf === '5y_1wk') { range = '5y'; interval = '1wk'; }
       const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
       const result = await fetchWithProxyFallback(targetUrl);
       const chartData = result?.chart?.result?.[0];
-      
       if (chartData && chartData.timestamp) {
         const timestamps = chartData.timestamp;
         const quote = chartData.indicators.quote[0];
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
-        if (geminiApiKey) generateSummary(symbol, processedData);
-        else setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
+        if (geminiApiKey) generateSummary(symbol, processedData); else setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
       } else { throw new Error('No chart data found'); }
-    } catch (err) {
-      console.warn(`無法取得 ${symbol} 的歷史數據:`, err);
-      setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。");
-    } finally { setHistoryLoading(false); }
+    } catch (err) { console.warn(`無法取得 ${symbol} 的歷史數據:`, err); setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。"); } finally { setHistoryLoading(false); }
   };
 
   const performFetch = async (url) => {
@@ -634,13 +609,8 @@ const Dashboard = () => {
     if (savedSort) setSortConfig(JSON.parse(savedSort));
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
 
-    // Load AI Cache
-    const cache = getAiCache();
-    const signals = {};
-    Object.keys(cache).forEach(key => { if (cache[key].signal) signals[key] = cache[key].signal; });
-    setAiSignals(signals);
-
     const today = new Date().toISOString().split('T')[0];
+    const cache = getAiCache();
     let cacheModified = false;
     Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } });
     if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
@@ -679,20 +649,35 @@ const Dashboard = () => {
     const map = new Map();
     portfolioData.forEach(item => {
       const key = item['標的'];
-      if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, marketValue: 0, profitLoss: 0, estimateFee: 0, estimateTax: 0, dates: new Set(), isUS: item.isUS }); }
+      if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, costBasisRaw: 0, marketValue: 0, profitLoss: 0, estimateFee: 0, estimateTax: 0, dates: new Set(), isUS: item.isUS }); }
       const entry = map.get(key);
       entry.shares += item.shares; entry.costBasis += item.costBasis; entry.marketValue += item.marketValue; 
-      entry.profitLoss += item.profitLoss; // Accumulate NET profit
+      entry.costBasisRaw += (item.buyPriceRaw * item.shares); // Accumulate Raw USD Cost
+      entry.profitLoss += item.profitLoss; 
       entry.estimateFee += item.estimateFee;
       entry.estimateTax += item.estimateTax;
       entry.dates.add(item['日期']);
       if (item.currentPrice !== item.buyPrice) entry.currentPrice = item.currentPrice;
+      if (item.currentPriceRaw) entry.currentPriceRaw = item.currentPriceRaw; // Store raw current price
     });
     return Array.from(map.values()).map(item => {
       const roi = item.costBasis > 0 ? item.profitLoss / item.costBasis : 0;
       const sortedDates = Array.from(item.dates).sort((a, b) => new Date(a) - new Date(b));
       const latestDate = sortedDates[sortedDates.length - 1];
-      return { ...item, buyPrice: item.shares > 0 ? item.costBasis / item.shares : 0, roi, '日期': latestDate };
+      
+      const avgPriceTwd = item.shares > 0 ? item.costBasis / item.shares : 0;
+      const avgPriceRaw = item.shares > 0 ? item.costBasisRaw / item.shares : 0;
+      
+      const finalBuyPrice = item.isUS ? avgPriceRaw : avgPriceTwd;
+      const finalCurrentPrice = item.isUS ? item.currentPriceRaw : item.currentPrice;
+      
+      return { 
+        ...item, 
+        buyPrice: finalBuyPrice, 
+        currentPrice: finalCurrentPrice, 
+        roi, 
+        '日期': latestDate 
+      };
     });
   }, [portfolioData]);
 
@@ -936,10 +921,10 @@ const Dashboard = () => {
                   </div>
                   
                   <div className="grid grid-cols-2 gap-4 text-sm mb-3">
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">現價</span><span className="text-white font-medium ml-2 md:ml-0">{formatPrice(row.currentPrice)}</span></div>
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">成本</span><span className="text-slate-300 ml-2 md:ml-0">{formatPrice(row.buyPrice)}</span></div>
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">市值</span><span className="text-white ml-2 md:ml-0">{formatCurrency(row.marketValue)}</span></div>
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">股數</span><span className="text-slate-300 ml-2 md:ml-0">{row.shares.toLocaleString()}</span></div>
+                    <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{row.isUS ? '$' : ''}{formatPrice(row.currentPriceRaw || row.currentPrice)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">成本</span><span className="text-slate-300">{row.isUS ? '$' : ''}{formatPrice(row.buyPriceRaw || row.buyPrice)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">股數</span><span className="text-slate-300">{row.shares.toLocaleString()}</span></div>
                   </div>
 
                   <div className="flex justify-end space-x-2 pt-2 border-t border-slate-700/50">
@@ -969,8 +954,8 @@ const Dashboard = () => {
                         <td className="px-6 py-4 whitespace-nowrap"><div className="flex flex-col space-y-1">{index > 0 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], -1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowUp className="w-3 h-3" /></button>}{index < sortedHoldings.length - 1 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], 1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowDown className="w-3 h-3" /></button>}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-white font-medium flex items-center">{signal === 'ADD' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" title="AI建議: 加碼" />}{signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" title="AI建議: 減碼" />}{row['標的']}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}</div><div className="text-xs text-slate-500">最近交易: {row['日期']}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-slate-200">{row['名稱']}</div><span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mt-1 ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span></td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{formatPrice(row.buyPrice)}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{formatPrice(row.currentPrice)}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.isUS ? '$' : ''}{formatPrice(row.buyPriceRaw || row.buyPrice)}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{row.isUS ? '$' : ''}{formatPrice(row.currentPriceRaw || row.currentPrice)}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.shares.toLocaleString()}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold relative group">
                           <span className={`cursor-help border-b border-dotted ${(row.profitLoss || 0) >= 0 ? 'text-red-500 border-red-500' : 'text-green-500 border-green-500'}`}>{(row.profitLoss || 0) > 0 ? '+' : ''}{formatCurrency(row.profitLoss)}</span>
@@ -1004,10 +989,12 @@ const Dashboard = () => {
               
               <div className="pt-4 border-t border-slate-700">
                 <h4 className="text-sm font-semibold text-slate-300 mb-4 flex items-center"><Calculator className="w-4 h-4 mr-2" /> 交易成本設定</h4>
-                <div>
-                   <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
-                   <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
-                   <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
+                    <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
+                    <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
+                  </div>
                 </div>
               </div>
 
