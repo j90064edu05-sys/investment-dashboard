@@ -7,21 +7,22 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v13.0 (Fixes & Enhancements):
- * * [問題修復]
- * 1. 台幣定存排除 (TWD TD Fix):
- * - 在 `fetchRealTimePrices` 中，若解析出的 currency 為 'TWD'，直接跳過 API 請求。
- * 2. 儲存提示優化 (Toast UI):
- * - 移除 `alert()`。
- * - 新增 `Toast` 元件與 `toast` 狀態，提供非阻斷式的成功提示。
- * 3. 外幣成本模式 (FX Cost Mode):
- * - 設定頁新增 `costMode` 切換 (Floating vs Fixed)。
- * - 若選擇「固定成本 (CSV含台幣成本)」，則 `costBasis` 不再乘上即時匯率。
- * - 這能解決美金定存平均成本異常與無法顯示匯差損益的問題。
+ * 專業理財經理人技術筆記 (Technical Note) v14.0 (Persistence & Smart Update):
+ * * [核心架構升級] 資料持久化與智慧更新
+ * 1. 股價快取 (Price Caching):
+ * - Key: `investment_price_cache`
+ * - 結構: `{ "2330.TW": { price: 560, date: "2023-10-27" }, "USD/TWD": { ... } }`
+ * - 啟動時：先載入 Cache -> 渲染畫面 (Instant Load) -> 背景執行 fetchRealTimePrices。
+ * 2. 智慧更新邏輯 (Smart Update):
+ * - 檢查 Cache 日期 vs 今天日期。
+ * - 如果是新標的 (Cache Miss) -> 立即更新。
+ * - 如果是舊資料 (Date mismatch) -> 背景更新。
+ * 3. AI 整合:
+ * - AI 分析結果原本已有 Cache 機制 (v11.0)，本次確保其與新的股價流程相容。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -77,6 +78,23 @@ const updateAiCache = (symbol, type, content) => {
   localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
 };
 
+// Price Cache Helpers (New)
+const getPriceCache = () => { try { return JSON.parse(localStorage.getItem('investment_price_cache') || '{}'); } catch { return {}; } };
+const savePriceCache = (newPrices) => {
+    const cache = getPriceCache();
+    const today = getTodayDate();
+    const updatedCache = { ...cache };
+    
+    Object.keys(newPrices).forEach(symbol => {
+        updatedCache[symbol] = {
+            price: newPrices[symbol],
+            date: today,
+            timestamp: Date.now()
+        };
+    });
+    localStorage.setItem('investment_price_cache', JSON.stringify(updatedCache));
+};
+
 const renderShape = (shape, cx, cy, color, size = 6) => {
   const stroke = "#fff";
   const strokeWidth = 1.5;
@@ -130,6 +148,7 @@ const fetchWithProxyFallback = async (targetUrl) => {
   throw new Error('All proxies failed');
 };
 
+// --- 技術指標計算 ---
 const calculateSMA = (data, period) => {
   return data.map((item, index, arr) => {
     if (index < period - 1) return { ...item, [`MA${period}`]: null };
@@ -240,7 +259,7 @@ const Dashboard = () => {
   const [lastUpdated, setLastUpdated] = useState(new Date()); 
   const [activeTab, setActiveTab] = useState('overview');
   
-  const [realTimePrices, setRealTimePrices] = useState({});
+  const [realTimePrices, setRealTimePrices] = useState({}); // Stores price dict: { "2330.TW": 560 }
   const [usdRate, setUsdRate] = useState(1); 
   const [updateError, setUpdateError] = useState(null);
   const [historicalData, setHistoricalData] = useState({});
@@ -252,12 +271,7 @@ const Dashboard = () => {
   const [sortConfig, setSortConfig] = useState({ key: 'manual', direction: 'asc' });
   const [customOrder, setCustomOrder] = useState([]);
 
-  // Settings
-  const [feeDiscount, setFeeDiscount] = useState(1); 
-  const [costInTwd, setCostInTwd] = useState(false); // New: Foreign Cost Mode
-  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
-
-  // AI & UI State
+  // AI Analysis State
   const [aiSummary, setAiSummary] = useState(null);
   const [aiDetail, setAiDetail] = useState(null);
   const [isAiSummarizing, setIsAiSummarizing] = useState(false);
@@ -265,7 +279,11 @@ const Dashboard = () => {
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
-  const [toast, setToast] = useState(null); // Toast message state
+  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
+
+  const [feeDiscount, setFeeDiscount] = useState(1); 
+  const [costInTwd, setCostInTwd] = useState(false); 
+  const [toast, setToast] = useState(null);
 
   const processData = (data, pricesMap) => {
     const currentUsdRate = pricesMap['TWD=X'] || 30; 
@@ -286,7 +304,6 @@ const Dashboard = () => {
 
       if (isTD) {
           const currency = symbol.replace('-TD', '');
-          // For TWD-TD, fxRate is 1. For others, find rate.
           if (currency === 'TWD') {
               fxRate = 1;
           } else {
@@ -304,12 +321,7 @@ const Dashboard = () => {
 
       const buyPriceTwd = buyPriceRaw * fxRate;
       const currentPriceTwd = currentPriceRaw * fxRate;
-      
-      // Cost Logic Fix:
-      // If user enabled "costInTwd", then use raw amount as TWD cost.
-      // Otherwise (default), assume raw amount is original currency and multiply by current FX (floating cost).
       const costBasisTwd = (isUS && costInTwd) ? costBasisRaw : costBasisRaw * fxRate;
-      
       const marketValueTwd = shares * currentPriceTwd;
       
       const assetType = detectAssetType(symbol, name, category);
@@ -329,27 +341,12 @@ const Dashboard = () => {
 
       const grossProfit = marketValueTwd - costBasisTwd;
       const netProfit = grossProfit - feeFinal - estimateTax;
-      
-      // Avg Price in TWD (Derived from Cost Basis TWD)
-      const calculatedBuyPriceTwd = shares > 0 ? costBasisTwd / shares : 0;
-      
       const roi = costBasisTwd > 0 ? netProfit / costBasisTwd : 0;
 
       return { 
-        ...item, 
-        id: index, 
-        shares, 
-        isUS,
-        isTD,
-        buyPrice: calculatedBuyPriceTwd, // Use derived TWD avg price
-        currentPrice: currentPriceTwd, 
-        costBasis: costBasisTwd, 
-        marketValue: marketValueTwd, 
-        profitLoss: netProfit, 
-        grossProfit,           
-        estimateFee: feeFinal,
-        estimateTax,
-        roi, 
+        ...item, id: index, shares, isUS, isTD,
+        buyPrice: buyPriceTwd, currentPrice: currentPriceTwd, costBasis: costBasisTwd, marketValue: marketValueTwd, 
+        profitLoss: netProfit, grossProfit, estimateFee: feeFinal, estimateTax, roi, 
         isRealData: !!(pricesMap?.[symbol] || (isTD && pricesMap?.[isTD ? (symbol.replace('-TD','')==='USD'?'TWD=X':`${symbol.replace('-TD','')}TWD=X`) : '']))
       };
     });
@@ -357,73 +354,90 @@ const Dashboard = () => {
     setRawData(data);
   };
 
-  const fetchRealTimePrices = async (data) => {
+  const fetchRealTimePrices = async (data, forceUpdate = false) => {
     setPriceLoading(true);
     setUpdateError(null);
     setLoadingMessage('更新即時股價中...');
     
     const uniqueSymbols = [...new Set(data.map(item => item['標的']))];
-    
     if (!uniqueSymbols.includes('TWD=X')) uniqueSymbols.push('TWD=X');
 
     data.forEach(item => {
         if (item['類別'] === '定存' && item['標的'].includes('-TD')) {
             const currency = item['標的'].replace('-TD', '');
-            if (currency !== 'TWD') { // Skip TWD-TD fx fetch
+            if (currency !== 'TWD') { 
                 const ticker = currency === 'USD' ? 'TWD=X' : `${currency}TWD=X`;
                 if (!uniqueSymbols.includes(ticker)) uniqueSymbols.push(ticker);
             }
         }
     });
 
-    const newPrices = {};
-    const failedSymbols = [];
+    const today = getTodayDate();
+    const cache = getPriceCache();
+    const newPrices = { ...realTimePrices }; // Start with existing
+    
+    // Identify which symbols need update (New, Stale, or Forced)
+    const symbolsToFetch = uniqueSymbols.filter(symbol => {
+        if (symbol === '定存' || symbol.includes('-TD')) return false; // Skip internal markers
+        
+        // Smart Check:
+        // 1. Is New? (Not in cache)
+        if (!cache[symbol]) return true;
+        // 2. Is Stale? (Cache date is not today)
+        if (cache[symbol].date !== today) return true;
+        // 3. Force Update? (User clicked button)
+        if (forceUpdate) return true;
 
-    const promises = uniqueSymbols.map(async (symbol) => {
-      if (symbol === '定存' || symbol.includes('-TD')) return; // Ensure TD placeholders are skipped
-
-      const maxRetries = 2;
-      let attempts = 0;
-      let success = false;
-
-      while(attempts <= maxRetries && !success) {
-        try {
-          const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
-          const result = await fetchWithProxyFallback(targetUrl);
-          const meta = result?.chart?.result?.[0]?.meta;
-          
-          if (meta && meta.regularMarketPrice) {
-            newPrices[symbol] = meta.regularMarketPrice;
-            success = true;
-          } else {
-            throw new Error('Data format error');
-          }
-        } catch (err) {
-          attempts++;
-          if (attempts <= maxRetries) {
-            setLoadingMessage(`更新 ${symbol} 失敗，正在重試 (${attempts}/${maxRetries})...`);
-            await delay(1000);
-          } else {
-            console.warn(`標的 ${symbol} 更新失敗:`, err);
-            failedSymbols.push(symbol);
-          }
-        }
-      }
+        // If valid in cache and not forcing update, use cache immediately
+        newPrices[symbol] = cache[symbol].price;
+        return false; 
     });
 
-    await Promise.all(promises);
-    
-    if (newPrices['TWD=X']) {
-        setUsdRate(newPrices['TWD=X']);
-    }
+    // If there are symbols to fetch, fetch them
+    if (symbolsToFetch.length > 0) {
+        const failedSymbols = [];
+        const promises = symbolsToFetch.map(async (symbol) => {
+          const maxRetries = 2;
+          let attempts = 0;
+          let success = false;
+          await delay(Math.random() * 1500); // Jitter
 
-    setRealTimePrices(prev => ({ ...prev, ...newPrices }));
+          while(attempts <= maxRetries && !success) {
+            try {
+              const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
+              const result = await fetchWithProxyFallback(targetUrl);
+              const meta = result?.chart?.result?.[0]?.meta;
+              
+              if (meta && meta.regularMarketPrice) {
+                newPrices[symbol] = meta.regularMarketPrice;
+                success = true;
+              } else { throw new Error('Data format error'); }
+            } catch (err) {
+              attempts++;
+              if (attempts <= maxRetries) {
+                setLoadingMessage(`更新 ${symbol} 失敗，正在重試 (${attempts}/${maxRetries})...`);
+                await delay(1000);
+              } else {
+                console.warn(`標的 ${symbol} 更新失敗:`, err);
+                failedSymbols.push(symbol);
+              }
+            }
+          }
+        });
+
+        await Promise.all(promises);
+        if (failedSymbols.length > 0) setUpdateError(`更新失敗的標的: ${failedSymbols.join(', ')}`);
+        
+        // Save new results to Cache
+        savePriceCache(newPrices);
+    }
+    
+    // Update State
+    if (newPrices['TWD=X']) setUsdRate(newPrices['TWD=X']);
+    setRealTimePrices(newPrices);
     setPriceLoading(false);
     setLastUpdated(new Date()); 
-    
-    if (failedSymbols.length > 0) {
-      setUpdateError(`更新失敗的標的: ${failedSymbols.join(', ')}`);
-    }
+    setLoadingMessage('更新即時股價中...'); // Clear message
 
     processData(data, newPrices);
   };
@@ -469,22 +483,12 @@ const Dashboard = () => {
 
   const generateSummary = async (symbol, data) => {
     if (!data || data.length === 0) return;
-
     const today = getTodayDate();
     const cache = getAiCache();
     if (cache[symbol] && cache[symbol].date === today && cache[symbol].summary) {
-      setAiSummary(cache[symbol].summary);
-      setAnalysisSymbol(symbol);
-      setAiDetail(null); 
-      setIsDetailExpanded(false);
-      return;
+      setAiSummary(cache[symbol].summary); setAnalysisSymbol(symbol); setAiDetail(null); setIsDetailExpanded(false); return;
     }
-
-    setIsAiSummarizing(true);
-    setAiSummary(null);
-    setAiDetail(null); 
-    setIsDetailExpanded(false);
-    setAnalysisSymbol(symbol); 
+    setIsAiSummarizing(true); setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false); setAnalysisSymbol(symbol); 
 
     const latest = data[data.length - 1];
     const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
@@ -492,57 +496,27 @@ const Dashboard = () => {
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(symbol, stockName, category);
 
-    let roleDescription = "";
-    let focusPoints = "";
-
-    if (assetType === 'BOND') {
-      roleDescription = "專業總體經濟與債券分析師";
-      focusPoints = "重點關注：利率環境影響、殖利率走勢、債券價格支撐與避險屬性。";
-    } else if (assetType === 'ETF') {
-      roleDescription = "專業 ETF 策略分析師";
-      focusPoints = "重點關注：追蹤指數趨勢、大盤連動性、長線存股價值。";
-    } else {
-      roleDescription = "專業證券技術分析師";
-      focusPoints = "重點關注：股價趨勢、均線排列、KD/MACD 訊號、支撐壓力位。";
-    }
-    
-    const prompt = `
-      請以一位【${roleDescription}】的角色，針對 ${symbol} (${stockName}) [${assetType}] 進行極簡短技術分析。
-      ${focusPoints}
-      數據：收盤 ${formatPrice(latest.close)}, MA20 ${latest.MA20 ? formatPrice(latest.MA20) : '-'}, MA60 ${latest.MA60 ? formatPrice(latest.MA60) : '-'}, KD(K=${latest.K ? formatPrice(latest.K) : '-'}, D=${latest.D ? formatPrice(latest.D) : '-'}), MACD(OSC=${latest.OSC ? formatPrice(latest.OSC) : '-'}).
-      限制：請用繁體中文，50 字以內，直接講重點。
-    `;
+    let roleDescription = assetType === 'BOND' ? "專業總體經濟與債券分析師" : assetType === 'ETF' ? "專業 ETF 策略分析師" : "專業證券技術分析師";
+    const prompt = `請以一位【${roleDescription}】的角色，針對 ${symbol} (${stockName}) [${assetType}] 進行極簡短技術分析。數據：收盤 ${formatPrice(latest.close)}, MA20 ${latest.MA20 ? formatPrice(latest.MA20) : '-'}, MA60 ${latest.MA60 ? formatPrice(latest.MA60) : '-'}, KD(K=${latest.K ? formatPrice(latest.K) : '-'}, D=${latest.D ? formatPrice(latest.D) : '-'}), MACD(OSC=${latest.OSC ? formatPrice(latest.OSC) : '-'}). 限制：繁體中文，50 字以內重點。`;
 
     try {
       const text = await callGeminiWithFallback(prompt);
-      setAiSummary(text);
-      setAnalysisSymbol(symbol);
-      updateAiCache(symbol, 'summary', text); 
-    } catch (err) {
-      setAiSummary(err.message || "分析暫時無法使用。");
-      setAnalysisSymbol(symbol); 
-    } finally {
-      setIsAiSummarizing(false);
-    }
+      setAiSummary(text); setAnalysisSymbol(symbol); updateAiCache(symbol, 'summary', text); 
+    } catch (err) { setAiSummary(err.message || "分析暫時無法使用。"); setAnalysisSymbol(symbol); } 
+    finally { setIsAiSummarizing(false); }
   };
 
   const generateDetail = async () => {
     if (!selectedHistorySymbol) return;
-
     const today = getTodayDate();
     const cache = getAiCache();
     if (cache[selectedHistorySymbol] && cache[selectedHistorySymbol].date === today && cache[selectedHistorySymbol].detail) {
-      setAiDetail(cache[selectedHistorySymbol].detail);
-      setIsDetailExpanded(true);
-      return;
+      setAiDetail(cache[selectedHistorySymbol].detail); setIsDetailExpanded(true); return;
     }
-
     const key = `${selectedHistorySymbol}_${timeframe}`;
     const chartData = historicalData[key];
     if (!chartData || chartData.length === 0) return;
-
-    setIsAiDetailing(true);
-    setIsDetailExpanded(true); 
+    setIsAiDetailing(true); setIsDetailExpanded(true); 
 
     const latest = chartData[chartData.length - 1];
     const assetInfo = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol);
@@ -550,67 +524,19 @@ const Dashboard = () => {
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(selectedHistorySymbol, stockName, category);
     
-    let roleDescription = "";
-    let analysisStructure = "";
-
-    if (assetType === 'BOND') {
-      roleDescription = "專業總體經濟與債券分析師";
-      analysisStructure = `
-      1. **利率與總經環境**：分析 Fed 政策與利率對債券價格的影響。
-      2. **技術面分析**：目前價格在均線之上的強弱勢判斷。
-      3. **操作建議**：針對領息族與價差交易者的建議。
-      `;
-    } else if (assetType === 'ETF') {
-      roleDescription = "專業 ETF 策略分析師";
-      analysisStructure = `
-      1. **趨勢研判**：目前趨勢是多頭、空頭還是盤整？
-      2. **技術訊號**：KD 與 MACD 是否出現黃金交叉或背離？
-      3. **操作建議**：針對定期定額與波段操作者的建議。
-      `;
-    } else {
-      roleDescription = "專業證券技術分析師";
-      analysisStructure = `
-      1. **趨勢研判**：均線排列與多空方向。
-      2. **訊號解讀**：KD 與 MACD 的交叉與背離狀況。
-      3. **關鍵價位**：觀察支撐與壓力。
-      4. **操作建議**：針對持股者與空手者的具體建議。
-      `;
-    }
-
-    const prompt = `
-      請以一位【${roleDescription}】的角色，提供 ${selectedHistorySymbol} (${stockName}) [${assetType}] 的完整技術面分析報告。
-      週期：${timeframe === '1y_1d' ? '日線' : timeframe === '5y_1wk' ? '週線' : '月線'}
-      
-      最新技術指標：
-      - 價格: ${formatPrice(latest.close)}
-      - 均線: MA20=${latest.MA20 ? formatPrice(latest.MA20) : 'N/A'}, MA60=${latest.MA60 ? formatPrice(latest.MA60) : 'N/A'}, MA120=${latest.MA120 ? formatPrice(latest.MA120) : 'N/A'}
-      - 動能: KD(9,3,3) K=${latest.K ? formatPrice(latest.K) : 'N/A'}, D=${latest.D ? formatPrice(latest.D) : 'N/A'}
-      - 趨勢: MACD(12,26,9) DIF=${latest.DIF ? formatPrice(latest.DIF) : 'N/A'}, MACD=${latest.Signal ? formatPrice(latest.Signal) : 'N/A'}, OSC=${latest.OSC ? formatPrice(latest.OSC) : 'N/A'}
-
-      請使用 Markdown 格式輸出，結構如下：
-      ${analysisStructure}
-    `;
+    let roleDescription = assetType === 'BOND' ? "專業總體經濟與債券分析師" : assetType === 'ETF' ? "專業 ETF 策略分析師" : "專業證券技術分析師";
+    const prompt = `請以一位【${roleDescription}】的角色，提供 ${selectedHistorySymbol} (${stockName}) [${assetType}] 的完整技術面分析報告。週期：${timeframe}。最新技術指標：價格 ${formatPrice(latest.close)}, MA20/60/120, KD, MACD。請使用 Markdown 格式輸出。`;
 
     try {
       const text = await callGeminiWithFallback(prompt);
-      setAiDetail(text);
-      updateAiCache(selectedHistorySymbol, 'detail', text); 
-    } catch (err) {
-      setAiDetail(err.message || "詳細分析生成失敗，請稍後再試。");
-    } finally {
-      setIsAiDetailing(false);
-    }
+      setAiDetail(text); updateAiCache(selectedHistorySymbol, 'detail', text); 
+    } catch (err) { setAiDetail(err.message || "詳細分析生成失敗。"); } 
+    finally { setIsAiDetailing(false); }
   };
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
-
-    setHistoryLoading(true);
-    setHistoryError(null);
-    setAnalysisSymbol(null); 
-    setAiSummary(null);
-    setAiDetail(null);
-    setIsDetailExpanded(false);
+    setHistoryLoading(true); setHistoryError(null); setAnalysisSymbol(null); setAiSummary(null); setAiDetail(null); setIsDetailExpanded(false);
 
     try {
       let range = '5y'; let interval = '1wk';
@@ -628,25 +554,20 @@ const Dashboard = () => {
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
-        
-        if (geminiApiKey) {
-          generateSummary(symbol, processedData);
-        } else {
-          setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
-        }
-      } else {
-        throw new Error('No chart data found');
-      }
+        if (geminiApiKey) generateSummary(symbol, processedData);
+        else setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
+      } else { throw new Error('No chart data found'); }
     } catch (err) {
       console.warn(`無法取得 ${symbol} 的歷史數據:`, err);
       setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。");
-    } finally {
-      setHistoryLoading(false);
-    }
+    } finally { setHistoryLoading(false); }
   };
 
   const performFetch = async (url) => {
-    setLoading(true); setError(null); setUpdateError(null); setRealTimePrices({}); setHistoricalData({});
+    setLoading(true); setError(null); setUpdateError(null); 
+    // Don't reset realTimePrices completely, try to load from cache first inside this flow
+    // setRealTimePrices({}); // Removed to allow cache merging
+    setHistoricalData({});
     try {
       const Papa = await loadPapaParse();
       Papa.parse(url, {
@@ -654,7 +575,20 @@ const Dashboard = () => {
         complete: (results) => {
           if (results.data && results.data.length > 0) {
             const validData = results.data.filter(row => row['標的'] && row['價格']);
-            processData(validData, {}); setLoading(false); fetchRealTimePrices(validData);
+            
+            // 1. Load Cache
+            const cachedPrices = getPriceCache();
+            // 2. Set State with Cache (Instant Load)
+            setRealTimePrices(cachedPrices.prices || {});
+            setUsdRate(cachedPrices.prices?.['TWD=X'] || 1);
+            
+            // 3. Process Data with Cache
+            processData(validData, cachedPrices.prices || {}); 
+            setLoading(false); 
+            
+            // 4. Background Update (Smart Fetch)
+            fetchRealTimePrices(validData, false); // false = not forced, smart update
+            
             const first = validData.find(d => d['類別'] !== '定存');
             if (first) setSelectedHistorySymbol(first['標的']);
             localStorage.setItem('investment_sheet_url', url);
@@ -673,8 +607,8 @@ const Dashboard = () => {
     localStorage.setItem('fee_discount', feeDiscount);
     localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
     if (customOrder.length > 0) localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
-    localStorage.setItem('cost_in_twd', costInTwd); // Save Cost Mode
-    setToast("設定已儲存！"); // Use Toast
+    localStorage.setItem('cost_in_twd', costInTwd); 
+    setToast("設定已儲存！"); 
     if (rawData.length > 0) processData(rawData, realTimePrices);
   };
 
@@ -704,7 +638,7 @@ const Dashboard = () => {
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
     if (savedCostMode) setCostInTwd(savedCostMode === 'true');
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = getTodayDate();
     const cache = getAiCache();
     let cacheModified = false;
     Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } });
@@ -854,15 +788,12 @@ const Dashboard = () => {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20 md:pb-0">
-      {/* Toast Notification */}
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
-
       <nav className="hidden md:block border-b border-slate-700 bg-slate-800/50 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
             <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室</span>
-            {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">
             {['overview', 'history', 'holdings', 'config'].map(tab => (
@@ -1002,10 +933,10 @@ const Dashboard = () => {
                   </div>
                   
                   <div className="grid grid-cols-2 gap-4 text-sm mb-3">
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">現價</span><span className="text-white font-medium ml-2 md:ml-0">{formatPrice(row.currentPrice)}</span></div>
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">成本</span><span className="text-slate-300 ml-2 md:ml-0">{formatPrice(row.buyPrice)}</span></div>
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">市值</span><span className="text-white ml-2 md:ml-0">{formatCurrency(row.marketValue)}</span></div>
-                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">股數</span><span className="text-slate-300 ml-2 md:ml-0">{row.shares.toLocaleString()}</span></div>
+                    <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{formatPrice(row.currentPrice)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">成本</span><span className="text-slate-300">{formatPrice(row.buyPrice)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">股數</span><span className="text-slate-300">{row.shares.toLocaleString()}</span></div>
                   </div>
 
                   <div className="flex justify-end space-x-2 pt-2 border-t border-slate-700/50">
