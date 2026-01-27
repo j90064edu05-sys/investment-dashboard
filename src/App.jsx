@@ -11,23 +11,27 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v15.1 (AI Signal UI):
- * * [介面優化] AI 智能觀點新增操作燈號
- * 1. 歷史走勢頁面 (History Tab):
- * - 在 "AI 智能觀點" 標題旁，新增 `aiSignals[selectedHistorySymbol]` 的判斷邏輯。
- * - 若訊號為 'ADD' -> 顯示紅色呼吸燈 + "建議加碼"。
- * - 若訊號為 'REDUCE' -> 顯示綠色呼吸燈 + "建議減碼"。
- * - 讓使用者在閱讀文字分析前，能直觀看到結論。
+ * 專業理財經理人技術筆記 (Technical Note) v13.1 (Cost Logic Update):
+ * * [核心修正] 外幣資產成本計算
+ * 1. 成本邏輯變更:
+ * - 依據使用者需求：「匯入的資料中，金額為新台幣」。
+ * - `costBasisTwd` 直接取用 CSV 的 `金額` (costBasisRaw)，不再乘上匯率。
+ * - 移除了 `costInTwd` 設定開關，現在預設即為「金額=台幣」。
+ * 2. 市值邏輯:
+ * - `marketValueTwd` = 股數 * 現價(USD) * 即時匯率。
+ * - 損益 = 市值(TWD) - 成本(TWD)。這樣能自動包含「價差」與「匯差」。
+ * 3. 範例資料 (Demo Data):
+ * - 更新 NVDA 與 USD-TD 的金額為合理的台幣數值 (e.g. 10股 NVDA @300USD 約 90,000 TWD)。
  */
 
 // --- 靜態配置與輔助函式 ---
 
 const DEMO_DATA = [
   { 日期: '2015-01-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 140, 股數: 1000, 策略: '基礎買入', 金額: 140000 },
-  { 日期: '2023-05-20', 標的: 'NVDA', 名稱: 'NVIDIA', 類別: '股票', 價格: 300, 股數: 10, 策略: '基礎買入', 金額: 3000 },
-  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 75, 股數: 50, 策略: '基礎買入', 金額: 3750 },
+  { 日期: '2023-05-20', 標的: 'NVDA', 名稱: 'NVIDIA', 類別: '股票', 價格: 300, 股數: 10, 策略: '基礎買入', 金額: 92000 }, // 10股 * 300USD * 30.6匯率 (約)
+  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 75, 股數: 50, 策略: '基礎買入', 金額: 110000 }, // 50股 * 75USD * 29.3匯率 (約)
   { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 },
-  { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 1, 股數: 10000, 策略: '基礎買入', 金額: 10000 }, 
+  { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 1, 股數: 10000, 策略: '基礎買入', 金額: 305000 }, // 10000 USD * 30.5 匯率
   { 日期: '2023-07-01', 標的: 'TWD-TD', 名稱: '台幣定存', 類別: '定存', 價格: 1, 股數: 100000, 策略: '基礎買入', 金額: 100000 }, 
 ];
 
@@ -265,11 +269,10 @@ const Dashboard = () => {
   const [usedModel, setUsedModel] = useState(null); 
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
   const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
-  const [aiSignals, setAiSignals] = useState({}); // Stores signal per symbol
+  const [aiSignals, setAiSignals] = useState({}); 
 
   // Fee Settings
   const [feeDiscount, setFeeDiscount] = useState(1); 
-  const [costInTwd, setCostInTwd] = useState(false); 
   const [toast, setToast] = useState(null);
 
   const processData = (data, pricesMap) => {
@@ -306,9 +309,14 @@ const Dashboard = () => {
           currentPriceRaw = category === '定存' ? buyPriceRaw : (pricesMap?.[symbol] || buyPriceRaw);
       }
 
+      // 核心修正：金額欄位(costBasisRaw) 已是新台幣，不需乘匯率
+      const costBasisTwd = costBasisRaw; 
+
+      // 顯示用的買入價 (參考用)
       const buyPriceTwd = buyPriceRaw * fxRate;
+      
+      // 現價與市值需隨匯率浮動
       const currentPriceTwd = currentPriceRaw * fxRate;
-      const costBasisTwd = (isUS && costInTwd) ? costBasisRaw : costBasisRaw * fxRate;
       const marketValueTwd = shares * currentPriceTwd;
       
       const assetType = detectAssetType(symbol, name, category);
@@ -328,7 +336,10 @@ const Dashboard = () => {
 
       const grossProfit = marketValueTwd - costBasisTwd;
       const netProfit = grossProfit - feeFinal - estimateTax;
+      
+      // 使用 TWD 總成本計算出的平均成本
       const calculatedBuyPriceTwd = shares > 0 ? costBasisTwd / shares : 0;
+      
       const roi = costBasisTwd > 0 ? netProfit / costBasisTwd : 0;
 
       return { 
@@ -510,6 +521,7 @@ const Dashboard = () => {
 
   const generateDetail = async () => {
     if (!selectedHistorySymbol) return;
+
     const today = getTodayDate();
     const cache = getAiCache();
     if (cache[selectedHistorySymbol] && cache[selectedHistorySymbol].date === today && cache[selectedHistorySymbol].detail) {
@@ -594,7 +606,6 @@ const Dashboard = () => {
     localStorage.setItem('fee_discount', feeDiscount);
     localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
     if (customOrder.length > 0) localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
-    localStorage.setItem('cost_in_twd', costInTwd); 
     setToast("設定已儲存！"); 
     if (rawData.length > 0) processData(rawData, realTimePrices);
   };
@@ -616,14 +627,12 @@ const Dashboard = () => {
     const savedDiscount = localStorage.getItem('fee_discount');
     const savedSort = localStorage.getItem('investment_sort_config');
     const savedOrder = localStorage.getItem('investment_custom_order');
-    const savedCostMode = localStorage.getItem('cost_in_twd');
 
     if (savedKey) setGeminiApiKey(savedKey);
     if (savedModel) setSelectedModel(savedModel);
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount));
     if (savedSort) setSortConfig(JSON.parse(savedSort));
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
-    if (savedCostMode) setCostInTwd(savedCostMode === 'true');
 
     // Load AI Cache
     const cache = getAiCache();
@@ -673,7 +682,7 @@ const Dashboard = () => {
       if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, marketValue: 0, profitLoss: 0, estimateFee: 0, estimateTax: 0, dates: new Set(), isUS: item.isUS }); }
       const entry = map.get(key);
       entry.shares += item.shares; entry.costBasis += item.costBasis; entry.marketValue += item.marketValue; 
-      entry.profitLoss += item.profitLoss; 
+      entry.profitLoss += item.profitLoss; // Accumulate NET profit
       entry.estimateFee += item.estimateFee;
       entry.estimateTax += item.estimateTax;
       entry.dates.add(item['日期']);
@@ -868,29 +877,7 @@ const Dashboard = () => {
               ) : <div className="flex-1 flex items-center justify-center min-h-[400px] text-slate-500">{historyError ? <span className="text-red-400">{historyError}</span> : "請選擇左側標的以查看走勢"}</div>}
 
               <div className="mt-4 pt-4 border-t border-slate-700">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center">
-                    <Sparkles className="w-5 h-5 text-purple-400 mr-2" />
-                    <h4 className="text-white font-semibold">AI 智能觀點</h4>
-                    {usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{usedModel}</span>}
-                    {/* Signal Light in History Tab */}
-                    {aiSignals[selectedHistorySymbol] === 'ADD' && (
-                      <div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30">
-                        <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" />
-                        <span className="text-xs text-red-400 font-bold">建議加碼</span>
-                      </div>
-                    )}
-                    {aiSignals[selectedHistorySymbol] === 'REDUCE' && (
-                      <div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30">
-                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" />
-                        <span className="text-xs text-green-400 font-bold">建議減碼</span>
-                      </div>
-                    )}
-                  </div>
-                  {!aiDetail && !isAiDetailing && (
-                    <button onClick={generateDetail} className="text-xs text-blue-400 hover:text-blue-300 flex items-center transition-colors"><FileSearch className="w-3 h-3 mr-1" />查看完整分析</button>
-                  )}
-                </div>
+                <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{usedModel}</span>}{aiSignals[selectedHistorySymbol] === 'ADD' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議加碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議減碼</span></div>)}</div>{!aiDetail && !isAiDetailing && <button onClick={generateDetail} className="text-xs text-blue-400 hover:text-blue-300 flex items-center transition-colors"><FileSearch className="w-3 h-3 mr-1" />查看完整分析</button>}</div>
                 <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700 shadow-inner">
                   {isAiSummarizing ? <div className="flex items-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin mr-2" />正在生成 50 字摘要...</div> : aiSummary ? <div className="mb-3"><p className="text-slate-300 text-sm leading-relaxed border-l-2 border-purple-500 pl-3">{aiSummary}</p></div> : <div className="text-slate-500 text-sm">等待分析數據...</div>}
                   {(isAiDetailing || aiDetail) && <div className={`mt-3 pt-3 border-t border-slate-700/50 transition-all duration-500 ease-in-out ${isDetailExpanded ? 'opacity-100 max-h-[1000px]' : 'opacity-0 max-h-0 overflow-hidden'}`}>{isAiDetailing ? <div className="flex flex-col items-center justify-center py-4 text-slate-400"><Loader2 className="w-6 h-6 animate-spin mb-2 text-purple-500" /><span className="text-xs">正在進行深度運算 (Trend, KD, MACD)...</span></div> : <div><div className="flex justify-between items-center mb-2"><span className="text-xs font-semibold text-purple-300">完整技術報告</span><button onClick={() => setIsDetailExpanded(!isDetailExpanded)} className="text-slate-500 hover:text-white">{isDetailExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}</button></div><div className="prose prose-invert prose-sm max-w-none text-slate-300 whitespace-pre-wrap leading-relaxed text-xs max-h-64 overflow-y-auto pr-2 custom-scrollbar">{aiDetail}</div></div>}</div>}
@@ -949,10 +936,10 @@ const Dashboard = () => {
                   </div>
                   
                   <div className="grid grid-cols-2 gap-4 text-sm mb-3">
-                    <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{formatPrice(row.currentPrice)}</span></div>
-                    <div><span className="text-slate-500 block text-xs">成本</span><span className="text-slate-300">{formatPrice(row.buyPrice)}</span></div>
-                    <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
-                    <div><span className="text-slate-500 block text-xs">股數</span><span className="text-slate-300">{row.shares.toLocaleString()}</span></div>
+                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">現價</span><span className="text-white font-medium ml-2 md:ml-0">{formatPrice(row.currentPrice)}</span></div>
+                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">成本</span><span className="text-slate-300 ml-2 md:ml-0">{formatPrice(row.buyPrice)}</span></div>
+                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">市值</span><span className="text-white ml-2 md:ml-0">{formatCurrency(row.marketValue)}</span></div>
+                    <div className="flex justify-between md:block"><span className="text-slate-500 text-xs">股數</span><span className="text-slate-300 ml-2 md:ml-0">{row.shares.toLocaleString()}</span></div>
                   </div>
 
                   <div className="flex justify-end space-x-2 pt-2 border-t border-slate-700/50">
@@ -1017,26 +1004,10 @@ const Dashboard = () => {
               
               <div className="pt-4 border-t border-slate-700">
                 <h4 className="text-sm font-semibold text-slate-300 mb-4 flex items-center"><Calculator className="w-4 h-4 mr-2" /> 交易成本設定</h4>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
-                    <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
-                    <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
-                  </div>
-                  
-                  {/* 外幣成本計算模式開關 */}
-                  <div className="flex items-center justify-between bg-slate-900 p-3 rounded-md border border-slate-600">
-                    <div>
-                      <div className="text-sm font-medium text-white">外幣成本計算模式</div>
-                      <div className="text-xs text-slate-400 mt-1">{costInTwd ? "固定成本 (CSV含台幣成本)" : "浮動成本 (CSV含原幣金額)"}</div>
-                    </div>
-                    <button 
-                      onClick={() => setCostInTwd(!costInTwd)}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${costInTwd ? 'bg-blue-600' : 'bg-slate-600'}`}
-                    >
-                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${costInTwd ? 'translate-x-6' : 'translate-x-1'}`} />
-                    </button>
-                  </div>
+                <div>
+                   <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
+                   <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
+                   <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
                 </div>
               </div>
 
@@ -1076,7 +1047,6 @@ const Dashboard = () => {
     </div>
   );
 };
-
 
 export default function App() {
   return <Dashboard />;
