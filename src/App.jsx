@@ -11,15 +11,14 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v20.0 (UX & Cache Fix):
- * * [體驗優化與修復]
- * 1. 報告自動展開 (Auto Expand):
- * - 在 `generateFullAnalysis` 中，無論是讀取快取 (Cache Hit) 或 API 生成成功，都強制執行 `setIsDetailExpanded(true)`。
- * - 解決「分析完後看不到報告」的問題。
- * 2. 狀態同步優化:
- * - 確保 `generateFullAnalysis` 在執行時會更新 `isAiSummarizing` 與 `isAiDetailing` 狀態，讓 UI 按鈕顯示 Loading。
- * 3. 邏輯整合:
- * - 移除舊的 `generateDetail` 與 `generateSummary` 殘留代碼，統一使用 `generateFullAnalysis`。
+ * 專業理財經理人技術筆記 (Technical Note) v21.0 (Strict Once-Per-Day Cache):
+ * * [邏輯修正] 強制每日僅分析一次
+ * 1. 快取驗證放寬 (Relaxed Cache Validation):
+ * - 在 `fetchHistoricalData`, `generateFullAnalysis`, `runBackgroundAnalysis` 三處。
+ * - 將判斷條件從 `cache.dataDate === latest.date` (K線日期) 改為 `cache.date === getTodayDate()` (系統日期)。
+ * - 只要今天有分析過，無論 K 線週期為何，直接讀取快取，不再重複呼叫 AI。
+ * 2. 確保資料一致性:
+ * - 即便使用舊的分析報告，圖表仍會顯示最新的即時股價，兩者互不衝突。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -71,9 +70,10 @@ const getTodayDate = () => new Date().toISOString().split('T')[0];
 
 const getAiCache = () => { try { return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}'); } catch { return {}; } };
 const updateAiCache = (symbol, data, dataDate) => { 
+  const today = getTodayDate();
   const cache = getAiCache();
   const existing = cache[symbol] || {};
-  const newEntry = { date: getTodayDate(), ...existing, ...data, dataDate }; 
+  const newEntry = { date: today, ...existing, ...data, dataDate }; 
   const newCache = { ...cache, [symbol]: newEntry };
   localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
 };
@@ -266,8 +266,8 @@ const Dashboard = () => {
   // AI Analysis State
   const [aiSummary, setAiSummary] = useState(null);
   const [aiDetail, setAiDetail] = useState(null);
-  const [isAiSummarizing, setIsAiSummarizing] = useState(false); // Used for both Summary & Full Analysis loading state
-  const [isAiDetailing, setIsAiDetailing] = useState(false); // Deprecated but kept for compatibility
+  const [isAiSummarizing, setIsAiSummarizing] = useState(false);
+  const [isAiDetailing, setIsAiDetailing] = useState(false);
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
@@ -360,12 +360,19 @@ const Dashboard = () => {
     for (let i = 0; i < symbolsToAnalyze.length; i++) {
         const symbol = symbolsToAnalyze[i];
         
+        const today = getTodayDate();
         const cache = getAiCache();
-        
-        let histData = historicalData[`${symbol}_5y_1wk`];
-        let dataDate = null;
+        // Strict Once-Per-Day Check
+        if (cache[symbol] && cache[symbol].date === today && cache[symbol].signal) {
+            continue; 
+        }
+
+        setBgTaskMessage(`正在背景分析：${symbol} (${i + 1}/${symbolsToAnalyze.length})`);
         
         try {
+            let histData = historicalData[`${symbol}_5y_1wk`];
+            let dataDate = null;
+
             if (!histData) {
                 const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1wk&range=5y`;
                 const result = await fetchWithProxyFallback(targetUrl);
@@ -383,16 +390,8 @@ const Dashboard = () => {
                dataDate = histData[histData.length - 1].date;
             }
 
-            // Check Cache with Data Date
-            if (dataDate && cache[symbol] && cache[symbol].dataDate === dataDate && cache[symbol].summary && cache[symbol].detail) {
-                continue; 
-            }
-            
             if (!histData || histData.length === 0) continue;
 
-            setBgTaskMessage(`正在背景分析：${symbol} (${i + 1}/${symbolsToAnalyze.length})`);
-            
-            // Unified AI Call (Same logic as generateFullAnalysis)
             const latest = histData[histData.length - 1];
             const itemRef = rawData.find(d => d['標的'] === symbol);
             const stockName = itemRef?.['名稱'] || symbol;
@@ -570,9 +569,10 @@ const Dashboard = () => {
     const latest = data[data.length - 1];
     const dataDate = latest.date;
 
-    // Check Cache first
+    const today = getTodayDate();
     const cache = getAiCache();
-    if (cache[symbol] && cache[symbol].dataDate === dataDate && cache[symbol].summary && cache[symbol].detail) {
+    // Relaxed Cache Check: Only check Today's date, not Data Date for stricter once-per-day
+    if (cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
       setAiSummary(cache[symbol].summary);
       setAiDetail(cache[symbol].detail);
       if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
@@ -642,20 +642,9 @@ const Dashboard = () => {
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
         
-        // Check cache before calling generateFullAnalysis
-        const latest = processedData[processedData.length - 1];
-        const cache = getAiCache();
-        if (cache[symbol] && cache[symbol].dataDate === latest.date && cache[symbol].summary && cache[symbol].detail) {
-            setAiSummary(cache[symbol].summary);
-            setAiDetail(cache[symbol].detail);
-            if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
-            setAnalysisSymbol(symbol);
-            setIsDetailExpanded(true); // AUTO EXPAND
-        } else if (geminiApiKey) {
-            generateFullAnalysis(symbol, processedData); 
-        } else {
-            setAiSummary("請設定 API Key 以啟用 AI 分析。");
-        }
+        // Use Unified Logic
+        if (geminiApiKey) generateFullAnalysis(symbol, processedData); 
+        else setAiSummary("請設定 API Key 以啟用 AI 分析。");
         
       } else { throw new Error('No chart data found'); }
     } catch (err) { console.warn(`無法取得 ${symbol} 的歷史數據:`, err); setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。"); } finally { setHistoryLoading(false); }
