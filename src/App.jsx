@@ -11,27 +11,30 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v13.2 (USD Display Fix):
- * * [顯示優化] 美股價格顯示調整
- * 1. 顯示邏輯 (Display Logic):
- * - 對於美股 (isUS = true) 的標的：
- * - 「平均成本」與「Yahoo即時價」現在顯示 **美金 (USD)** 原幣金額。
- * - 「總市值」、「總損益」維持 **新台幣 (TWD)** 顯示，以利總資產計算。
- * 2. 資料流變更 (Data Flow):
- * - `processData`: 傳遞 `buyPriceRaw` (USD) 與 `currentPriceRaw` (USD)。
- * - `aggregatedHoldings`: 針對美股，累加美金成本以計算美金平均成本。
- * 3. 視覺提示:
- * - 美股價格前方增加 `$` 符號以資區別。
+ * 專業理財經理人技術筆記 (Technical Note) v15.2 (Signal Parsing Fix):
+ * * [功能修復] AI 燈號顯示異常
+ * 1. 解析邏輯升級 (Regex Parsing):
+ * - 將原本脆弱的 `includes` 字串比對，改為 `RegExp` 正規表達式匹配。
+ * - 支援忽略大小寫 (`i` flag) 與彈性空白 (`\s*`)。
+ * - 範例：`[ACTION: ADD]` 或 `[action:add]` 現在都能正確被識別為紅燈。
+ * 2. Prompt 優化:
+ * - 強制 AI 將標籤放在「最後一行」，避免與內文混淆。
+ * 3. 狀態同步:
+ * - 確保 `setAiSignals` 正確觸發 React 重新渲染。
  */
 
 // --- 靜態配置與輔助函式 ---
 
 const DEMO_DATA = [
   { 日期: '2015-01-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 140, 股數: 1000, 策略: '基礎買入', 金額: 140000 },
-  { 日期: '2023-05-20', 標的: 'NVDA', 名稱: 'NVIDIA', 類別: '股票', 價格: 300, 股數: 10, 策略: '基礎買入', 金額: 92000 }, // 10股 * 300USD * 30.6匯率 (約)
-  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 75, 股數: 50, 策略: '基礎買入', 金額: 110000 }, // 50股 * 75USD * 29.3匯率 (約)
+  { 日期: '2019-08-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 250, 股數: 500, 策略: 'MA60有撐', 金額: 125000 },
+  { 日期: '2020-03-20', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 270, 股數: 500, 策略: '金字塔_S1', 金額: 135000 },
+  { 日期: '2021-05-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 550, 股數: 200, 策略: 'K值超賣', 金額: 110000 },
+  { 日期: '2022-01-10', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 600, 股數: 100, 策略: '金字塔_S2', 金額: 60000 },
   { 日期: '2018-02-20', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 80, 股數: 2000, 策略: '基礎買入', 金額: 160000 },
-  { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 1, 股數: 10000, 策略: '基礎買入', 金額: 305000 }, // 10000 USD * 30.5 匯率
+  { 日期: '2022-10-25', 標的: '0050.TW', 名稱: '元大台灣50', 類別: '股票', 價格: 100, 股數: 1000, 策略: 'MA120有撐', 金額: 100000 },
+  { 日期: '2021-03-10', 標的: 'BND', 名稱: '總體債券ETF', 類別: '債券', 價格: 85, 股數: 100, 策略: '基礎買入', 金額: 255000 },
+  { 日期: '2023-06-01', 標的: 'USD-TD', 名稱: '美元定存', 類別: '定存', 價格: 1, 股數: 10000, 策略: '基礎買入', 金額: 10000 }, 
   { 日期: '2023-07-01', 標的: 'TWD-TD', 名稱: '台幣定存', 類別: '定存', 價格: 1, 股數: 100000, 策略: '基礎買入', 金額: 100000 }, 
 ];
 
@@ -439,8 +442,7 @@ const Dashboard = () => {
     setLoadingMessage('更新即時股價中...'); 
     processData(data, newPrices);
   };
-  
-  // ... (AI functions same as before) ...
+
   const callGeminiWithFallback = async (prompt) => {
     if (!geminiApiKey) {
       const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
@@ -496,13 +498,17 @@ const Dashboard = () => {
     const stockName = assetInfo?.['名稱'] || symbol;
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(symbol, stockName, category);
+
     let roleDescription = assetType === 'BOND' ? "專業總體經濟與債券分析師" : assetType === 'ETF' ? "專業 ETF 策略分析師" : "專業證券技術分析師";
-    const prompt = `請以一位【${roleDescription}】的角色，針對 ${symbol} (${stockName}) [${assetType}] 進行極簡短技術分析。數據：收盤 ${formatPrice(latest.close)}, MA20 ${latest.MA20 ? formatPrice(latest.MA20) : '-'}, MA60 ${latest.MA60 ? formatPrice(latest.MA60) : '-'}, KD(K=${latest.K ? formatPrice(latest.K) : '-'}, D=${latest.D ? formatPrice(latest.D) : '-'}), MACD(OSC=${latest.OSC ? formatPrice(latest.OSC) : '-'}). 限制：繁體中文，50 字以內重點。最後請務必根據分析結果，在結尾附上操作建議標籤：若建議加碼請附上 [ACTION:ADD]，若建議減碼請附上 [ACTION:REDUCE]，若建議觀望或持有請附上 [ACTION:HOLD]。`;
+    const prompt = `請以一位【${roleDescription}】的角色，針對 ${symbol} (${stockName}) [${assetType}] 進行極簡短技術分析。數據：收盤 ${formatPrice(latest.close)}, MA20 ${latest.MA20 ? formatPrice(latest.MA20) : '-'}, MA60 ${latest.MA60 ? formatPrice(latest.MA60) : '-'}, KD(K=${latest.K ? formatPrice(latest.K) : '-'}, D=${latest.D ? formatPrice(latest.D) : '-'}), MACD(OSC=${latest.OSC ? formatPrice(latest.OSC) : '-'}). 限制：繁體中文，50 字以內重點。最後請務必在回應的「最後一行」單獨附上操作建議標籤：若建議加碼請輸出：[ACTION:ADD]，若建議減碼請輸出：[ACTION:REDUCE]，若建議觀望或持有請輸出：[ACTION:HOLD]。`;
+
     try {
       const text = await callGeminiWithFallback(prompt);
       let signal = 'HOLD'; let cleanText = text;
-      if (text.includes('[ACTION:ADD]')) signal = 'ADD'; else if (text.includes('[ACTION:REDUCE]')) signal = 'REDUCE'; else if (text.includes('[ACTION:HOLD]')) signal = 'HOLD';
-      cleanText = text.replace(/\[ACTION:(ADD|REDUCE|HOLD)\]/g, '').trim();
+      const match = text.match(/\[ACTION:\s*(ADD|REDUCE|HOLD)\s*\]/i);
+      if (match) signal = match[1].toUpperCase();
+      cleanText = text.replace(/\[ACTION:\s*(ADD|REDUCE|HOLD)\s*\]/gi, '').trim();
+
       setAiSummary(cleanText); setAnalysisSymbol(symbol); setAiSignals(prev => ({ ...prev, [symbol]: signal }));
       updateAiCache(symbol, 'summary', cleanText); updateAiCache(symbol, 'signal', signal);
     } catch (err) { setAiSummary(err.message || "分析暫時無法使用。"); setAnalysisSymbol(symbol); } 
@@ -609,8 +615,13 @@ const Dashboard = () => {
     if (savedSort) setSortConfig(JSON.parse(savedSort));
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
 
-    const today = new Date().toISOString().split('T')[0];
+    // Load AI Cache
     const cache = getAiCache();
+    const signals = {};
+    Object.keys(cache).forEach(key => { if (cache[key].signal) signals[key] = cache[key].signal; });
+    setAiSignals(signals);
+
+    const today = new Date().toISOString().split('T')[0];
     let cacheModified = false;
     Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } });
     if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
@@ -658,7 +669,7 @@ const Dashboard = () => {
       entry.estimateTax += item.estimateTax;
       entry.dates.add(item['日期']);
       if (item.currentPrice !== item.buyPrice) entry.currentPrice = item.currentPrice;
-      if (item.currentPriceRaw) entry.currentPriceRaw = item.currentPriceRaw; // Store raw current price
+      if (item.currentPriceRaw) entry.currentPriceRaw = item.currentPriceRaw; 
     });
     return Array.from(map.values()).map(item => {
       const roi = item.costBasis > 0 ? item.profitLoss / item.costBasis : 0;
@@ -778,6 +789,7 @@ const Dashboard = () => {
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
             <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室</span>
+            {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">
             {['overview', 'history', 'holdings', 'config'].map(tab => (
@@ -989,12 +1001,10 @@ const Dashboard = () => {
               
               <div className="pt-4 border-t border-slate-700">
                 <h4 className="text-sm font-semibold text-slate-300 mb-4 flex items-center"><Calculator className="w-4 h-4 mr-2" /> 交易成本設定</h4>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
-                    <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
-                    <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
-                  </div>
+                <div>
+                   <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
+                   <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
+                   <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
                 </div>
               </div>
 
@@ -1034,6 +1044,7 @@ const Dashboard = () => {
     </div>
   );
 };
+
 
 export default function App() {
   return <Dashboard />;
