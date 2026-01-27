@@ -11,19 +11,18 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v17.0 (Remove Signal):
- * * [功能調整] 移除加減碼燈號，保留背景分析核心
- * 1. 移除燈號邏輯:
- * - 刪除 `aiSignals` 狀態與相關的 `setAiSignals`。
- * - 移除所有 Prompt 中關於 `SIGNAL` 或 `ACTION` 的指令。
- * - 移除 UI 上顯示紅綠燈號的區塊。
- * 2. 保留背景核心 (Background Core Kept):
- * - `runBackgroundAnalysis` 依然會在背景執行。
- * - 依然會自動下載歷史數據、計算技術指標 (MA, KD, MACD)。
- * - 依然會自動呼叫 AI 生成 [SUMMARY] 與 [DETAIL] 並寫入快取，確保點擊時能秒開分析報告。
+ * 專業理財經理人技術筆記 (Technical Note) v20.0 (UX & Cache Fix):
+ * * [體驗優化與修復]
+ * 1. 報告自動展開 (Auto Expand):
+ * - 在 `generateFullAnalysis` 中，無論是讀取快取 (Cache Hit) 或 API 生成成功，都強制執行 `setIsDetailExpanded(true)`。
+ * - 解決「分析完後看不到報告」的問題。
+ * 2. 狀態同步優化:
+ * - 確保 `generateFullAnalysis` 在執行時會更新 `isAiSummarizing` 與 `isAiDetailing` 狀態，讓 UI 按鈕顯示 Loading。
+ * 3. 邏輯整合:
+ * - 移除舊的 `generateDetail` 與 `generateSummary` 殘留代碼，統一使用 `generateFullAnalysis`。
  */
 
-// --- 靜態配置與輔助函式 (Defined OUTSIDE component) ---
+// --- 靜態配置與輔助函式 ---
 
 const DEMO_DATA = [
   { 日期: '2015-01-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 140, 股數: 1000, 策略: '基礎買入', 金額: 140000 },
@@ -71,11 +70,10 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const getTodayDate = () => new Date().toISOString().split('T')[0];
 
 const getAiCache = () => { try { return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}'); } catch { return {}; } };
-const updateAiCache = (symbol, data) => { 
-  const today = getTodayDate();
+const updateAiCache = (symbol, data, dataDate) => { 
   const cache = getAiCache();
   const existing = cache[symbol] || {};
-  const newEntry = { date: today, ...existing, ...data };
+  const newEntry = { date: getTodayDate(), ...existing, ...data, dataDate }; 
   const newCache = { ...cache, [symbol]: newEntry };
   localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
 };
@@ -268,12 +266,13 @@ const Dashboard = () => {
   // AI Analysis State
   const [aiSummary, setAiSummary] = useState(null);
   const [aiDetail, setAiDetail] = useState(null);
-  const [isAiSummarizing, setIsAiSummarizing] = useState(false);
-  const [isAiDetailing, setIsAiDetailing] = useState(false);
+  const [isAiSummarizing, setIsAiSummarizing] = useState(false); // Used for both Summary & Full Analysis loading state
+  const [isAiDetailing, setIsAiDetailing] = useState(false); // Deprecated but kept for compatibility
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
   const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
+  const [aiSignals, setAiSignals] = useState({}); 
 
   // Fee Settings
   const [feeDiscount, setFeeDiscount] = useState(1); 
@@ -361,17 +360,12 @@ const Dashboard = () => {
     for (let i = 0; i < symbolsToAnalyze.length; i++) {
         const symbol = symbolsToAnalyze[i];
         
-        const today = getTodayDate();
         const cache = getAiCache();
-        // Check if summary and detail exists (since we fetch them together)
-        if (cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
-            continue; 
-        }
-
-        setBgTaskMessage(`正在背景分析：${symbol} (${i + 1}/${symbolsToAnalyze.length})`);
+        
+        let histData = historicalData[`${symbol}_5y_1wk`];
+        let dataDate = null;
         
         try {
-            let histData = historicalData[`${symbol}_5y_1wk`];
             if (!histData) {
                 const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1wk&range=5y`;
                 const result = await fetchWithProxyFallback(targetUrl);
@@ -380,25 +374,38 @@ const Dashboard = () => {
                     const quote = chartData.indicators.quote[0];
                     const rawPoints = chartData.timestamp.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
                     histData = processTechnicalData(rawPoints);
+                    // Update State silently
                     setHistoricalData(prev => ({ ...prev, [`${symbol}_5y_1wk`]: histData }));
                 }
             }
+            
+            if (histData && histData.length > 0) {
+               dataDate = histData[histData.length - 1].date;
+            }
 
+            // Check Cache with Data Date
+            if (dataDate && cache[symbol] && cache[symbol].dataDate === dataDate && cache[symbol].summary && cache[symbol].detail) {
+                continue; 
+            }
+            
             if (!histData || histData.length === 0) continue;
 
+            setBgTaskMessage(`正在背景分析：${symbol} (${i + 1}/${symbolsToAnalyze.length})`);
+            
+            // Unified AI Call (Same logic as generateFullAnalysis)
             const latest = histData[histData.length - 1];
             const itemRef = rawData.find(d => d['標的'] === symbol);
             const stockName = itemRef?.['名稱'] || symbol;
             const category = itemRef?.['類別'] || '股票';
             const assetType = detectAssetType(symbol, stockName, category);
 
-            // Removed Signal Instruction
             const prompt = `
               請以一位專業股票分析師的角色，分析 ${symbol} (${stockName}) [${assetType}]。
               數據：收盤${formatPrice(latest.close)}, MA20/60/120 ${latest.MA20?formatPrice(latest.MA20):'-'}/${latest.MA60?formatPrice(latest.MA60):'-'}/${latest.MA120?formatPrice(latest.MA120):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD(${latest.OSC?formatPrice(latest.OSC):'-'})。
               請依序輸出：
               1. [SUMMARY]開頭的50字摘要。
               2. [DETAIL]開頭的完整Markdown分析(趨勢/訊號/價位/建議)。
+              3. 最後一行請務必輸出操作建議標籤：SIGNAL:ADD 或 SIGNAL:REDUCE 或 SIGNAL:HOLD。
             `;
 
             const response = await fetch(
@@ -415,13 +422,16 @@ const Dashboard = () => {
                 const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
                 
                 const summaryMatch = text.match(/\[SUMMARY\]([\s\S]*?)(\[DETAIL\]|$)/);
-                const detailMatch = text.match(/\[DETAIL\]([\s\S]*?)$/);
+                const detailMatch = text.match(/\[DETAIL\]([\s\S]*?)(\[SIGNAL\]|SIGNAL:|$)/);
+                const signalMatch = text.match(/SIGNAL:\s*(ADD|REDUCE|HOLD)/i);
 
                 const summary = summaryMatch ? summaryMatch[1].trim() : "分析完成";
                 const detail = detailMatch ? detailMatch[1].trim() : text;
+                const signal = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
 
-                updateAiCache(symbol, { summary, detail });
+                updateAiCache(symbol, { summary, detail, signal }, dataDate); 
                 
+                setAiSignals(prev => ({ ...prev, [symbol]: signal }));
                 if (selectedHistorySymbol === symbol) {
                     setAiSummary(summary);
                     setAiDetail(detail);
@@ -555,55 +565,63 @@ const Dashboard = () => {
     throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
   };
 
-  const generateSummary = async (symbol, data) => {
+  const generateFullAnalysis = async (symbol, data) => {
     if (!data || data.length === 0) return;
+    const latest = data[data.length - 1];
+    const dataDate = latest.date;
 
-    const today = getTodayDate();
+    // Check Cache first
     const cache = getAiCache();
-    if (cache[symbol] && cache[symbol].date === today && cache[symbol].summary) {
+    if (cache[symbol] && cache[symbol].dataDate === dataDate && cache[symbol].summary && cache[symbol].detail) {
       setAiSummary(cache[symbol].summary);
-      if (cache[symbol].detail) setAiDetail(cache[symbol].detail);
+      setAiDetail(cache[symbol].detail);
+      if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
       setAnalysisSymbol(symbol);
+      setIsDetailExpanded(true); // AUTO EXPAND
       return;
     }
-    
-    setIsAiSummarizing(true);
+
+    setIsAiSummarizing(true); // Show loading
     setAiSummary(null);
-    setIsAiSummarizing(false);
-  };
+    setAiDetail(null); 
+    setAnalysisSymbol(symbol); 
 
-  const generateDetail = async () => {
-    if (!selectedHistorySymbol) return;
-    const today = getTodayDate();
-    const cache = getAiCache();
-    if (cache[selectedHistorySymbol] && cache[selectedHistorySymbol].date === today && cache[selectedHistorySymbol].detail) {
-      setAiDetail(cache[selectedHistorySymbol].detail);
-      setAiSummary(cache[selectedHistorySymbol].summary);
-      setIsDetailExpanded(true);
-      return;
-    }
-    const key = `${selectedHistorySymbol}_${timeframe}`;
-    const chartData = historicalData[key];
-    if (!chartData || chartData.length === 0) return;
-    setIsAiDetailing(true); setIsDetailExpanded(true); 
-
-    const latest = chartData[chartData.length - 1];
-    const assetInfo = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol);
-    const stockName = assetInfo?.['名稱'] || selectedHistorySymbol;
+    const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
+    const stockName = assetInfo?.['名稱'] || symbol;
     const category = assetInfo?.['類別'] || '股票';
-    const assetType = detectAssetType(selectedHistorySymbol, stockName, category);
-    
-    let roleDescription = assetType === 'BOND' ? "專業總體經濟與債券分析師" : assetType === 'ETF' ? "專業 ETF 策略分析師" : "專業證券技術分析師";
-    const prompt = `請以一位【${roleDescription}】的角色，提供 ${selectedHistorySymbol} (${stockName}) [${assetType}] 的完整技術面分析報告。週期：${timeframe}。最新技術指標：價格 ${formatPrice(latest.close)}, MA20/60/120, KD, MACD。請使用 Markdown 格式輸出。`;
+    const assetType = detectAssetType(symbol, stockName, category);
+
+    // UNIFIED PROMPT (Same as Background Task)
+    const prompt = `
+      請以一位專業股票分析師的角色，分析 ${symbol} (${stockName}) [${assetType}]。
+      數據：收盤${formatPrice(latest.close)}, MA20/60/120 ${latest.MA20?formatPrice(latest.MA20):'-'}/${latest.MA60?formatPrice(latest.MA60):'-'}/${latest.MA120?formatPrice(latest.MA120):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD(${latest.OSC?formatPrice(latest.OSC):'-'})。
+      請依序輸出：
+      1. [SUMMARY]開頭的50字摘要。
+      2. [DETAIL]開頭的完整Markdown分析(趨勢/訊號/價位/建議)。
+      3. 最後一行請務必輸出操作建議標籤：SIGNAL:ADD 或 SIGNAL:REDUCE 或 SIGNAL:HOLD。
+    `;
 
     try {
       const text = await callGeminiWithFallback(prompt);
-      setAiDetail(text);
-      updateAiCache(selectedHistorySymbol, { detail: text }); 
-    } catch (err) { 
-      setAiDetail(err.message || "詳細分析生成失敗。"); 
-    } finally { 
-      setIsAiDetailing(false); 
+      
+      const summaryMatch = text.match(/\[SUMMARY\]([\s\S]*?)(\[DETAIL\]|$)/);
+      const detailMatch = text.match(/\[DETAIL\]([\s\S]*?)(\[SIGNAL\]|SIGNAL:|$)/);
+      const signalMatch = text.match(/SIGNAL:\s*(ADD|REDUCE|HOLD)/i);
+
+      const summary = summaryMatch ? summaryMatch[1].trim() : "分析完成";
+      const detail = detailMatch ? detailMatch[1].trim() : text;
+      const signal = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
+
+      setAiSummary(summary);
+      setAiDetail(detail);
+      setAiSignals(prev => ({ ...prev, [symbol]: signal }));
+      
+      updateAiCache(symbol, { summary, detail, signal }, dataDate); 
+      setIsDetailExpanded(true); // AUTO EXPAND
+    } catch (err) {
+      setAiSummary(err.message || "分析暫時無法使用。");
+    } finally {
+      setIsAiSummarizing(false);
     }
   };
 
@@ -623,7 +641,22 @@ const Dashboard = () => {
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
-        if (geminiApiKey) generateSummary(symbol, processedData); else setAiSummary("請設定 API Key 以啟用 AI 自動摘要。");
+        
+        // Check cache before calling generateFullAnalysis
+        const latest = processedData[processedData.length - 1];
+        const cache = getAiCache();
+        if (cache[symbol] && cache[symbol].dataDate === latest.date && cache[symbol].summary && cache[symbol].detail) {
+            setAiSummary(cache[symbol].summary);
+            setAiDetail(cache[symbol].detail);
+            if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
+            setAnalysisSymbol(symbol);
+            setIsDetailExpanded(true); // AUTO EXPAND
+        } else if (geminiApiKey) {
+            generateFullAnalysis(symbol, processedData); 
+        } else {
+            setAiSummary("請設定 API Key 以啟用 AI 分析。");
+        }
+        
       } else { throw new Error('No chart data found'); }
     } catch (err) { console.warn(`無法取得 ${symbol} 的歷史數據:`, err); setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。"); } finally { setHistoryLoading(false); }
   };
@@ -695,6 +728,10 @@ const Dashboard = () => {
 
     // Load AI Cache
     const cache = getAiCache();
+    const signals = {};
+    Object.keys(cache).forEach(key => { if (cache[key].signal) signals[key] = cache[key].signal; });
+    setAiSignals(signals);
+
     const today = new Date().toISOString().split('T')[0];
     let cacheModified = false;
     Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } });
@@ -722,7 +759,7 @@ const Dashboard = () => {
         }
       } else {
         if (isAnalysisOutdated && geminiApiKey && !isAiSummarizing) {
-           generateSummary(selectedHistorySymbol, historicalData[key]);
+           generateFullAnalysis(selectedHistorySymbol, historicalData[key]);
         }
       }
     }
@@ -773,6 +810,8 @@ const Dashboard = () => {
         ...item, 
         buyPrice: finalBuyPrice, 
         currentPrice: finalCurrentPrice, 
+        buyPriceRaw: avgPriceRaw, 
+        currentPriceRaw: item.currentPriceRaw,
         roi, 
         '日期': latestDate 
       };
@@ -976,9 +1015,9 @@ const Dashboard = () => {
               ) : <div className="flex-1 flex items-center justify-center min-h-[400px] text-slate-500">{historyError ? <span className="text-red-400">{historyError}</span> : "請選擇左側標的以查看走勢"}</div>}
 
               <div className="mt-4 pt-4 border-t border-slate-700">
-                <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{usedModel}</span>}</div>{!aiDetail && !isAiDetailing && <button onClick={generateDetail} className="text-xs text-blue-400 hover:text-blue-300 flex items-center transition-colors"><FileSearch className="w-3 h-3 mr-1" />查看完整分析</button>}</div>
+                <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{usedModel}</span>}{aiSignals[selectedHistorySymbol] === 'ADD' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}</div>{!aiDetail && !isAiDetailing && <button onClick={() => { if (aiDetail) setIsDetailExpanded(!isDetailExpanded); else generateFullAnalysis(selectedHistorySymbol, historicalData[`${selectedHistorySymbol}_${timeframe}`]); }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center transition-colors"><FileSearch className="w-3 h-3 mr-1" />{aiDetail ? (isDetailExpanded ? "收合分析" : "展開完整分析") : "生成完整分析"}</button>}</div>
                 <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700 shadow-inner">
-                  {isAiSummarizing ? <div className="flex items-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin mr-2" />正在生成 50 字摘要...</div> : aiSummary ? <div className="mb-3"><p className="text-slate-300 text-sm leading-relaxed border-l-2 border-purple-500 pl-3">{aiSummary}</p></div> : <div className="text-slate-500 text-sm">等待分析數據...</div>}
+                  {isAiSummarizing ? <div className="flex items-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin mr-2" />正在生成分析報告...</div> : aiSummary ? <div className="mb-3"><p className="text-slate-300 text-sm leading-relaxed border-l-2 border-purple-500 pl-3">{aiSummary}</p></div> : <div className="text-slate-500 text-sm">等待分析數據...</div>}
                   {(isAiDetailing || aiDetail) && <div className={`mt-3 pt-3 border-t border-slate-700/50 transition-all duration-500 ease-in-out ${isDetailExpanded ? 'opacity-100 max-h-[1000px]' : 'opacity-0 max-h-0 overflow-hidden'}`}>{isAiDetailing ? <div className="flex flex-col items-center justify-center py-4 text-slate-400"><Loader2 className="w-6 h-6 animate-spin mb-2 text-purple-500" /><span className="text-xs">正在進行深度運算 (Trend, KD, MACD)...</span></div> : <div><div className="flex justify-between items-center mb-2"><span className="text-xs font-semibold text-purple-300">完整技術報告</span></div><div className="prose prose-invert prose-sm max-w-none text-slate-300 whitespace-pre-wrap leading-relaxed text-xs max-h-64 overflow-y-auto pr-2 custom-scrollbar">{aiDetail}</div></div>}</div>}
                 </div>
               </div>
@@ -986,7 +1025,50 @@ const Dashboard = () => {
           </div>
         )}
 
-        {/* ... (Holdings and Config tabs similar to v16.2, no changes needed there) ... */}
+        {activeTab === 'overview' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
+              <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><PieIcon className="w-5 h-5 mr-2 text-blue-400" /> 資產類別配置</h3>
+              <div className="h-80 w-full min-h-[320px]">
+                {allocationData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">
+                        {allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}
+                      </Pie>
+                      <RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} />
+                      <Legend content={(props) => <ul className="flex flex-wrap justify-center gap-4 mt-4">{props.payload.map((entry, index) => <li key={`item-${index}`} className="flex items-center text-sm text-slate-300"><span className="block w-3 h-3 rounded-full mr-2" style={{ backgroundColor: entry.color }}></span>{entry.value} <span className="ml-1 text-slate-400">({formatPercent(allocationData.find(d => d.name === entry.value)?.percentage)})</span></li>)}</ul>} verticalAlign="bottom" />
+                    </PieChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>
+                )}
+              </div>
+            </div>
+            <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
+              <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><BarChart2 className="w-5 h-5 mr-2 text-purple-400" /> 持股標的分佈 (不含定存)</h3>
+              <div className="h-80 w-full min-h-[320px]">
+                {tradableSymbols.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={tradableSymbols.map(item => ({ name: item['名稱'], value: item.marketValue })).sort((a, b) => b.value - a.value)} layout="vertical" margin={{ top: 5, right: 40, left: 40, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
+                      <XAxis type="number" stroke="#94a3b8" tickFormatter={(val) => `${val / 1000}k`} />
+                      <YAxis dataKey="name" type="category" stroke="#94a3b8" width={80} />
+                      <RechartsTooltip cursor={{fill: '#334155', opacity: 0.4}} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} />
+                      <Bar dataKey="value" fill="#8B5CF6" radius={[0, 4, 4, 0]} barSize={30}>
+                        {tradableSymbols.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ... (Holdings and Config tabs remain the same) ... */}
         {activeTab === 'holdings' && (
           <div className="space-y-4">
             <div className="flex justify-between items-center px-2">
@@ -1002,11 +1084,16 @@ const Dashboard = () => {
                 ))}
               </div>
 
-              {sortedHoldings.map((row, index) => (
+              {sortedHoldings.map((row, index) => {
+                const signal = aiSignals[row['標的']];
+                return (
                 <div key={row['標的']} className="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-md relative">
                   <div className="flex justify-between items-start mb-3">
                     <div>
                       <div className="flex items-center space-x-2">
+                        {signal === 'ADD' && <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-1" />}
+                        {signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-1" />}
+                        {signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-1" />}
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
                         <span className={`text-xs px-2 py-0.5 rounded ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span>
                       </div>
@@ -1030,7 +1117,7 @@ const Dashboard = () => {
                     <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], 1); }} className="p-2 bg-slate-700 rounded hover:bg-slate-600 text-slate-300"><ArrowDown className="w-4 h-4" /></button>
                   </div>
                 </div>
-              ))}
+              )})}
             </div>
 
             <div className="hidden md:block bg-slate-800 rounded-xl border border-slate-700 shadow-lg"> 
@@ -1045,10 +1132,12 @@ const Dashboard = () => {
                     </tr>
                   </thead>
                   <tbody className="bg-slate-800 divide-y divide-slate-700">
-                    {sortedHoldings.map((row, index) => (
+                    {sortedHoldings.map((row, index) => {
+                      const signal = aiSignals[row['標的']];
+                      return (
                       <tr key={row['標的']} className="hover:bg-slate-700/50 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap"><div className="flex flex-col space-y-1">{index > 0 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], -1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowUp className="w-3 h-3" /></button>}{index < sortedHoldings.length - 1 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], 1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowDown className="w-3 h-3" /></button>}</div></td>
-                        <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-white font-medium flex items-center">{row['標的']}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}</div><div className="text-xs text-slate-500">最近交易: {row['日期']}</div></td>
+                        <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-white font-medium flex items-center">{signal === 'ADD' && <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" title="AI建議: 加碼" />}{signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" title="AI建議: 減碼" />}{signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" title="AI建議: 觀望" />}{row['標的']}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}</div><div className="text-xs text-slate-500">最近交易: {row['日期']}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-slate-200">{row['名稱']}</div><span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mt-1 ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span></td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.isUS ? '$' : ''}{formatPrice(row.buyPriceRaw || row.buyPrice)}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{row.isUS ? '$' : ''}{formatPrice(row.currentPriceRaw || row.currentPrice)}</td>
@@ -1069,7 +1158,7 @@ const Dashboard = () => {
                         </td>
                         <td className={`px-6 py-4 whitespace-nowrap text-right text-sm font-bold ${(row.roi || 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>{formatPercent(row.roi)}</td>
                       </tr>
-                    ))}
+                    )})}
                   </tbody>
                 </table>
               </div>
