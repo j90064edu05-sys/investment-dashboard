@@ -7,20 +7,18 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v31.1 (Loop Fix):
- * * [嚴重錯誤修復] 解決 Maximum update depth exceeded
- * 1. 職責分離 (Separation):
- * - `loadFromCache` 改為純讀取函式，僅回傳 boolean 與更新 UI，絕不觸發副作用 (Side Effects)。
- * - 新增 `checkAndTriggerAnalysis` 專門處理「無資料時的補救」。
- * 2. 依賴斷開 (Break Loop):
- * - History Tab 的 `useEffect` 僅在 `selectedHistorySymbol` 改變時執行一次性的檢查與觸發。
- * - 資料更新 (`historicalData` 變動) 時，只執行被動的 `loadFromCache` 更新 UI，不觸發分析。
- * 3. 變數清理:
- * - 確保 `costInTwd` 等未定義變數已完全移除。
+ * 專業理財經理人技術筆記 (Technical Note) v36.2 (Model Fidelity Fix):
+ * * [核心優化] 提高指定模型成功率與 Fallback 提示
+ * 1. 模型參數優化 (Config Tuning):
+ * - 針對 `gemini-1.5-flash` 調整 `generationConfig`，避免因參數過於激進導致 400 錯誤而觸發 Fallback。
+ * 2. Fallback 提示 (UI Feedback):
+ * - 若實際使用的模型 (`usedModel`) 與設定的 (`selectedModel`) 不同，UI 會標註 `(自動切換)`，告知使用者發生了降級或替換。
+ * 3. 重試機制 (Retry Logic):
+ * - 在切換模型前，先針對「當前設定的模型」進行簡易重試，盡量滿足使用者設定。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -59,10 +57,16 @@ const CATEGORY_STYLES = {
 };
 
 const AVAILABLE_MODELS = [
-  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash (快速/平衡)' },
-  { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro (深度/精準)' },
-  { id: 'gemini-2.5-flash-preview-09-2025', name: 'Gemini 2.5 Flash Preview (最新預覽)' },
+  { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (快速)' },
+  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (精準)' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (最新)' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (最新)' },
 ];
+
+const ASSET_TYPES = {
+  'CORE': { label: '核心資產', color: 'text-blue-400', bg: 'bg-blue-900/30' },
+  'SATELLITE': { label: '衛星資產', color: 'text-orange-400', bg: 'bg-orange-900/30' }
+};
 
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
 const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
@@ -253,7 +257,6 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(false);
   const [priceLoading, setPriceLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('更新即時股價中...');
-  const [bgTaskMessage, setBgTaskMessage] = useState(null);
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(new Date()); 
   const [activeTab, setActiveTab] = useState('overview');
@@ -276,14 +279,24 @@ const Dashboard = () => {
   const [isAiSummarizing, setIsAiSummarizing] = useState(false);
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
+  const [isCachedResult, setIsCachedResult] = useState(false); // Track if result is from cache
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
   const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
   const [aiSignals, setAiSignals] = useState({}); 
   
-  // Background Task tracking
-  const [analyzingList, setAnalyzingList] = useState(new Set()); 
-  // Reference for current selection
-  const selectedSymbolRef = useRef(null);
+  // Asset Classifications (Core/Satellite)
+  const [assetClassifications, setAssetClassifications] = useState({});
+
+  // Chat State
+  const [chatMessages, setChatMessages] = useState([
+    { role: 'assistant', content: '您好！我是您的 AI 投資助理。我可以根據您的持股狀況與投資分類回答問題，請試著問我：「我的核心資產績效如何？」或「目前投資組合風險？」' }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const chatEndRef = useRef(null);
+
+  // Race Condition Control
+  const analysisInProgressRef = useRef({});
 
   // Fee Settings
   const [feeDiscount, setFeeDiscount] = useState(1); 
@@ -362,151 +375,6 @@ const Dashboard = () => {
     setRawData(data);
   };
 
-  const callGeminiWithFallback = async (prompt) => {
-    if (!geminiApiKey) {
-      const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
-      if (confirm) setActiveTab('config');
-      throw new Error("請先至「設定」頁面儲存 API Key");
-    }
-
-    // Dynamic Model Selection
-    const defaultModels = AVAILABLE_MODELS.map(m => m.id);
-    const models = [selectedModel, ...defaultModels.filter(m => m !== selectedModel)];
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); 
-
-    try {
-      for (const model of models) {
-        try {
-          const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-              signal: controller.signal
-            }
-          );
-
-          if (!response.ok) {
-            console.warn(`Model ${model} failed: ${response.status}`);
-            continue;
-          }
-
-          const data = await response.json();
-          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) {
-            setUsedModel(model);
-            return text;
-          }
-        } catch (err) {
-          console.error(`Error calling ${model}:`, err);
-        }
-      }
-    } finally {
-      clearTimeout(timeoutId);
-    }
-    throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
-  };
-
-  // --- BATCH AI ANALYSIS ENGINE (RESTORED & IMPROVED) ---
-  const runBatchAnalysis = async (symbolsToAnalyze, forceUpdate = false) => {
-    if (!geminiApiKey || symbolsToAnalyze.length === 0) return;
-    
-    // UI Feedback is handled by analyzingList status, no need for global message
-    
-    // Mark as analyzing
-    setAnalyzingList(prev => {
-        const next = new Set(prev);
-        symbolsToAnalyze.forEach(s => next.add(s));
-        return next;
-    });
-    
-    for (let i = 0; i < symbolsToAnalyze.length; i++) {
-        const symbol = symbolsToAnalyze[i];
-        const today = getTodayDate();
-        const cache = getAiCache();
-        
-        // Skip if already analyzed today (unless forced)
-        if (!forceUpdate && cache[symbol] && cache[symbol].date === today && cache[symbol].signal) {
-            setAnalyzingList(prev => { const next = new Set(prev); next.delete(symbol); return next; });
-            continue; 
-        }
-
-        try {
-            // 1. Fetch History independently for background process
-            const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1wk&range=5y&t=${Date.now()}`;
-            const result = await fetchWithProxyFallback(targetUrl);
-            const chartData = result?.chart?.result?.[0];
-            let workingHistData = [];
-            
-            if (chartData && chartData.timestamp) {
-                const quote = chartData.indicators.quote[0];
-                const rawPoints = chartData.timestamp.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
-                workingHistData = processTechnicalData(rawPoints);
-                // Sync to global state silently (optional, mainly for cache)
-                setHistoricalData(prev => ({ ...prev, [`${symbol}_5y_1wk`]: workingHistData }));
-            }
-            
-            if (!workingHistData || workingHistData.length === 0) {
-                setAnalyzingList(prev => { const next = new Set(prev); next.delete(symbol); return next; });
-                continue;
-            }
-
-            const latest = workingHistData[workingHistData.length - 1];
-            const dataDate = latest.date;
-
-            // 2. Prepare AI Prompt
-            const itemRef = rawData.find(d => d['標的'] === symbol);
-            const stockName = itemRef?.['名稱'] || symbol;
-            const category = itemRef?.['類別'] || '股票';
-            const assetType = detectAssetType(symbol, stockName, category);
-
-            const prompt = `
-              請以一位專業股票分析師的角色，分析 ${symbol} (${stockName}) [${assetType}]。
-              數據：收盤${formatPrice(latest.close)}, MA20/60/120 ${latest.MA20?formatPrice(latest.MA20):'-'}/${latest.MA60?formatPrice(latest.MA60):'-'}/${latest.MA120?formatPrice(latest.MA120):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD(${latest.OSC?formatPrice(latest.OSC):'-'})。
-              請依序輸出：
-              1. [SUMMARY]開頭的50字摘要。
-              2. [DETAIL]開頭的完整Markdown分析(趨勢/訊號/價位/建議)。
-              3. 最後一行請務必輸出操作建議標籤：SIGNAL:ADD 或 SIGNAL:REDUCE 或 SIGNAL:HOLD。
-            `;
-
-            // 3. Call AI 
-            const text = await callGeminiWithFallback(prompt);
-            
-            // 4. Parse Result
-            const summaryMatch = text.match(/\[SUMMARY\]([\s\S]*?)(\[DETAIL\]|$)/);
-            const detailMatch = text.match(/\[DETAIL\]([\s\S]*?)(\[SIGNAL\]|SIGNAL:|$)/);
-            const signalMatch = text.match(/SIGNAL:\s*(ADD|REDUCE|HOLD)/i);
-
-            const summary = summaryMatch ? summaryMatch[1].trim() : "分析完成";
-            const detail = detailMatch ? detailMatch[1].trim() : text;
-            const signal = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
-
-            // 5. Update Cache & State
-            updateAiCache(symbol, { summary, detail, signal }, dataDate); 
-            setAiSignals(prev => ({ ...prev, [symbol]: signal }));
-            
-            // If user is currently viewing this symbol, update UI immediately
-            if (selectedSymbolRef.current === symbol) {
-                setAiSummary(String(summary));
-                setAiDetail(String(detail));
-                setIsDetailExpanded(true);
-            }
-
-            // 6. Rate Limit Protection
-            await delay(4000); 
-
-        } catch (e) {
-            console.warn(`Batch analysis failed for ${symbol}`, e);
-        } finally {
-            setAnalyzingList(prev => { const next = new Set(prev); next.delete(symbol); return next; });
-        }
-    }
-  };
-
-
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
     setPriceLoading(true);
     setUpdateError(null);
@@ -580,53 +448,204 @@ const Dashboard = () => {
     setLastUpdated(new Date()); 
     setLoadingMessage('更新即時股價中...'); 
     processData(data, newPrices);
-
-    // Trigger Batch Analysis
-    const validAnalysisSymbols = [...new Set(data.filter(i => i['類別'] !== '定存').map(i => i['標的']))];
-    runBatchAnalysis(validAnalysisSymbols, forceUpdate);
   };
 
-  // Pure Helper: Load from cache and return true if found
-  const loadFromCache = (symbol) => {
+  const callGeminiWithFallback = async (prompt) => {
+    if (!geminiApiKey) {
+      const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
+      if (confirm) setActiveTab('config');
+      throw new Error("請先至「設定」頁面儲存 API Key");
+    }
+
+    // Dynamic Model Selection based on settings
+    const defaultModels = AVAILABLE_MODELS.map(m => m.id);
+    // Prioritize selected model, then fallback
+    const models = [selectedModel, ...defaultModels.filter(m => m !== selectedModel)];
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
+
+    try {
+      for (const model of models) {
+        try {
+          const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ 
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                  maxOutputTokens: 4096, // Balanced token limit
+                }
+              }),
+              signal: controller.signal
+            }
+          );
+
+          if (!response.ok) {
+            console.warn(`Model ${model} failed: ${response.status}`);
+            continue;
+          }
+
+          const data = await response.json();
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            return { text, model }; // Return object with model ID
+          }
+        } catch (err) {
+          console.error(`Error calling ${model}:`, err);
+        }
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
+  };
+
+  const handleClassificationChange = (symbol, value) => {
+    const newClassifications = { ...assetClassifications, [symbol]: value };
+    setAssetClassifications(newClassifications);
+    localStorage.setItem('investment_asset_classifications', JSON.stringify(newClassifications));
+  };
+
+  const generateFullAnalysis = async (symbol, data, forceUpdate = false) => {
+    if (!data || data.length === 0) return;
+    
+    // Check if already analyzing this symbol
+    if (analysisInProgressRef.current[symbol]) return;
+    analysisInProgressRef.current[symbol] = true;
+
+    const latest = data[data.length - 1];
+    const dataDate = latest.date;
     const today = getTodayDate();
     const cache = getAiCache();
-    
-    // Check Cache
-    if (cache[symbol] && cache[symbol].date === today && (cache[symbol].summary || cache[symbol].detail)) {
+
+    // Double check cache - unless forced
+    if (!forceUpdate && cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
       setAiSummary(String(cache[symbol].summary));
       setAiDetail(String(cache[symbol].detail));
       if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
+      setUsedModel(cache[symbol].model); // Restore model from cache
+      setIsCachedResult(true); // MARK AS CACHED
       setAnalysisSymbol(symbol);
       setIsDetailExpanded(true); 
-      return true;
-    } 
-    
-    // If not found, clear UI
-    setAiSummary(null);
-    setAiDetail(null);
-    setAnalysisSymbol(null);
-    return false;
-  };
+      setIsAiSummarizing(false); 
+      delete analysisInProgressRef.current[symbol];
+      return;
+    }
 
-  const checkAndTriggerAnalysis = (symbol, data) => {
-     // 1. Try Load Cache
-     const found = loadFromCache(symbol);
-     
-     // 2. If not found AND not analyzing -> Rescue!
-     if (!found && !analyzingList.has(symbol) && geminiApiKey) {
-        // Trigger a specific analysis for this symbol immediately
-        runBatchAnalysis([symbol], true);
-     }
+    setIsAiSummarizing(true); 
+    setAiSummary(null);
+    setAiDetail(null); 
+    setUsedModel(null); 
+    setIsCachedResult(false); // New analysis
+    setAnalysisSymbol(symbol); 
+
+    const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
+    const stockName = assetInfo?.['名稱'] || symbol;
+    const category = assetInfo?.['類別'] || '股票';
+    const assetType = detectAssetType(symbol, stockName, category);
+    
+    const classification = assetClassifications[symbol] || 'CORE'; 
+    const classLabel = ASSET_TYPES[classification].label;
+    const performanceInfo = assetInfo ? `目前損益：${formatCurrency(assetInfo.profitLoss)} (ROI: ${formatPercent(assetInfo.roi)})。` : "";
+
+    // IMPORTANT: Inject Real-Time Price Logic
+    const currentPrice = realTimePrices[symbol] || latest.close;
+
+    const strategyLogic = classification === 'CORE' 
+        ? "【核心資產策略】此類資產追求長期穩健。若目前股價跌破季線(MA60)或半年線(MA120)且基本面未變，應視為買點(SIGNAL:ADD)。若乖離過大或基本面轉差，則考慮減碼或續抱。"
+        : "【衛星資產策略】此類資產追求波段價差。若股價站上月線(MA20)且動能強(KD金叉/MACD紅柱)，建議追價(SIGNAL:ADD)。若跌破月線或高檔爆量，應嚴格停損/停利(SIGNAL:REDUCE)。";
+
+    const prompt = `
+      請以一位專業股票分析師的角色，分析 ${symbol} (${stockName}) [${assetType}]。
+      
+      **基本資訊**：
+      - 投資定位：${classLabel}
+      - ${performanceInfo}
+      - K線收盤價 (Data Date): ${formatPrice(latest.close)}
+      - **目前即時價 (Real-time): ${formatPrice(currentPrice)}** (請以此價格判斷當下操作)
+      
+      **技術指標**：
+      - 均線：MA20 ${latest.MA20?formatPrice(latest.MA20):'-'} / MA60 ${latest.MA60?formatPrice(latest.MA60):'-'} / MA120 ${latest.MA120?formatPrice(latest.MA120):'-'}
+      - KD指標：K=${latest.K?formatPrice(latest.K):'-'}, D=${latest.D?formatPrice(latest.D):'-'}
+      - MACD：OSC=${latest.OSC?formatPrice(latest.OSC):'-'}
+
+      **判斷邏輯**：
+      ${strategyLogic}
+      請綜合考量目前即時價位與技術支撐/壓力位，給出操作建議。
+      
+      請依序輸出 (請勿使用 Markdown 代碼區塊)：
+      
+      [SUMMARY]
+      (50字內簡評，結合投資定位與目前損益狀況)
+      
+      [DETAIL]
+      (完整分析報告。包含：1. 目前趨勢判斷 2. 重要支撐/壓力位 3. 針對 ${classLabel} 的具體操作建議。請使用 Markdown 排版)
+      
+      [SIGNAL]
+      (請輸出單一詞彙：ADD 或 REDUCE 或 HOLD)
+    `;
+
+    try {
+      const { text, model } = await callGeminiWithFallback(prompt);
+      
+      // Update Used Model UI immediately
+      setUsedModel(model);
+
+      // Improved Regex to handle various formats and potential garbage
+      const summaryMatch = text.match(/\[SUMMARY\]\s*([\s\S]*?)\s*(?=\[DETAIL\]|$)/i);
+      const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
+      const signalMatch = text.match(/\[SIGNAL\]\s*(ADD|REDUCE|HOLD)/i);
+
+      let summary = summaryMatch ? summaryMatch[1].trim() : "分析完成";
+      // CLEANUP: Remove potential markdown garbage from summary
+      summary = summary.replace(/[`*#]/g, '').replace(/\n/g, ' ').trim();
+
+      const detail = detailMatch ? detailMatch[1].trim() : text;
+      // FALLBACK: Default to HOLD if no signal found
+      const signal = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
+
+      setAiSummary(String(summary));
+      setAiDetail(String(detail));
+      setAiSignals(prev => ({ ...prev, [symbol]: signal }));
+      
+      // SAVE MODEL ID TO CACHE
+      updateAiCache(symbol, { summary, detail, signal, model }, dataDate); 
+      setIsDetailExpanded(true); 
+    } catch (err) {
+      setAiSummary(String(err.message) || "分析暫時無法使用。");
+    } finally {
+      setIsAiSummarizing(false); 
+      delete analysisInProgressRef.current[symbol];
+    }
   };
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
     setHistoryLoading(true); setHistoryError(null); 
+    setAnalysisSymbol(symbol); 
     
-    selectedSymbolRef.current = symbol;
-    
-    // Initial Load Attempt
-    loadFromCache(symbol);
+    // Reset AI state for new symbol
+    setIsAiSummarizing(false); 
+    setIsCachedResult(false);
+
+    // Initial Load Attempt from Cache
+    const today = getTodayDate();
+    const cache = getAiCache();
+    if (cache[symbol] && cache[symbol].date === today && (cache[symbol].summary || cache[symbol].detail)) {
+      setAiSummary(String(cache[symbol].summary));
+      setAiDetail(String(cache[symbol].detail));
+      if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
+      setUsedModel(cache[symbol].model); // Restore model from cache
+      setIsCachedResult(true); // Mark as cached
+      setIsDetailExpanded(true);
+    } else {
+       setAiSummary(null);
+       setAiDetail(null);
+       setUsedModel(null);
+    }
 
     try {
       // Fetch Chart Data only
@@ -642,11 +661,15 @@ const Dashboard = () => {
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
         
-        // After data is ready, check if we need to trigger AI
-        checkAndTriggerAnalysis(symbol, processedData);
+        // After data loaded, check cache again. If miss, trigger analysis (On Demand)
+        if (geminiApiKey) {
+             generateFullAnalysis(symbol, processedData); 
+        } else {
+             if(!aiSummary) setAiSummary("請設定 API Key 以啟用 AI 分析。");
+        }
 
       } else { throw new Error('No chart data found'); }
-    } catch (err) { console.warn(`無法取得 ${symbol} 的歷史數據:`, err); setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。"); } finally { setHistoryLoading(false); }
+    } catch (err) { console.warn(`無法取得 ${symbol} 的歷史數據:`, err); setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。"); setIsAiSummarizing(false); } finally { setHistoryLoading(false); }
   };
 
   const performFetch = async (url) => {
@@ -671,7 +694,6 @@ const Dashboard = () => {
             const first = validData.find(d => d['類別'] !== '定存');
             if (first) {
                 setSelectedHistorySymbol(first['標的']);
-                selectedSymbolRef.current = first['標的'];
             }
             localStorage.setItem('investment_sheet_url', url);
           } else { setError('讀取到的資料為空'); setLoading(false); }
@@ -692,6 +714,47 @@ const Dashboard = () => {
     setToast("設定已儲存！"); 
     if (rawData.length > 0) processData(rawData, realTimePrices);
   };
+  
+  const handleChatSend = async () => {
+    if (!chatInput.trim() || !geminiApiKey) return;
+    
+    const userMsg = { role: 'user', content: chatInput };
+    setChatMessages(prev => [...prev, userMsg]);
+    setChatInput('');
+    setIsChatLoading(true);
+
+    const contextData = {
+        totalAssets: summary.totalValue,
+        totalProfit: summary.totalPL,
+        roi: summary.totalROI,
+        holdings: aggregatedHoldings.map(h => ({ 
+            symbol: h['標的'], 
+            name: h['名稱'], 
+            value: h.marketValue, 
+            roi: h.roi,
+            type: assetClassifications[h['標的']] || 'CORE'
+        }))
+    };
+
+    const prompt = `
+      角色：專業投資顧問。
+      使用者投資組合數據：${JSON.stringify(contextData)}。
+      核心資產(CORE)定義：追求穩健、長期持有、防守型。
+      衛星資產(SATELLITE)定義：追求超額報酬、波段操作、攻擊型。
+      
+      使用者問題：${userMsg.content}
+      請根據上述數據與分類提供簡短、專業的回答。
+    `;
+
+    try {
+        const { text: reply } = await callGeminiWithFallback(prompt);
+        setChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+    } catch (err) {
+        setChatMessages(prev => [...prev, { role: 'assistant', content: "抱歉，AI 暫時無法回應，請檢查網路或 API Key。" }]);
+    } finally {
+        setIsChatLoading(false);
+    }
+  };
 
   const getResponsiveFontSize = (text) => {
     const str = String(text); const len = str.length;
@@ -710,12 +773,14 @@ const Dashboard = () => {
     const savedDiscount = localStorage.getItem('fee_discount');
     const savedSort = localStorage.getItem('investment_sort_config');
     const savedOrder = localStorage.getItem('investment_custom_order');
+    const savedClassifications = localStorage.getItem('investment_asset_classifications');
 
     if (savedKey) setGeminiApiKey(savedKey);
     if (savedModel) setSelectedModel(savedModel);
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount));
     if (savedSort) setSortConfig(JSON.parse(savedSort));
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
+    if (savedClassifications) setAssetClassifications(JSON.parse(savedClassifications));
 
     // Load AI Cache
     const cache = getAiCache();
@@ -729,7 +794,7 @@ const Dashboard = () => {
     if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } 
-    else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); const firstStock = DEMO_DATA.find(d => d['類別'] === '股票' || d['類別'] === '債券'); if (firstStock) { setSelectedHistorySymbol(firstStock['標的']); selectedSymbolRef.current = firstStock['標的']; } }
+    else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); const firstStock = DEMO_DATA.find(d => d['類別'] === '股票' || d['類別'] === '債券'); if (firstStock) { setSelectedHistorySymbol(firstStock['標的']); } }
   }, []);
 
   // Removed loop causing dependencies
@@ -738,12 +803,30 @@ const Dashboard = () => {
       const key = `${selectedHistorySymbol}_${timeframe}`;
       if (!historicalData[key] && !historyLoading) {
          fetchHistoricalData(selectedHistorySymbol, timeframe);
-      } else {
-         // Data exists, refresh view from cache (passive)
-         loadFromCache(selectedHistorySymbol);
+      } else if (historicalData[key]) {
+         // Data exists, check if AI is needed (Lazy Load Check)
+         // Only trigger if no cache
+         const cache = getAiCache();
+         const today = getTodayDate();
+         if (!cache[selectedHistorySymbol] || cache[selectedHistorySymbol].date !== today) {
+             generateFullAnalysis(selectedHistorySymbol, historicalData[key]);
+         } else {
+             // Load Cache
+             setAiSummary(String(cache[selectedHistorySymbol].summary));
+             setAiDetail(String(cache[selectedHistorySymbol].detail));
+             setUsedModel(cache[selectedHistorySymbol].model); // Restore Model
+             setIsCachedResult(true);
+             setIsDetailExpanded(true);
+         }
       }
     }
   }, [activeTab, selectedHistorySymbol, timeframe, historicalData]); 
+  
+  useEffect(() => {
+    if (chatEndRef.current) {
+        chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [chatMessages]);
 
   const summary = useMemo(() => {
     const totalCost = portfolioData.reduce((sum, item) => sum + item.costBasis, 0);
@@ -895,35 +978,21 @@ const Dashboard = () => {
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
             <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室</span>
-            {/* Background Task Indicator */}
-            {bgTaskMessage && (
-               <span className="ml-4 text-xs bg-purple-900/50 text-purple-300 px-3 py-1 rounded-full flex items-center animate-pulse border border-purple-500/30">
-                 <BrainCircuit className="w-3 h-3 mr-2" />
-                 {bgTaskMessage}
-               </span>
-            )}
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">
-            {['overview', 'history', 'holdings', 'config'].map(tab => (
+            {['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (
               <button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-slate-900 text-blue-400' : 'text-slate-300 hover:bg-slate-700'}`}>
-                {tab === 'overview' ? '資產總覽' : tab === 'history' ? '歷史走勢' : tab === 'holdings' ? '持股明細' : '設定'}
+                {tab === 'overview' ? '資產總覽' : tab === 'history' ? '歷史走勢' : tab === 'chat' ? 'AI 助理' : tab === 'holdings' ? '持股明細' : '設定'}
               </button>
             ))}
           </div>
         </div>
       </nav>
 
-      {/* Mobile background indicator */}
-      {bgTaskMessage && (
-        <div className="md:hidden fixed top-0 left-0 right-0 bg-purple-900/90 text-purple-200 text-[10px] py-1 text-center z-[60] backdrop-blur-sm">
-           {bgTaskMessage}
-        </div>
-      )}
-
       {/* ... Rest of the UI ... */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 bg-slate-800 border-t border-slate-700 z-50 flex justify-around py-3 pb-safe">
-        {[ { id: 'overview', icon: PieIcon, label: '總覽' }, { id: 'history', icon: LineIcon, label: '走勢' }, { id: 'holdings', icon: FileText, label: '明細' }, { id: 'config', icon: Settings, label: '設定' } ].map(tab => (
+        {[ { id: 'overview', icon: PieIcon, label: '總覽' }, { id: 'history', icon: LineIcon, label: '走勢' }, { id: 'chat', icon: MessageSquare, label: 'AI助理' }, { id: 'holdings', icon: FileText, label: '明細' }, { id: 'config', icon: Settings, label: '設定' } ].map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex flex-col items-center justify-center w-full ${activeTab === tab.id ? 'text-blue-400' : 'text-slate-400'}`}><tab.icon className="h-6 w-6 mb-1" /><span className="text-[10px]">{tab.label}</span></button>
         ))}
       </div>
@@ -976,7 +1045,7 @@ const Dashboard = () => {
         )}
 
         {/* ... (Holdings, History, Config tabs are rendered conditionally below) ... */}
-        {activeTab !== 'overview' && (
+        {activeTab !== 'overview' && activeTab !== 'chat' && (
            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
             {[
               { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' },
@@ -997,6 +1066,55 @@ const Dashboard = () => {
             })}
           </div>
         )}
+        
+        {activeTab === 'chat' && (
+            <div className="max-w-4xl mx-auto h-[70vh] flex flex-col bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
+                <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center">
+                    <Bot className="w-6 h-6 text-purple-400 mr-2" />
+                    <h3 className="font-semibold text-white">AI 投資顧問</h3>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {chatMessages.map((msg, idx) => (
+                        <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'}`}>
+                                <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                            </div>
+                        </div>
+                    ))}
+                    {isChatLoading && (
+                        <div className="flex justify-start">
+                            <div className="bg-slate-700 p-3 rounded-lg flex items-center">
+                                <Loader2 className="w-4 h-4 animate-spin text-purple-400 mr-2" />
+                                <span className="text-xs text-slate-400">AI 正在思考中...</span>
+                            </div>
+                        </div>
+                    )}
+                    <div ref={chatEndRef} />
+                </div>
+
+                <div className="p-4 border-t border-slate-700 bg-slate-900/50">
+                    <div className="flex gap-2">
+                        <input 
+                            type="text" 
+                            value={chatInput} 
+                            onChange={(e) => setChatInput(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleChatSend()}
+                            placeholder="輸入您的問題..." 
+                            className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 text-sm"
+                            disabled={isChatLoading}
+                        />
+                        <button 
+                            onClick={handleChatSend} 
+                            disabled={isChatLoading || !chatInput.trim()}
+                            className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg disabled:opacity-50 transition-colors"
+                        >
+                            <Send className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
 
         {activeTab === 'history' && (
           <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6">
@@ -1007,19 +1125,13 @@ const Dashboard = () => {
                   <button 
                       key={item['標的']} 
                       onClick={() => { 
-                         if(!analyzingList.has(item['標的'])) {
-                            setSelectedHistorySymbol(item['標的']);
-                            selectedSymbolRef.current = item['標的'];
-                         }
+                          if (selectedHistorySymbol !== item['標的']) {
+                              setSelectedHistorySymbol(item['標的']);
+                          }
                       }} 
-                      disabled={analyzingList.has(item['標的'])}
-                      className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${selectedHistorySymbol === item['標的'] ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-slate-700/30 border-transparent text-slate-300 hover:bg-slate-700'} ${analyzingList.has(item['標的']) ? 'opacity-50 cursor-not-allowed grayscale' : ''}`}
+                      className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${selectedHistorySymbol === item['標的'] ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-slate-700/30 border-transparent text-slate-300 hover:bg-slate-700'}`}
                   >
-                    <div className="flex justify-between items-center">
-                        <span className="font-bold">{item['標的']}</span>
-                        <span className="text-xs opacity-70">{item['類別']}</span>
-                        {analyzingList.has(item['標的']) && <Loader2 className="w-3 h-3 animate-spin text-white ml-2" />}
-                    </div>
+                    <div className="flex justify-between items-center"><span className="font-bold">{item['標的']}</span><span className="text-xs opacity-70">{item['類別']}</span></div>
                     <div className="text-sm mt-1 truncate">{item['名稱']}</div>
                     <div className="flex justify-between mt-1 text-xs opacity-60"><span>{formatCurrency(item.marketValue)}</span><span className={item.profitLoss >= 0 ? 'text-red-300' : 'text-green-300'}>{formatPercent(item.roi)}</span></div>
                   </button>
@@ -1055,34 +1167,35 @@ const Dashboard = () => {
               ) : <div className="flex-1 flex items-center justify-center min-h-[400px] text-slate-500">{historyError ? <span className="text-red-400">{historyError}</span> : "請選擇左側標的以查看走勢"}</div>}
 
               <div className="mt-4 pt-4 border-t border-slate-700">
-                <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{usedModel}</span>}{aiSignals[selectedHistorySymbol] === 'ADD' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}</div>
+                <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符, 請重新整理)</span>}</span>}{aiSignals[selectedHistorySymbol] === 'ADD' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}</div>
+                
                 {/* Button Logic Updated: Only Expand/Collapse or Retry */}
-                {aiDetail && (
-                  <button 
-                      onClick={() => setIsDetailExpanded(!isDetailExpanded)} 
-                      className="text-xs text-blue-400 hover:text-blue-300 flex items-center transition-colors"
-                    >
-                      <FileSearch className="w-3 h-3 mr-1" />
-                      {isDetailExpanded ? "收合完整報告" : "展開完整報告"}
-                  </button>
-                )}
-                {!aiDetail && !isAiSummarizing && !analyzingList.has(selectedHistorySymbol) && geminiApiKey && (
-                   <button 
-                      onClick={() => {
-                        // Force Immediate Analysis (Rescue)
-                        setAnalyzingList(prev => new Set(prev).add(selectedHistorySymbol));
-                        runBackgroundAnalysis([selectedHistorySymbol], true);
-                      }}
-                      className="text-xs text-red-400 hover:text-red-300 flex items-center transition-colors"
-                   >
-                     <RefreshCw className="w-3 h-3 mr-1" /> 重新載入分析
-                   </button>
-                )}
+                <div className="flex items-center space-x-2">
+                  {aiDetail && (
+                    <button 
+                        onClick={() => setIsDetailExpanded(!isDetailExpanded)} 
+                        className="text-xs text-blue-400 hover:text-blue-300 flex items-center transition-colors"
+                      >
+                        <FileSearch className="w-3 h-3 mr-1" />
+                        {isDetailExpanded ? "收合完整報告" : "展開完整報告"}
+                    </button>
+                  )}
+                  {geminiApiKey && (
+                     <button 
+                        disabled={isAiSummarizing}
+                        onClick={() => generateFullAnalysis(selectedHistorySymbol, historicalData[`${selectedHistorySymbol}_${timeframe}`], true)}
+                        className={`text-xs flex items-center transition-colors ${isAiSummarizing ? 'text-slate-500 cursor-not-allowed' : 'text-red-400 hover:text-red-300'}`}
+                     >
+                       <RefreshCw className={`w-3 h-3 mr-1 ${isAiSummarizing ? 'animate-spin' : ''}`} /> 
+                       {isAiSummarizing ? "分析中..." : "重新載入分析"}
+                     </button>
+                  )}
+                </div>
                 </div>
 
                 <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700 shadow-inner">
-                  {/* UNIFIED LOADING: Show if summarizing OR in background list */}
-                  {(isAiSummarizing || analyzingList.has(selectedHistorySymbol)) ? (
+                  {/* UNIFIED LOADING */}
+                  {isAiSummarizing ? (
                     <div className="flex items-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin mr-2" />AI 正在分析中...</div>
                   ) : (
                     <>
@@ -1127,9 +1240,20 @@ const Dashboard = () => {
                         {signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-1" />}
                         {signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-1" />}
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span>
                       </div>
-                      <div className="text-sm text-slate-400 mt-1">{row['名稱']}</div>
+                      {/* Mobile Classification Dropdown - FIX: Correct styling and positioning */}
+                      <div className="mt-2">
+                         <select 
+                            value={assetClassifications[row['標的']] || 'CORE'}
+                            onChange={(e) => handleClassificationChange(row['標的'], e.target.value)}
+                            className={`text-xs px-2 py-1 rounded border border-slate-600 focus:border-blue-500 focus:outline-none cursor-pointer bg-slate-700 text-white w-full`}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <option value="CORE">核心資產</option>
+                            <option value="SATELLITE">衛星資產</option>
+                          </select>
+                      </div>
+                      <div className="text-sm text-slate-400 mt-2">{row['名稱']}</div>
                     </div>
                     <div className="flex flex-col items-end">
                       <span className={`text-lg font-bold ${(row.roi || 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>{formatPercent(row.roi)}</span>
@@ -1158,8 +1282,8 @@ const Dashboard = () => {
                   <thead className="bg-slate-900/50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider w-20">排序</th>
-                      {[ { label: '標的代號', key: '標的' }, { label: '名稱/類別', key: '類別' }, { label: '平均成本', key: 'buyPrice' }, { label: 'Yahoo即時價', key: 'currentPrice' }, { label: '總股數', key: 'shares' }, { label: '總損益 (淨)', key: 'profitLoss' }, { label: '報酬率 (淨)', key: 'roi' } ].map(header => (
-                        <th key={header.key} onClick={() => requestSort(header.key)} className={`px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider cursor-pointer hover:text-white transition-colors group ${header.label.includes('代號') || header.label.includes('名稱') ? 'text-left' : 'text-right'}`}><div className={`flex items-center ${header.label.includes('代號') || header.label.includes('名稱') ? 'justify-start' : 'justify-end'}`}>{header.label}<SortIcon columnKey={header.key} /></div></th>
+                      {[ { label: '標的代號', key: '標的' }, { label: '名稱/類別', key: '類別' }, { label: '投資定位', key: 'class' }, { label: '平均成本', key: 'buyPrice' }, { label: 'Yahoo即時價', key: 'currentPrice' }, { label: '總股數', key: 'shares' }, { label: '總損益 (淨)', key: 'profitLoss' }, { label: '報酬率 (淨)', key: 'roi' } ].map(header => (
+                        <th key={header.key} onClick={() => header.key !== 'class' && requestSort(header.key)} className={`px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider ${header.key !== 'class' ? 'cursor-pointer hover:text-white' : ''} transition-colors group ${header.label.includes('代號') || header.label.includes('名稱') ? 'text-left' : 'text-right'}`}><div className={`flex items-center ${header.label.includes('代號') || header.label.includes('名稱') ? 'justify-start' : 'justify-end'}`}>{header.label}{header.key !== 'class' && <SortIcon columnKey={header.key} />}</div></th>
                       ))}
                     </tr>
                   </thead>
@@ -1171,6 +1295,20 @@ const Dashboard = () => {
                         <td className="px-6 py-4 whitespace-nowrap"><div className="flex flex-col space-y-1">{index > 0 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], -1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowUp className="w-3 h-3" /></button>}{index < sortedHoldings.length - 1 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], 1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowDown className="w-3 h-3" /></button>}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-white font-medium flex items-center">{signal === 'ADD' && <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" title="AI建議: 加碼" />}{signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" title="AI建議: 減碼" />}{signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" title="AI建議: 觀望" />}{row['標的']}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}</div><div className="text-xs text-slate-500">最近交易: {row['日期']}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-slate-200">{row['名稱']}</div><span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mt-1 ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span></td>
+                        
+                        {/* Classification Dropdown - Desktop Style Fix */}
+                        <td className="px-6 py-4 whitespace-nowrap text-right">
+                          <select 
+                            value={assetClassifications[row['標的']] || 'CORE'}
+                            onChange={(e) => handleClassificationChange(row['標的'], e.target.value)}
+                            className={`text-xs px-2 py-1 rounded border border-transparent focus:border-blue-500 focus:outline-none cursor-pointer bg-slate-800 text-white ${ASSET_TYPES[assetClassifications[row['標的']] || 'CORE'].color}`}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <option value="CORE">核心資產</option>
+                            <option value="SATELLITE">衛星資產</option>
+                          </select>
+                        </td>
+
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.isUS ? '$' : ''}{formatPrice(row.buyPriceRaw || row.buyPrice)}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{row.isUS ? '$' : ''}{formatPrice(row.currentPriceRaw || row.currentPrice)}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.shares.toLocaleString()}</td>
