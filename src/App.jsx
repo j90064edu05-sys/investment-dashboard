@@ -11,14 +11,15 @@ import {
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v36.2 (Model Fidelity Fix):
- * * [核心優化] 提高指定模型成功率與 Fallback 提示
- * 1. 模型參數優化 (Config Tuning):
- * - 針對 `gemini-1.5-flash` 調整 `generationConfig`，避免因參數過於激進導致 400 錯誤而觸發 Fallback。
- * 2. Fallback 提示 (UI Feedback):
- * - 若實際使用的模型 (`usedModel`) 與設定的 (`selectedModel`) 不同，UI 會標註 `(自動切換)`，告知使用者發生了降級或替換。
- * 3. 重試機制 (Retry Logic):
- * - 在切換模型前，先針對「當前設定的模型」進行簡易重試，盡量滿足使用者設定。
+ * 專業理財經理人技術筆記 (Technical Note) v37.0 (Gemini 3 & Signal Logic):
+ * * [核心升級] 模型更新與燈號邏輯優化
+ * 1. 模型升級 (Model Upgrade):
+ * - 引入 Gemini 3 Flash/Pro Preview 與 Gemini 2.5 Flash/Pro。
+ * - 預設模型調整為 `gemini-2.5-flash`。
+ * 2. 燈號清空邏輯 (Signal Clearing):
+ * - 全域更新 (`fetchRealTimePrices`): 清空所有 `aiSignals`。
+ * - 單一分析 (`generateFullAnalysis`): 開始分析時，立即刪除該標的的舊燈號，避免誤導。
+ * - 確保燈號只在 AI 完成分析後才顯示。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -56,11 +57,12 @@ const CATEGORY_STYLES = {
   'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }   
 };
 
+// UPDATED MODEL LIST
 const AVAILABLE_MODELS = [
-  { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (快速)' },
-  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (精準)' },
-  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (最新)' },
-  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (最新)' },
+  { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview (最新快速)' },
+  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro Preview (最新精準)' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (平衡)' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (進階)' },
 ];
 
 const ASSET_TYPES = {
@@ -281,7 +283,7 @@ const Dashboard = () => {
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); // Track if result is from cache
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
-  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
+  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash'); // UPDATED DEFAULT
   const [aiSignals, setAiSignals] = useState({}); 
   
   // Asset Classifications (Core/Satellite)
@@ -444,6 +446,15 @@ const Dashboard = () => {
     
     if (newPrices['TWD=X']) setUsdRate(newPrices['TWD=X']);
     setRealTimePrices(newPrices);
+    
+    // Clear Caches for Re-calculation
+    setHistoricalData({}); // Clear Technical Cache (Memory)
+    localStorage.removeItem('gemini_analysis_cache'); // Clear AI Cache (Storage)
+    setAiSignals({}); // Clear Signals
+    setAiSummary(null); // Clear Display
+    setAiDetail(null);
+    setUsedModel(null);
+    
     setPriceLoading(false);
     setLastUpdated(new Date()); 
     setLoadingMessage('更新即時股價中...'); 
@@ -459,7 +470,6 @@ const Dashboard = () => {
 
     // Dynamic Model Selection based on settings
     const defaultModels = AVAILABLE_MODELS.map(m => m.id);
-    // Prioritize selected model, then fallback
     const models = [selectedModel, ...defaultModels.filter(m => m !== selectedModel)];
 
     const controller = new AbortController();
@@ -473,10 +483,11 @@ const Dashboard = () => {
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
+              // FIX: Add maxOutputTokens to prevent truncation
               body: JSON.stringify({ 
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
-                  maxOutputTokens: 4096, // Balanced token limit
+                  maxOutputTokens: 8192,
                 }
               }),
               signal: controller.signal
@@ -541,6 +552,13 @@ const Dashboard = () => {
     setUsedModel(null); 
     setIsCachedResult(false); // New analysis
     setAnalysisSymbol(symbol); 
+    
+    // Clear signal immediately when starting analysis
+    setAiSignals(prev => {
+        const next = { ...prev };
+        delete next[symbol];
+        return next;
+    });
 
     const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
     const stockName = assetInfo?.['名稱'] || symbol;
@@ -1167,7 +1185,7 @@ const Dashboard = () => {
               ) : <div className="flex-1 flex items-center justify-center min-h-[400px] text-slate-500">{historyError ? <span className="text-red-400">{historyError}</span> : "請選擇左側標的以查看走勢"}</div>}
 
               <div className="mt-4 pt-4 border-t border-slate-700">
-                <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符, 請重新整理)</span>}</span>}{aiSignals[selectedHistorySymbol] === 'ADD' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}</div>
+                <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符)</span>} {selectedModel !== usedModel && !isCachedResult && <span className="text-yellow-400 ml-1 text-[10px]">(自動切換)</span>}</span>}{aiSignals[selectedHistorySymbol] === 'ADD' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}</div>
                 
                 {/* Button Logic Updated: Only Expand/Collapse or Retry */}
                 <div className="flex items-center space-x-2">
@@ -1180,14 +1198,13 @@ const Dashboard = () => {
                         {isDetailExpanded ? "收合完整報告" : "展開完整報告"}
                     </button>
                   )}
-                  {geminiApiKey && (
+                  {geminiApiKey && !isAiSummarizing && (
                      <button 
-                        disabled={isAiSummarizing}
                         onClick={() => generateFullAnalysis(selectedHistorySymbol, historicalData[`${selectedHistorySymbol}_${timeframe}`], true)}
-                        className={`text-xs flex items-center transition-colors ${isAiSummarizing ? 'text-slate-500 cursor-not-allowed' : 'text-red-400 hover:text-red-300'}`}
+                        className={`text-xs flex items-center transition-colors text-red-400 hover:text-red-300`}
                      >
-                       <RefreshCw className={`w-3 h-3 mr-1 ${isAiSummarizing ? 'animate-spin' : ''}`} /> 
-                       {isAiSummarizing ? "分析中..." : "重新載入分析"}
+                       <RefreshCw className={`w-3 h-3 mr-1`} /> 
+                       重新載入分析
                      </button>
                   )}
                 </div>
@@ -1241,7 +1258,7 @@ const Dashboard = () => {
                         {signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-1" />}
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
                       </div>
-                      {/* Mobile Classification Dropdown - FIX: Correct styling and positioning */}
+                      {/* Mobile Classification Dropdown */}
                       <div className="mt-2">
                          <select 
                             value={assetClassifications[row['標的']] || 'CORE'}
@@ -1388,6 +1405,7 @@ const Dashboard = () => {
     </div>
   );
 };
+
 
 export default function App() {
   return <Dashboard />;
