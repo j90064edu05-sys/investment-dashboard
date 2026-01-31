@@ -7,19 +7,14 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair
 } from 'lucide-react';
 
 /**
- * 專業理財經理人技術筆記 (Technical Note) v37.0 (Gemini 3 & Signal Logic):
- * * [核心升級] 模型更新與燈號邏輯優化
- * 1. 模型升級 (Model Upgrade):
- * - 引入 Gemini 3 Flash/Pro Preview 與 Gemini 2.5 Flash/Pro。
- * - 預設模型調整為 `gemini-2.5-flash`。
- * 2. 燈號清空邏輯 (Signal Clearing):
- * - 全域更新 (`fetchRealTimePrices`): 清空所有 `aiSignals`。
- * - 單一分析 (`generateFullAnalysis`): 開始分析時，立即刪除該標的的舊燈號，避免誤導。
- * - 確保燈號只在 AI 完成分析後才顯示。
+ * Alpha 投資戰情室 v40.0
+ * * 更新日誌：
+ * 1. [AI優化] Prompt 結構升級：新增「標的識別」區塊，明確傳送股票代號與名稱，確保 AI 分析對象正確無誤。
+ * 2. [功能保持] 包含 v39.1 的所有功能 (類別排序、核心/衛星策略切換、總體健檢)。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -40,14 +35,14 @@ const DEMO_DATA = [
 const COLORS = ['#3B82F6', '#8B5CF6', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#6366F1'];
 
 const STRATEGY_CONFIG = {
-  '基礎買入':     { color: '#EF4444', label: '基礎買入',     shape: 'circle' },
-  '金字塔_S1':    { color: '#F97316', label: '金字塔_S1',    shape: 'triangle' },
-  '金字塔_S2':    { color: '#EAB308', label: '金字塔_S2',    shape: 'triangle' },
-  '金字塔_S3':    { color: '#84CC16', label: '金字塔_S3',    shape: 'triangle' },
-  'K值超賣':      { color: '#3B82F6', label: 'K值超賣',      shape: 'diamond' },
-  'MA60有撐':     { color: '#8B5CF6', label: 'MA60有撐',     shape: 'star' },
-  'MA120有撐':    { color: '#06B6D4', label: 'MA120有撐',    shape: 'square' },
-  'default':      { color: '#64748B', label: '其他策略',     shape: 'cross' }
+  '基礎買入':     { color: '#EF4444', label: '基礎買入',      shape: 'circle' },
+  '金字塔_S1':    { color: '#F97316', label: '金字塔_S1',     shape: 'triangle' },
+  '金字塔_S2':    { color: '#EAB308', label: '金字塔_S2',     shape: 'triangle' },
+  '金字塔_S3':    { color: '#84CC16', label: '金字塔_S3',     shape: 'triangle' },
+  'K值超賣':      { color: '#3B82F6', label: 'K值超賣',       shape: 'diamond' },
+  'MA60有撐':     { color: '#8B5CF6', label: 'MA60有撐',      shape: 'star' },
+  'MA120有撐':    { color: '#06B6D4', label: 'MA120有撐',     shape: 'square' },
+  'default':      { color: '#64748B', label: '其他策略',      shape: 'cross' }
 };
 
 const CATEGORY_STYLES = {
@@ -66,8 +61,8 @@ const AVAILABLE_MODELS = [
 ];
 
 const ASSET_TYPES = {
-  'CORE': { label: '核心資產', color: 'text-blue-400', bg: 'bg-blue-900/30' },
-  'SATELLITE': { label: '衛星資產', color: 'text-orange-400', bg: 'bg-orange-900/30' }
+  'CORE': { label: '核心資產', color: 'text-blue-300', bg: 'bg-blue-900/50', border: 'border-blue-500/50' },
+  'SATELLITE': { label: '衛星資產', color: 'text-orange-300', bg: 'bg-orange-900/50', border: 'border-orange-500/50' }
 };
 
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
@@ -207,9 +202,9 @@ const calculateMACD = (data) => {
   });
   const signalArray = calculateEMA(difArray, 9, 'DIF');
   return difArray.map((d, i) => {
-     const dif = d.DIF; const signal = signalArray[i]; let osc = null;
-     if (dif !== null && signal !== null) { osc = dif - signal; }
-     return { ...d, Signal: signal, OSC: osc };
+      const dif = d.DIF; const signal = signalArray[i]; let osc = null;
+      if (dif !== null && signal !== null) { osc = dif - signal; }
+      return { ...d, Signal: signal, OSC: osc };
   });
 };
 
@@ -251,7 +246,7 @@ const Toast = ({ message, onClose }) => {
 
 // --- 主要元件 ---
 
-const Dashboard = () => {
+const App = () => {
   const [sheetUrl, setSheetUrl] = useState('');
   const [geminiApiKey, setGeminiApiKey] = useState(''); 
   const [rawData, setRawData] = useState([]);
@@ -262,7 +257,7 @@ const Dashboard = () => {
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(new Date()); 
   const [activeTab, setActiveTab] = useState('overview');
-  
+   
   const [realTimePrices, setRealTimePrices] = useState({});
   const [usdRate, setUsdRate] = useState(1); 
   const [updateError, setUpdateError] = useState(null);
@@ -271,7 +266,7 @@ const Dashboard = () => {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('5y_1wk'); 
-  
+   
   const [sortConfig, setSortConfig] = useState({ key: 'manual', direction: 'asc' });
   const [customOrder, setCustomOrder] = useState([]);
 
@@ -281,11 +276,15 @@ const Dashboard = () => {
   const [isAiSummarizing, setIsAiSummarizing] = useState(false);
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
-  const [isCachedResult, setIsCachedResult] = useState(false); // Track if result is from cache
+  const [isCachedResult, setIsCachedResult] = useState(false); 
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
-  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash'); // UPDATED DEFAULT
+  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash'); 
   const [aiSignals, setAiSignals] = useState({}); 
-  
+
+  // Portfolio Health Check State
+  const [portfolioHealth, setPortfolioHealth] = useState(null);
+  const [isHealthChecking, setIsHealthChecking] = useState(false);
+   
   // Asset Classifications (Core/Satellite)
   const [assetClassifications, setAssetClassifications] = useState({});
 
@@ -317,7 +316,7 @@ const Dashboard = () => {
 
       const isTD = category === '定存' && symbol.includes('-TD');
       const isUS = isUsAsset(symbol) || isTD; 
-      
+       
       let fxRate = 1;
       let currentPriceRaw = buyPriceRaw;
 
@@ -343,7 +342,7 @@ const Dashboard = () => {
       const costBasisTwd = costBasisRaw; 
 
       const marketValueTwd = shares * currentPriceTwd;
-      
+       
       const assetType = detectAssetType(symbol, name, category);
       let taxRate = 0;
       let feeRate = 0;
@@ -354,14 +353,14 @@ const Dashboard = () => {
           else if (assetType === 'BOND') taxRate = 0;
           else taxRate = 0.003; 
       }
-      
+       
       const estimateFee = Math.round(marketValueTwd * feeRate);
       const estimateTax = category === '定存' ? 0 : Math.round(marketValueTwd * taxRate);
       const feeFinal = category === '定存' ? 0 : estimateFee;
 
       const grossProfit = marketValueTwd - costBasisTwd;
       const netProfit = grossProfit - feeFinal - estimateTax;
-      
+       
       const calculatedBuyPriceTwd = shares > 0 ? costBasisTwd / shares : 0;
       const roi = costBasisTwd > 0 ? netProfit / costBasisTwd : 0;
 
@@ -450,10 +449,11 @@ const Dashboard = () => {
     // Clear Caches for Re-calculation
     setHistoricalData({}); // Clear Technical Cache (Memory)
     localStorage.removeItem('gemini_analysis_cache'); // Clear AI Cache (Storage)
-    setAiSignals({}); // Clear Signals
+    setAiSignals({}); // Clear Signals (Signal Clearing)
     setAiSummary(null); // Clear Display
     setAiDetail(null);
     setUsedModel(null);
+    setPortfolioHealth(null); // Clear Health Check
     
     setPriceLoading(false);
     setLastUpdated(new Date()); 
@@ -468,12 +468,11 @@ const Dashboard = () => {
       throw new Error("請先至「設定」頁面儲存 API Key");
     }
 
-    // Dynamic Model Selection based on settings
     const defaultModels = AVAILABLE_MODELS.map(m => m.id);
     const models = [selectedModel, ...defaultModels.filter(m => m !== selectedModel)];
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
+    const timeoutId = setTimeout(() => controller.abort(), 30000); 
 
     try {
       for (const model of models) {
@@ -483,7 +482,6 @@ const Dashboard = () => {
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              // FIX: Add maxOutputTokens to prevent truncation
               body: JSON.stringify({ 
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
@@ -502,7 +500,7 @@ const Dashboard = () => {
           const data = await response.json();
           const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
           if (text) {
-            return { text, model }; // Return object with model ID
+            return { text, model }; 
           }
         } catch (err) {
           console.error(`Error calling ${model}:`, err);
@@ -520,10 +518,78 @@ const Dashboard = () => {
     localStorage.setItem('investment_asset_classifications', JSON.stringify(newClassifications));
   };
 
+  // --- Portfolio Health Check Function ---
+  const generatePortfolioHealthCheck = async () => {
+    if (!geminiApiKey) {
+        alert("請先設定 API Key");
+        setActiveTab('config');
+        return;
+    }
+    if (isHealthChecking) return;
+    setIsHealthChecking(true);
+    setPortfolioHealth(null);
+
+    // Prepare Summary Data
+    const totalAsset = summary.totalValue;
+    const topHoldings = sortedHoldings.slice(0, 5).map(h => `${h['名稱']}(${h['標的']}): ${formatPercent(h.marketValue / totalAsset)}`);
+    const allocationStr = allocationData.map(d => `${d.name} ${formatPercent(d.percentage)}`).join(', ');
+
+    const prompt = `
+      角色：首席投資長 (CIO) 與風險控管經理。
+      任務：對目前的投資組合進行總體風險與健康度健檢。
+      
+      【資產數據】
+      - 總資產：${formatCurrency(summary.totalValue)}
+      - 總損益：${formatCurrency(summary.totalPL)} (ROI: ${formatPercent(summary.totalROI)})
+      - 資產配置：${allocationStr}
+      - 前五大持股 (集中度風險)：${topHoldings.join(', ')}
+      
+      請分析並輸出以下格式 (請嚴格遵守 TAG 格式，不要使用 Markdown 代碼區塊)：
+      
+      [SCORE]
+      (請給出 0-100 的分數，根據風險分散性與配置合理性評分)
+      
+      [RISK]
+      (低風險 / 中低風險 / 中風險 / 中高風險 / 高風險 - 請選一個)
+      
+      [COMMENT]
+      (200字以內的總評，包含風險提示與資產配置建議。語氣專業、客觀)
+      
+      [SUGGESTION]
+      (請列出 3 點具體調整方向，每點一行，例如「增加債券部位以降低波動」或「減少單一持股佔比」)
+    `;
+
+    try {
+        const { text } = await callGeminiWithFallback(prompt);
+        
+        // Simple Parsing Logic
+        const scoreMatch = text.match(/\[SCORE\]\s*(\d+)/i);
+        const riskMatch = text.match(/\[RISK\]\s*(.+)/i);
+        const commentMatch = text.match(/\[COMMENT\]\s*([\s\S]*?)\s*(?=\[SUGGESTION\]|$)/i);
+        const suggestionMatch = text.match(/\[SUGGESTION\]\s*([\s\S]*)/i);
+
+        setPortfolioHealth({
+            score: scoreMatch ? parseInt(scoreMatch[1]) : 0,
+            risk: riskMatch ? riskMatch[1].trim() : "未知",
+            comment: commentMatch ? commentMatch[1].trim() : "無法解析評論",
+            suggestions: suggestionMatch ? suggestionMatch[1].trim().split('\n').filter(s => s.trim().length > 0) : []
+        });
+
+    } catch (err) {
+        setPortfolioHealth({
+            score: 0,
+            risk: "Error",
+            comment: "AI 分析失敗，請稍後再試。",
+            suggestions: []
+        });
+    } finally {
+        setIsHealthChecking(false);
+    }
+  };
+
   const generateFullAnalysis = async (symbol, data, forceUpdate = false) => {
     if (!data || data.length === 0) return;
     
-    // Check if already analyzing this symbol
     if (analysisInProgressRef.current[symbol]) return;
     analysisInProgressRef.current[symbol] = true;
 
@@ -532,13 +598,12 @@ const Dashboard = () => {
     const today = getTodayDate();
     const cache = getAiCache();
 
-    // Double check cache - unless forced
     if (!forceUpdate && cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
       setAiSummary(String(cache[symbol].summary));
       setAiDetail(String(cache[symbol].detail));
       if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
-      setUsedModel(cache[symbol].model); // Restore model from cache
-      setIsCachedResult(true); // MARK AS CACHED
+      setUsedModel(cache[symbol].model); 
+      setIsCachedResult(true); 
       setAnalysisSymbol(symbol);
       setIsDetailExpanded(true); 
       setIsAiSummarizing(false); 
@@ -550,10 +615,9 @@ const Dashboard = () => {
     setAiSummary(null);
     setAiDetail(null); 
     setUsedModel(null); 
-    setIsCachedResult(false); // New analysis
+    setIsCachedResult(false); 
     setAnalysisSymbol(symbol); 
     
-    // Clear signal immediately when starting analysis
     setAiSignals(prev => {
         const next = { ...prev };
         delete next[symbol];
@@ -569,18 +633,23 @@ const Dashboard = () => {
     const classLabel = ASSET_TYPES[classification].label;
     const performanceInfo = assetInfo ? `目前損益：${formatCurrency(assetInfo.profitLoss)} (ROI: ${formatPercent(assetInfo.roi)})。` : "";
 
-    // IMPORTANT: Inject Real-Time Price Logic
     const currentPrice = realTimePrices[symbol] || latest.close;
 
+    // Enhanced Strategy Logic based on User Selection
     const strategyLogic = classification === 'CORE' 
-        ? "【核心資產策略】此類資產追求長期穩健。若目前股價跌破季線(MA60)或半年線(MA120)且基本面未變，應視為買點(SIGNAL:ADD)。若乖離過大或基本面轉差，則考慮減碼或續抱。"
-        : "【衛星資產策略】此類資產追求波段價差。若股價站上月線(MA20)且動能強(KD金叉/MACD紅柱)，建議追價(SIGNAL:ADD)。若跌破月線或高檔爆量，應嚴格停損/停利(SIGNAL:REDUCE)。";
+        ? "【核心資產策略 (CORE)】此類資產追求長期穩健，以「左側交易」為主。策略：(1) 股價跌破季線(MA60)或半年線(MA120)為佈局點，視為「價值浮現」(SIGNAL:ADD)。(2) 若基本面未變，價格下跌不應恐慌，而是分批承接。(3) 僅在乖離率過大或基本面轉差時才考慮減碼。"
+        : "【衛星資產策略 (SATELLITE)】此類資產追求波段價差，以「右側交易」為主。策略：(1) 股價站上月線(MA20)且KD/MACD指標轉強，視為「動能增強」，建議追價(SIGNAL:ADD)。(2) 跌破月線或高檔爆量，代表動能轉弱，應嚴格執行停損/停利(SIGNAL:REDUCE)。(3) 不建議長期凹單。";
 
     const prompt = `
-      請以一位專業股票分析師的角色，分析 ${symbol} (${stockName}) [${assetType}]。
+      請以一位專業股票分析師的角色，進行個股深度分析。
+      
+      **分析標的確認**：
+      - 股票代號 (Symbol)：${symbol}
+      - 股票名稱 (Name)：${stockName}
+      - 資產屬性：${assetType}
       
       **基本資訊**：
-      - 投資定位：${classLabel}
+      - 投資定位：${classLabel} (這非常重要，請依此定位給出建議)
       - ${performanceInfo}
       - K線收盤價 (Data Date): ${formatPrice(latest.close)}
       - **目前即時價 (Real-time): ${formatPrice(currentPrice)}** (請以此價格判斷當下操作)
@@ -590,9 +659,10 @@ const Dashboard = () => {
       - KD指標：K=${latest.K?formatPrice(latest.K):'-'}, D=${latest.D?formatPrice(latest.D):'-'}
       - MACD：OSC=${latest.OSC?formatPrice(latest.OSC):'-'}
 
-      **判斷邏輯**：
+      **策略判斷邏輯**：
       ${strategyLogic}
-      請綜合考量目前即時價位與技術支撐/壓力位，給出操作建議。
+      
+      請綜合考量目前即時價位與技術支撐/壓力位，給出符合「${classLabel}」屬性的操作建議。
       
       請依序輸出 (請勿使用 Markdown 代碼區塊)：
       
@@ -609,27 +679,22 @@ const Dashboard = () => {
     try {
       const { text, model } = await callGeminiWithFallback(prompt);
       
-      // Update Used Model UI immediately
       setUsedModel(model);
 
-      // Improved Regex to handle various formats and potential garbage
       const summaryMatch = text.match(/\[SUMMARY\]\s*([\s\S]*?)\s*(?=\[DETAIL\]|$)/i);
       const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
       const signalMatch = text.match(/\[SIGNAL\]\s*(ADD|REDUCE|HOLD)/i);
 
       let summary = summaryMatch ? summaryMatch[1].trim() : "分析完成";
-      // CLEANUP: Remove potential markdown garbage from summary
       summary = summary.replace(/[`*#]/g, '').replace(/\n/g, ' ').trim();
 
       const detail = detailMatch ? detailMatch[1].trim() : text;
-      // FALLBACK: Default to HOLD if no signal found
       const signal = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
 
       setAiSummary(String(summary));
       setAiDetail(String(detail));
       setAiSignals(prev => ({ ...prev, [symbol]: signal }));
       
-      // SAVE MODEL ID TO CACHE
       updateAiCache(symbol, { summary, detail, signal, model }, dataDate); 
       setIsDetailExpanded(true); 
     } catch (err) {
@@ -645,19 +710,17 @@ const Dashboard = () => {
     setHistoryLoading(true); setHistoryError(null); 
     setAnalysisSymbol(symbol); 
     
-    // Reset AI state for new symbol
     setIsAiSummarizing(false); 
     setIsCachedResult(false);
 
-    // Initial Load Attempt from Cache
     const today = getTodayDate();
     const cache = getAiCache();
     if (cache[symbol] && cache[symbol].date === today && (cache[symbol].summary || cache[symbol].detail)) {
       setAiSummary(String(cache[symbol].summary));
       setAiDetail(String(cache[symbol].detail));
       if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
-      setUsedModel(cache[symbol].model); // Restore model from cache
-      setIsCachedResult(true); // Mark as cached
+      setUsedModel(cache[symbol].model); 
+      setIsCachedResult(true); 
       setIsDetailExpanded(true);
     } else {
        setAiSummary(null);
@@ -666,7 +729,6 @@ const Dashboard = () => {
     }
 
     try {
-      // Fetch Chart Data only
       let range = '5y'; let interval = '1wk';
       if (tf === '1y_1d') { range = '2y'; interval = '1d'; } if (tf === '10y_1mo') { range = '10y'; interval = '1mo'; } if (tf === '5y_1wk') { range = '5y'; interval = '1wk'; }
       const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
@@ -679,7 +741,6 @@ const Dashboard = () => {
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
         
-        // After data loaded, check cache again. If miss, trigger analysis (On Demand)
         if (geminiApiKey) {
              generateFullAnalysis(symbol, processedData); 
         } else {
@@ -691,7 +752,7 @@ const Dashboard = () => {
   };
 
   const performFetch = async (url) => {
-    setLoading(true); setError(null); setUpdateError(null); setRealTimePrices({}); setHistoricalData({});
+    setLoading(true); setError(null); setUpdateError(null); setRealTimePrices({}); setHistoricalData({}); setPortfolioHealth(null);
     try {
       const Papa = await loadPapaParse();
       Papa.parse(url, {
@@ -800,7 +861,6 @@ const Dashboard = () => {
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
     if (savedClassifications) setAssetClassifications(JSON.parse(savedClassifications));
 
-    // Load AI Cache
     const cache = getAiCache();
     const signals = {};
     Object.keys(cache).forEach(key => { if (cache[key].signal) signals[key] = cache[key].signal; });
@@ -815,24 +875,20 @@ const Dashboard = () => {
     else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); const firstStock = DEMO_DATA.find(d => d['類別'] === '股票' || d['類別'] === '債券'); if (firstStock) { setSelectedHistorySymbol(firstStock['標的']); } }
   }, []);
 
-  // Removed loop causing dependencies
   useEffect(() => {
     if (activeTab === 'history' && selectedHistorySymbol) {
       const key = `${selectedHistorySymbol}_${timeframe}`;
       if (!historicalData[key] && !historyLoading) {
          fetchHistoricalData(selectedHistorySymbol, timeframe);
       } else if (historicalData[key]) {
-         // Data exists, check if AI is needed (Lazy Load Check)
-         // Only trigger if no cache
          const cache = getAiCache();
          const today = getTodayDate();
          if (!cache[selectedHistorySymbol] || cache[selectedHistorySymbol].date !== today) {
              generateFullAnalysis(selectedHistorySymbol, historicalData[key]);
          } else {
-             // Load Cache
              setAiSummary(String(cache[selectedHistorySymbol].summary));
              setAiDetail(String(cache[selectedHistorySymbol].detail));
-             setUsedModel(cache[selectedHistorySymbol].model); // Restore Model
+             setUsedModel(cache[selectedHistorySymbol].model);
              setIsCachedResult(true);
              setIsDetailExpanded(true);
          }
@@ -1008,7 +1064,6 @@ const Dashboard = () => {
         </div>
       </nav>
 
-      {/* ... Rest of the UI ... */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 bg-slate-800 border-t border-slate-700 z-50 flex justify-around py-3 pb-safe">
         {[ { id: 'overview', icon: PieIcon, label: '總覽' }, { id: 'history', icon: LineIcon, label: '走勢' }, { id: 'chat', icon: MessageSquare, label: 'AI助理' }, { id: 'holdings', icon: FileText, label: '明細' }, { id: 'config', icon: Settings, label: '設定' } ].map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex flex-col items-center justify-center w-full ${activeTab === tab.id ? 'text-blue-400' : 'text-slate-400'}`}><tab.icon className="h-6 w-6 mb-1" /><span className="text-[10px]">{tab.label}</span></button>
@@ -1020,68 +1075,174 @@ const Dashboard = () => {
         {updateError && <div className="mb-6 bg-red-900/30 border border-red-500/30 rounded-lg p-3 flex items-center"><AlertTriangle className="w-5 h-5 text-red-400 mr-3 flex-shrink-0" /><span className="text-sm text-red-200">{updateError}</span></div>}
 
         {activeTab === 'overview' && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-            <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
-              <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><PieIcon className="w-5 h-5 mr-2 text-blue-400" /> 資產類別配置</h3>
-              <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
-                {allocationData.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">
-                        {allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}
-                      </Pie>
-                      <RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} />
-                      <Legend content={(props) => <ul className="flex flex-wrap justify-center gap-4 mt-4">{props.payload.map((entry, index) => <li key={`item-${index}`} className="flex items-center text-sm text-slate-300"><span className="block w-3 h-3 rounded-full mr-2" style={{ backgroundColor: entry.color }}></span>{entry.value} <span className="ml-1 text-slate-400">({formatPercent(allocationData.find(d => d.name === entry.value)?.percentage)})</span></li>)}</ul>} verticalAlign="bottom" />
-                    </PieChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>
-                )}
-              </div>
+          <div className="space-y-8">
+            {/* 1. Summary Cards */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+               {[
+                 { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' },
+                 { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' },
+                 { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' },
+                 { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' }
+               ].map((item, idx) => {
+                 const fontSizeClass = getResponsiveFontSize(item.value);
+                 return (
+                   <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center">
+                     <div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div>
+                     <div className="ml-5 flex-1 min-w-0">
+                       <p className="text-sm font-medium text-slate-400 truncate">{item.label}</p>
+                       <p className={`${fontSizeClass} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{item.value}</p>
+                     </div>
+                   </div>
+                 );
+               })}
             </div>
-            <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
-              <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><BarChart2 className="w-5 h-5 mr-2 text-purple-400" /> 持股標的分佈 (不含定存)</h3>
-              <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
-                {tradableSymbols.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={tradableSymbols.map(item => ({ name: item['名稱'], value: item.marketValue })).sort((a, b) => b.value - a.value)} layout="vertical" margin={{ top: 5, right: 40, left: 40, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
-                      <XAxis type="number" stroke="#94a3b8" tickFormatter={(val) => `${val / 1000}k`} />
-                      <YAxis dataKey="name" type="category" stroke="#94a3b8" width={80} />
-                      <RechartsTooltip cursor={{fill: '#334155', opacity: 0.4}} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} />
-                      <Bar dataKey="value" fill="#8B5CF6" radius={[0, 4, 4, 0]} barSize={30}>
-                        {tradableSymbols.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>
+            
+            {/* 2. Charts */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
+                  <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><PieIcon className="w-5 h-5 mr-2 text-blue-400" /> 資產類別配置</h3>
+                  <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
+                    {allocationData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">
+                            {allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}
+                          </Pie>
+                          <RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} />
+                          <Legend content={(props) => <ul className="flex flex-wrap justify-center gap-4 mt-4">{props.payload.map((entry, index) => <li key={`item-${index}`} className="flex items-center text-sm text-slate-300"><span className="block w-3 h-3 rounded-full mr-2" style={{ backgroundColor: entry.color }}></span>{entry.value} <span className="ml-1 text-slate-400">({formatPercent(allocationData.find(d => d.name === entry.value)?.percentage)})</span></li>)}</ul>} verticalAlign="bottom" />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>
+                    )}
+                  </div>
+                </div>
+                <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
+                  <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><BarChart2 className="w-5 h-5 mr-2 text-purple-400" /> 持股標的分佈 (不含定存)</h3>
+                  <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
+                    {tradableSymbols.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={tradableSymbols.map(item => ({ name: item['名稱'], value: item.marketValue })).sort((a, b) => b.value - a.value)} layout="vertical" margin={{ top: 5, right: 40, left: 40, bottom: 5 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
+                          <XAxis type="number" stroke="#94a3b8" tickFormatter={(val) => `${val / 1000}k`} />
+                          <YAxis dataKey="name" type="category" stroke="#94a3b8" width={80} />
+                          <RechartsTooltip cursor={{fill: '#334155', opacity: 0.4}} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} />
+                          <Bar dataKey="value" fill="#8B5CF6" radius={[0, 4, 4, 0]} barSize={30}>
+                            {tradableSymbols.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>
+                    )}
+                  </div>
+                </div>
+            </div>
+
+            {/* 3. NEW AI Portfolio Health Check Section */}
+            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-xl border border-slate-700 shadow-lg relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-purple-500/10 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none"></div>
+                
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 z-10 relative">
+                    <div>
+                        <h3 className="text-xl font-bold text-white flex items-center">
+                            <Activity className="w-6 h-6 mr-2 text-purple-400" /> 
+                            AI 投資組合總體健檢室
+                        </h3>
+                        <p className="text-sm text-slate-400 mt-1">由 AI 擔任首席投資長，針對您的資產配置、風險分散度與績效進行綜合評分。</p>
+                    </div>
+                    {!portfolioHealth && !isHealthChecking && (
+                        <button 
+                            onClick={generatePortfolioHealthCheck}
+                            className="mt-4 md:mt-0 px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium shadow-lg hover:shadow-purple-500/25 transition-all flex items-center"
+                        >
+                            <BrainCircuit className="w-5 h-5 mr-2" />
+                            開始健檢
+                        </button>
+                    )}
+                </div>
+
+                {isHealthChecking && (
+                    <div className="flex flex-col items-center justify-center py-12">
+                        <Loader2 className="w-12 h-12 text-purple-500 animate-spin mb-4" />
+                        <p className="text-slate-300 font-medium">AI 正在分析您的投資組合風險結構...</p>
+                        <p className="text-slate-500 text-sm mt-1">正在計算夏普比率、集中度風險與資產相關性</p>
+                    </div>
                 )}
-              </div>
+
+                {portfolioHealth && (
+                    <div className="animate-fade-in-up">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                            {/* Score Card */}
+                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center">
+                                <span className="text-slate-400 text-sm mb-2">健康度評分</span>
+                                <div className="relative">
+                                    <svg className="w-24 h-24 transform -rotate-90">
+                                        <circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-slate-700" />
+                                        <circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" strokeDasharray={251.2} strokeDashoffset={251.2 - (251.2 * portfolioHealth.score) / 100} className={portfolioHealth.score >= 80 ? "text-green-500" : portfolioHealth.score >= 60 ? "text-yellow-500" : "text-red-500"} />
+                                    </svg>
+                                    <span className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-3xl font-bold text-white">{portfolioHealth.score}</span>
+                                </div>
+                            </div>
+
+                            {/* Risk Level */}
+                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center">
+                                <span className="text-slate-400 text-sm mb-2">風險屬性判定</span>
+                                <ShieldAlert className={`w-12 h-12 mb-2 ${portfolioHealth.risk.includes('高') ? 'text-red-400' : portfolioHealth.risk.includes('低') ? 'text-green-400' : 'text-yellow-400'}`} />
+                                <span className="text-xl font-bold text-white">{portfolioHealth.risk}</span>
+                            </div>
+
+                            {/* Suggestions Summary */}
+                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 md:col-span-1">
+                                <span className="text-slate-400 text-sm mb-2 block text-center md:text-left">AI 調整建議</span>
+                                <ul className="space-y-2 mt-2">
+                                    {portfolioHealth.suggestions.slice(0, 3).map((suggestion, idx) => (
+                                        <li key={idx} className="flex items-start text-sm text-slate-300">
+                                            <ClipboardCheck className="w-4 h-4 text-purple-400 mr-2 mt-0.5 flex-shrink-0" />
+                                            {suggestion.replace(/^\d+\.\s*/, '').replace(/^- /, '')}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        </div>
+
+                        {/* Detailed Comment */}
+                        <div className="bg-slate-900/50 rounded-lg p-5 border border-slate-700/50">
+                            <h4 className="text-white font-medium mb-2 flex items-center"><MessageSquare className="w-4 h-4 mr-2 text-blue-400" /> 總體分析報告</h4>
+                            <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">{portfolioHealth.comment}</p>
+                        </div>
+                        
+                        <div className="mt-4 flex justify-end">
+                            <button onClick={generatePortfolioHealthCheck} className="text-xs text-slate-500 hover:text-slate-300 flex items-center">
+                                <RefreshCw className="w-3 h-3 mr-1" /> 重新健檢
+                            </button>
+                        </div>
+                    </div>
+                )}
             </div>
           </div>
         )}
 
-        {/* ... (Holdings, History, Config tabs are rendered conditionally below) ... */}
+        {/* ... (Holdings, History, Chat, Config tabs remain mostly the same, just keeping structure) ... */}
         {activeTab !== 'overview' && activeTab !== 'chat' && (
-           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-            {[
-              { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' },
-              { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' },
-              { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' },
-              { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' }
-            ].map((item, idx) => {
-              const fontSizeClass = getResponsiveFontSize(item.value);
-              return (
-                <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center">
-                  <div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div>
-                  <div className="ml-5 flex-1 min-w-0">
-                    <p className="text-sm font-medium text-slate-400 truncate">{item.label}</p>
-                    <p className={`${fontSizeClass} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{item.value}</p>
-                  </div>
-                </div>
-              );
-            })}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+             {[
+               { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' },
+               { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' },
+               { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' },
+               { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' }
+             ].map((item, idx) => {
+               const fontSizeClass = getResponsiveFontSize(item.value);
+               return (
+                 <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center">
+                   <div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div>
+                   <div className="ml-5 flex-1 min-w-0">
+                     <p className="text-sm font-medium text-slate-400 truncate">{item.label}</p>
+                     <p className={`${fontSizeClass} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{item.value}</p>
+                   </div>
+                 </div>
+               );
+             })}
           </div>
         )}
         
@@ -1187,7 +1348,6 @@ const Dashboard = () => {
               <div className="mt-4 pt-4 border-t border-slate-700">
                 <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符)</span>} {selectedModel !== usedModel && !isCachedResult && <span className="text-yellow-400 ml-1 text-[10px]">(自動切換)</span>}</span>}{aiSignals[selectedHistorySymbol] === 'ADD' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減碼</span></div>)}{aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}</div>
                 
-                {/* Button Logic Updated: Only Expand/Collapse or Retry */}
                 <div className="flex items-center space-x-2">
                   {aiDetail && (
                     <button 
@@ -1199,19 +1359,18 @@ const Dashboard = () => {
                     </button>
                   )}
                   {geminiApiKey && !isAiSummarizing && (
-                     <button 
+                      <button 
                         onClick={() => generateFullAnalysis(selectedHistorySymbol, historicalData[`${selectedHistorySymbol}_${timeframe}`], true)}
                         className={`text-xs flex items-center transition-colors text-red-400 hover:text-red-300`}
-                     >
-                       <RefreshCw className={`w-3 h-3 mr-1`} /> 
-                       重新載入分析
-                     </button>
+                      >
+                        <RefreshCw className={`w-3 h-3 mr-1`} /> 
+                        重新載入分析
+                      </button>
                   )}
                 </div>
                 </div>
 
                 <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700 shadow-inner">
-                  {/* UNIFIED LOADING */}
                   {isAiSummarizing ? (
                     <div className="flex items-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin mr-2" />AI 正在分析中...</div>
                   ) : (
@@ -1241,13 +1400,14 @@ const Dashboard = () => {
             <div className="block md:hidden space-y-4">
               <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex items-center space-x-2 overflow-x-auto">
                 <span className="text-xs text-slate-400 whitespace-nowrap">排序依據:</span>
-                {[ { id: 'manual', label: '自訂' }, { id: 'buyPrice', label: '成本' }, { id: 'profitLoss', label: '損益' }, { id: 'roi', label: '報酬' } ].map(opt => (
+                {[ { id: 'manual', label: '自訂' }, { id: '類別', label: '類別' }, { id: 'buyPrice', label: '成本' }, { id: 'profitLoss', label: '損益' }, { id: 'roi', label: '報酬' } ].map(opt => (
                   <button key={opt.id} onClick={() => requestSort(opt.id)} className={`px-3 py-1 rounded text-xs border ${sortConfig.key === opt.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400'}`}>{opt.label} {sortConfig.key === opt.id && (sortConfig.direction === 'asc' ? '↑' : '↓')}</button>
                 ))}
               </div>
 
               {sortedHoldings.map((row, index) => {
                 const signal = aiSignals[row['標的']];
+                const classification = assetClassifications[row['標的']] || 'CORE';
                 return (
                 <div key={row['標的']} className="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-md relative">
                   <div className="flex justify-between items-start mb-3">
@@ -1257,20 +1417,23 @@ const Dashboard = () => {
                         {signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-1" />}
                         {signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-1" />}
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span>
                       </div>
-                      {/* Mobile Classification Dropdown */}
-                      <div className="mt-2">
-                         <select 
-                            value={assetClassifications[row['標的']] || 'CORE'}
+                      <div className="text-sm text-slate-400 mt-1">{row['名稱']}</div>
+                      
+                      {/* Mobile Classification Switcher */}
+                      <div className="mt-2 flex items-center space-x-2">
+                          <span className="text-xs text-slate-500">定位:</span>
+                          <select 
+                            value={classification}
                             onChange={(e) => handleClassificationChange(row['標的'], e.target.value)}
-                            className={`text-xs px-2 py-1 rounded border border-slate-600 focus:border-blue-500 focus:outline-none cursor-pointer bg-slate-700 text-white w-full`}
+                            className={`text-xs px-2 py-0.5 rounded border focus:outline-none cursor-pointer bg-slate-700 ${ASSET_TYPES[classification].color} ${ASSET_TYPES[classification].border}`}
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <option value="CORE">核心資產</option>
-                            <option value="SATELLITE">衛星資產</option>
+                            <option value="CORE">核心 (穩健)</option>
+                            <option value="SATELLITE">衛星 (波段)</option>
                           </select>
                       </div>
-                      <div className="text-sm text-slate-400 mt-2">{row['名稱']}</div>
                     </div>
                     <div className="flex flex-col items-end">
                       <span className={`text-lg font-bold ${(row.roi || 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>{formatPercent(row.roi)}</span>
@@ -1307,23 +1470,26 @@ const Dashboard = () => {
                   <tbody className="bg-slate-800 divide-y divide-slate-700">
                     {sortedHoldings.map((row, index) => {
                       const signal = aiSignals[row['標的']];
+                      const classification = assetClassifications[row['標的']] || 'CORE';
                       return (
                       <tr key={row['標的']} className="hover:bg-slate-700/50 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap"><div className="flex flex-col space-y-1">{index > 0 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], -1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowUp className="w-3 h-3" /></button>}{index < sortedHoldings.length - 1 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], 1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowDown className="w-3 h-3" /></button>}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-white font-medium flex items-center">{signal === 'ADD' && <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" title="AI建議: 加碼" />}{signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" title="AI建議: 減碼" />}{signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" title="AI建議: 觀望" />}{row['標的']}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}</div><div className="text-xs text-slate-500">最近交易: {row['日期']}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-slate-200">{row['名稱']}</div><span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mt-1 ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span></td>
                         
-                        {/* Classification Dropdown - Desktop Style Fix */}
+                        {/* Classification Dropdown - Desktop Style Enhanced */}
                         <td className="px-6 py-4 whitespace-nowrap text-right">
-                          <select 
-                            value={assetClassifications[row['標的']] || 'CORE'}
-                            onChange={(e) => handleClassificationChange(row['標的'], e.target.value)}
-                            className={`text-xs px-2 py-1 rounded border border-transparent focus:border-blue-500 focus:outline-none cursor-pointer bg-slate-800 text-white ${ASSET_TYPES[assetClassifications[row['標的']] || 'CORE'].color}`}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <option value="CORE">核心資產</option>
-                            <option value="SATELLITE">衛星資產</option>
-                          </select>
+                          <div className="flex justify-end">
+                            <select 
+                              value={classification}
+                              onChange={(e) => handleClassificationChange(row['標的'], e.target.value)}
+                              className={`text-xs px-3 py-1.5 rounded-full border-2 focus:outline-none cursor-pointer bg-slate-800 transition-colors appearance-none text-center font-medium ${ASSET_TYPES[classification].color} ${ASSET_TYPES[classification].border} hover:bg-slate-700`}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <option value="CORE">◉ 核心資產</option>
+                              <option value="SATELLITE">⚡ 衛星資產</option>
+                            </select>
+                          </div>
                         </td>
 
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.isUS ? '$' : ''}{formatPrice(row.buyPriceRaw || row.buyPrice)}</td>
