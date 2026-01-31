@@ -11,10 +11,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v40.0
- * * 更新日誌：
- * 1. [AI優化] Prompt 結構升級：新增「標的識別」區塊，明確傳送股票代號與名稱，確保 AI 分析對象正確無誤。
- * 2. [功能保持] 包含 v39.1 的所有功能 (類別排序、核心/衛星策略切換、總體健檢)。
+ * Alpha 投資戰情室 v40.3
+ * * 修復日誌：
+ * 1. [Critical Fix] 強化日期匹配邏輯：
+ * 針對使用者匯入的「台灣日期」可能與「美股/國際股市日期」存在時差 (T+1) 或落於假日的問題，
+ * 實作了「智慧鄰近匹配 (Smart Nearest Matching)」。若無法精確匹配日期，會自動尋找前後 7 天內最近的交易日 K 線進行標記。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -1027,14 +1028,33 @@ const Dashboard = () => {
     const buys = portfolioData.filter(p => p['標的'] === selectedHistorySymbol);
     const merged = [...baseData];
     buys.forEach(buy => {
-        const buyDate = new Date(buy['日期']);
-        let closestIdx = -1; let minDiff = Infinity;
-        merged.forEach((pt, i) => {
-            const ptDate = new Date(pt.date);
-            const diff = Math.abs(buyDate - ptDate);
-            if (diff < minDiff) { minDiff = diff; closestIdx = i; }
-        });
-        if (closestIdx !== -1) merged[closestIdx] = { ...merged[closestIdx], buyPricePoint: buy['價格'], buyAction: buy };
+        // 標準化日期格式：處理潛在的空白與分隔符
+        const rawDate = (buy['日期'] || '').toString().trim().replace(/\//g, '-');
+        
+        // 1. 嘗試精確字串比對 (優先)
+        let closestIdx = merged.findIndex(pt => pt.date === rawDate);
+
+        // 2. 若無精確匹配 (例如假日買入或時差問題)，找前後7天內最近的交易日
+        if (closestIdx === -1) {
+            const buyDateTs = new Date(rawDate).getTime();
+            if (!isNaN(buyDateTs)) {
+                let minDiff = Infinity;
+                merged.forEach((pt, i) => {
+                    const ptDateTs = new Date(pt.date).getTime();
+                    const diff = Math.abs(buyDateTs - ptDateTs);
+                    // 限制誤差在 7 天 (604800000ms) 內，避免匹配到錯誤年份
+                    if (diff < minDiff && diff < 604800000) { 
+                        minDiff = diff; 
+                        closestIdx = i; 
+                    }
+                });
+            }
+        }
+
+        if (closestIdx !== -1) {
+            // 合併買點數據：若同一天有多筆，可能會覆蓋，但視覺上同一點即可
+            merged[closestIdx] = { ...merged[closestIdx], buyPricePoint: buy['價格'], buyAction: buy };
+        }
     });
     return merged;
   }, [historicalData, selectedHistorySymbol, timeframe, portfolioData]);
