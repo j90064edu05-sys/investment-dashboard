@@ -246,7 +246,7 @@ const Toast = ({ message, onClose }) => {
 
 // --- 主要元件 ---
 
-const App = () => {
+const Dashboard = () => {
   const [sheetUrl, setSheetUrl] = useState('');
   const [geminiApiKey, setGeminiApiKey] = useState(''); 
   const [rawData, setRawData] = useState([]);
@@ -1571,7 +1571,6 @@ const App = () => {
     </div>
   );
 };
-
 
 export default function App() {
   return <Dashboard />;
