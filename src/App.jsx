@@ -11,11 +11,12 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v40.3
+ * Alpha 投資戰情室 v40.7
  * * 修復日誌：
- * 1. [Critical Fix] 強化日期匹配邏輯：
- * 針對使用者匯入的「台灣日期」可能與「美股/國際股市日期」存在時差 (T+1) 或落於假日的問題，
- * 實作了「智慧鄰近匹配 (Smart Nearest Matching)」。若無法精確匹配日期，會自動尋找前後 7 天內最近的交易日 K 線進行標記。
+ * 1. [Reliability Fix] 實作「雙軌備援機制 (Hybrid Fetch)」：
+ * - 優先嘗試 Quote API (精準)。
+ * - 若失敗自動降級至 Chart API (穩定)，解決 00679B.TWO, 2002.TW 等標的更新失敗問題。
+ * 2. [Network] 優化 Proxy 順序，提升連線成功率。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -77,6 +78,21 @@ const getTodayDate = () => {
     return localDate.toISOString().split('T')[0];
 };
 
+const isTaiwanTradingHours = () => {
+    const now = new Date();
+    const day = now.getDay(); // 0 is Sunday, 6 is Saturday
+    const hour = now.getHours();
+    const minute = now.getMinutes();
+    
+    // Monday(1) to Friday(5)
+    if (day >= 1 && day <= 5) {
+        const currentMinutes = hour * 60 + minute;
+        // 09:00 (540 min) to 13:45 (825 min) - covering until settlement
+        return currentMinutes >= 540 && currentMinutes <= 825; 
+    }
+    return false;
+};
+
 const getAiCache = () => { try { return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}'); } catch { return {}; } };
 const updateAiCache = (symbol, data, dataDate) => { 
   const today = getTodayDate();
@@ -134,9 +150,9 @@ const isUsAsset = (symbol) => {
 
 const fetchWithProxyFallback = async (targetUrl) => {
   const proxies = [
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, // First priority (Most reliable)
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, // Second priority
+    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, // Backup
   ];
   for (const proxyGen of proxies) {
     try {
@@ -382,15 +398,31 @@ const Dashboard = () => {
     setUpdateError(null);
     setLoadingMessage('更新即時股價中...');
     
+    // 1. Identify unique symbols from portfolio
     const uniqueSymbols = [...new Set(data.map(item => item['標的']))];
-    if (!uniqueSymbols.includes('TWD=X')) uniqueSymbols.push('TWD=X');
 
+    // 2. Identify and filter symbols to fetch (exclude '定存' and deposits)
+    const symbolsToFetchList = uniqueSymbols.filter(s => s !== '定存' && !s.includes('-TD'));
+
+    // 3. STRICTLY check if we need USD Rate (TWD=X)
+    let needsUsdRate = false;
+    if (uniqueSymbols.some(s => isUsAsset(s))) {
+        needsUsdRate = true;
+    }
+    if (uniqueSymbols.includes('USD-TD')) {
+        needsUsdRate = true;
+    }
+    if (needsUsdRate && !symbolsToFetchList.includes('TWD=X')) {
+        symbolsToFetchList.push('TWD=X');
+    }
+
+    // 4. Add other currency rates if needed (e.g., EUR-TD -> EURTWD=X)
     data.forEach(item => {
         if (item['類別'] === '定存' && item['標的'].includes('-TD')) {
             const currency = item['標的'].replace('-TD', '');
-            if (currency !== 'TWD') { 
-                const ticker = currency === 'USD' ? 'TWD=X' : `${currency}TWD=X`;
-                if (!uniqueSymbols.includes(ticker)) uniqueSymbols.push(ticker);
+            if (currency !== 'TWD' && currency !== 'USD') {
+                 const ticker = `${currency}TWD=X`;
+                 if (!symbolsToFetchList.includes(ticker)) symbolsToFetchList.push(ticker);
             }
         }
     });
@@ -398,13 +430,21 @@ const Dashboard = () => {
     const today = getTodayDate();
     const cache = getPriceCache();
     const newPrices = { ...realTimePrices }; 
+    const isTrading = isTaiwanTradingHours();
     
-    const symbolsToFetch = uniqueSymbols.filter(symbol => {
-        if (symbol === '定存' || symbol.includes('-TD')) return false; 
-        if (!cache[symbol]) return true;
-        if (cache[symbol].date !== today) return true;
+    const symbolsToFetch = symbolsToFetchList.filter(symbol => {
         if (forceUpdate) return true;
-        newPrices[symbol] = cache[symbol].price;
+        const cachedItem = cache[symbol];
+        if (!cachedItem) return true;
+        if (cachedItem.date !== today) return true;
+        
+        // Smart Invalidation for Taiwan Stocks
+        if (isTrading && (symbol.includes('.TW') || symbol.includes('.TWO') || symbol === 'TWD=X')) {
+            const cacheAge = Date.now() - (cachedItem.timestamp || 0);
+            if (cacheAge > 300000) return true; 
+        }
+        
+        newPrices[symbol] = cachedItem.price;
         return false; 
     });
 
@@ -417,23 +457,43 @@ const Dashboard = () => {
           await delay(Math.random() * 1500); 
 
           while(attempts <= maxRetries && !success) {
+            // HYBRID FETCH STRATEGY: Quote API -> Chart API Fallback
             try {
-              const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
-              const result = await fetchWithProxyFallback(targetUrl);
-              const meta = result?.chart?.result?.[0]?.meta;
+              // 1. Try Quote API (Best Accuracy)
+              const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
+              const result = await fetchWithProxyFallback(quoteUrl);
+              const quote = result?.quoteResponse?.result?.[0];
               
-              if (meta && meta.regularMarketPrice) {
-                newPrices[symbol] = meta.regularMarketPrice;
+              if (quote && quote.regularMarketPrice !== undefined) {
+                newPrices[symbol] = quote.regularMarketPrice;
                 success = true;
-              } else { throw new Error('Data format error'); }
-            } catch (err) {
-              attempts++;
-              if (attempts <= maxRetries) {
-                setLoadingMessage(`更新 ${symbol} 失敗，正在重試 (${attempts}/${maxRetries})...`);
-                await delay(1000);
-              } else {
-                console.warn(`標的 ${symbol} 更新失敗:`, err);
-                failedSymbols.push(symbol);
+              } else { 
+                  throw new Error('Quote API No Data'); 
+              }
+            } catch (quoteErr) {
+              console.warn(`Quote API failed for ${symbol}, trying Chart API fallback...`);
+              
+              // 2. Try Chart API (Backup / Robustness)
+              try {
+                  const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
+                  const result = await fetchWithProxyFallback(chartUrl);
+                  const meta = result?.chart?.result?.[0]?.meta;
+                  
+                  if (meta && meta.regularMarketPrice !== undefined) {
+                    newPrices[symbol] = meta.regularMarketPrice;
+                    success = true;
+                  } else {
+                     throw new Error('Chart API No Data');
+                  }
+              } catch (chartErr) {
+                  attempts++;
+                  if (attempts <= maxRetries) {
+                    setLoadingMessage(`更新 ${symbol} 失敗，正在重試 (${attempts}/${maxRetries})...`);
+                    await delay(1000);
+                  } else {
+                    console.warn(`標的 ${symbol} 更新失敗:`, chartErr);
+                    failedSymbols.push(symbol);
+                  }
               }
             }
           }
@@ -764,10 +824,18 @@ const Dashboard = () => {
             setRawData(validData);
             
             const cachedPrices = getPriceCache();
-            setRealTimePrices(cachedPrices.prices || {});
-            setUsdRate(cachedPrices.prices?.['TWD=X'] || 1);
+            const flatPrices = {};
+            // Fix: Extract price from detailed cache object for processing
+            Object.keys(cachedPrices).forEach(key => {
+                if (cachedPrices[key] && cachedPrices[key].price) {
+                    flatPrices[key] = cachedPrices[key].price;
+                }
+            });
             
-            processData(validData, cachedPrices.prices || {}); 
+            setRealTimePrices(flatPrices);
+            setUsdRate(flatPrices['TWD=X'] || 1);
+            
+            processData(validData, flatPrices); 
             setLoading(false); 
             fetchRealTimePrices(validData, false); 
             
