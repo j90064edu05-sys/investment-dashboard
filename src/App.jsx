@@ -11,10 +11,12 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v40.8
+ * Alpha 投資戰情室 v40.9
  * * 更新日誌：
- * 1. [Logic Update] 強制更新機制：點擊「立即更新股價」時，無條件忽略快取日期與效期，強制重新抓取 API 最新報價。
- * 2. [Reliability] 保持雙軌備援 (Quote -> Chart) 與 TWD=X 智慧判斷邏輯。
+ * 1. [UX Improvement] 安全鎖定機制：
+ * - 當 AI 正在分析 (isAiSummarizing) 時，鎖定左側持股列表與上方 K 線週期按鈕。
+ * - 防止使用者在分析途中切換標的，導致報告內容與顯示標的不符或數據錯亂。
+ * 2. [Reliability] 保持 v40.8 的強制更新與雙軌備援邏輯。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -1394,10 +1396,11 @@ const Dashboard = () => {
           <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6">
             <div className="lg:col-span-1 bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[700px]">
               <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center sticky top-0 z-10"><h3 className="font-semibold text-white flex items-center"><LineIcon className="w-5 h-5 mr-2 text-blue-400" /> 持股列表</h3></div>
-              <div className="overflow-y-auto flex-1 p-2 space-y-2">
+              <div className={`overflow-y-auto flex-1 p-2 space-y-2 ${isAiSummarizing ? 'opacity-50 pointer-events-none' : ''}`}>
                 {tradableSymbols.map((item) => (
                   <button 
                       key={item['標的']} 
+                      disabled={isAiSummarizing}
                       onClick={() => { 
                           if (selectedHistorySymbol !== item['標的']) {
                               setSelectedHistorySymbol(item['標的']);
@@ -1416,9 +1419,9 @@ const Dashboard = () => {
             <div className="lg:col-span-3 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-4 md:p-6 flex flex-col relative" style={{ minHeight: '600px' }}>
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-2">
                 <h3 className="text-xl font-bold text-white flex items-center">{selectedHistorySymbol} <span className="ml-2 text-base font-normal text-slate-400">{tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱']}</span></h3>
-                <div className="flex space-x-2 self-end sm:self-auto">
+                <div className={`flex space-x-2 self-end sm:self-auto ${isAiSummarizing ? 'opacity-50 pointer-events-none' : ''}`}>
                   {[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (
-                    <button key={tf.id} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{tf.label}</button>
+                    <button key={tf.id} disabled={isAiSummarizing} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{tf.label}</button>
                   ))}
                 </div>
               </div>
