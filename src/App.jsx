@@ -11,12 +11,10 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v40.7
- * * 修復日誌：
- * 1. [Reliability Fix] 實作「雙軌備援機制 (Hybrid Fetch)」：
- * - 優先嘗試 Quote API (精準)。
- * - 若失敗自動降級至 Chart API (穩定)，解決 00679B.TWO, 2002.TW 等標的更新失敗問題。
- * 2. [Network] 優化 Proxy 順序，提升連線成功率。
+ * Alpha 投資戰情室 v40.8
+ * * 更新日誌：
+ * 1. [Logic Update] 強制更新機制：點擊「立即更新股價」時，無條件忽略快取日期與效期，強制重新抓取 API 最新報價。
+ * 2. [Reliability] 保持雙軌備援 (Quote -> Chart) 與 TWD=X 智慧判斷邏輯。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -433,17 +431,26 @@ const Dashboard = () => {
     const isTrading = isTaiwanTradingHours();
     
     const symbolsToFetch = symbolsToFetchList.filter(symbol => {
+        // 1. Force Update (Click Button): ALWAYS fetch, ignoring cache date or trading hours
         if (forceUpdate) return true;
+
         const cachedItem = cache[symbol];
-        if (!cachedItem) return true;
-        if (cachedItem.date !== today) return true;
         
-        // Smart Invalidation for Taiwan Stocks
+        // No cache -> fetch
+        if (!cachedItem) return true;
+
+        // Cache date mismatch -> fetch (e.g. yesterday's price)
+        if (cachedItem.date !== today) return true;
+
+        // Smart Invalidation for Taiwan Stocks:
+        // If it's trading hours (09:00-13:45) and cache is older than 5 minutes -> fetch
+        // (Ensures we get "Latest Quote" during trading, but settle for "Closing Price" if not)
         if (isTrading && (symbol.includes('.TW') || symbol.includes('.TWO') || symbol === 'TWD=X')) {
             const cacheAge = Date.now() - (cachedItem.timestamp || 0);
-            if (cacheAge > 300000) return true; 
+            if (cacheAge > 300000) return true; // 5 minutes
         }
         
+        // Use cached price
         newPrices[symbol] = cachedItem.price;
         return false; 
     });
@@ -1482,7 +1489,7 @@ const Dashboard = () => {
           <div className="space-y-4">
             <div className="flex justify-between items-center px-2">
               <h3 className="text-lg font-semibold text-white flex items-center"><FileText className="w-5 h-5 mr-2 text-blue-400" /> 持股明細表</h3>
-              <button onClick={() => fetchRealTimePrices(rawData, true)} className="text-xs flex items-center text-blue-400 hover:text-blue-300 transition-colors"><RefreshCw className={`w-3 h-3 mr-1 ${priceLoading ? 'animate-spin' : ''}`} />{priceLoading ? '更新中...' : '立即更新股價'}</button>
+              <button onClick={() => fetchRealTimePrices(rawData, true)} className="text-xs flex items-center text-blue-400 hover:text-blue-300 transition-colors"><RefreshCw className={`w-3 h-3 mr-1 ${priceLoading ? 'animate-spin' : ''}`} />{priceLoading ? '更新中(強制)...' : '立即更新股價'}</button>
             </div>
 
             <div className="block md:hidden space-y-4">
