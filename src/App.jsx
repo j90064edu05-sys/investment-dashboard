@@ -7,16 +7,16 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair, Repeat, BarChart4, TrendingDown
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v40.9
+ * Alpha 投資戰情室 v41.3
  * * 更新日誌：
- * 1. [UX Improvement] 安全鎖定機制：
- * - 當 AI 正在分析 (isAiSummarizing) 時，鎖定左側持股列表與上方 K 線週期按鈕。
- * - 防止使用者在分析途中切換標的，導致報告內容與顯示標的不符或數據錯亂。
- * 2. [Reliability] 保持 v40.8 的強制更新與雙軌備援邏輯。
+ * 1. [Strategy Upgrade] 定期定額 (DCA) 邏輯更新：
+ * - 條件1：三日內死亡交叉 + OSC負值 + 今日股價 < 昨日股價 -> SIGNAL: ADD
+ * - 條件2：每月最後一個交易日 -> SIGNAL: ADD
+ * 2. [AI Prompt] 注入「昨日收盤價」以供 AI 比較漲跌。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -65,6 +65,12 @@ const AVAILABLE_MODELS = [
 const ASSET_TYPES = {
   'CORE': { label: '核心資產', color: 'text-blue-300', bg: 'bg-blue-900/50', border: 'border-blue-500/50' },
   'SATELLITE': { label: '衛星資產', color: 'text-orange-300', bg: 'bg-orange-900/50', border: 'border-orange-500/50' }
+};
+
+const ADDON_LOGICS = {
+    'PYRAMID': { label: '跌幅金字塔', icon: TrendingDown },
+    'TECHNICAL': { label: '技術指標', icon: BarChart4 },
+    'YIELD_MACRO': { label: '殖利率/總經訊號', icon: Globe }
 };
 
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
@@ -302,7 +308,9 @@ const Dashboard = () => {
   const [portfolioHealth, setPortfolioHealth] = useState(null);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
    
-  // Asset Classifications (Core/Satellite)
+  // Asset Classifications & Strategy Settings (Core/Satellite, DCA, Addon Logic)
+  const [investmentSettings, setInvestmentSettings] = useState({}); // { symbol: { type: 'CORE', isDCA: false, addon: 'PYRAMID' } }
+  // Backwards compatibility state for assetClassifications
   const [assetClassifications, setAssetClassifications] = useState({});
 
   // Chat State
@@ -582,10 +590,18 @@ const Dashboard = () => {
     throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
   };
 
-  const handleClassificationChange = (symbol, value) => {
-    const newClassifications = { ...assetClassifications, [symbol]: value };
-    setAssetClassifications(newClassifications);
-    localStorage.setItem('investment_asset_classifications', JSON.stringify(newClassifications));
+  const handleSettingChange = (symbol, key, value) => {
+    const currentSettings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID' };
+    const newSettings = { ...investmentSettings, [symbol]: { ...currentSettings, [key]: value } };
+    setInvestmentSettings(newSettings);
+    localStorage.setItem('investment_settings', JSON.stringify(newSettings));
+    
+    // Sync to legacy assetClassifications if type changed
+    if (key === 'type') {
+        const newClassifications = { ...assetClassifications, [symbol]: value };
+        setAssetClassifications(newClassifications);
+        localStorage.setItem('investment_asset_classifications', JSON.stringify(newClassifications));
+    }
   };
 
   // --- Portfolio Health Check Function ---
@@ -664,6 +680,7 @@ const Dashboard = () => {
     analysisInProgressRef.current[symbol] = true;
 
     const latest = data[data.length - 1];
+    const prevDay = data.length > 1 ? data[data.length - 2] : null;
     const dataDate = latest.date;
     const today = getTodayDate();
     const cache = getAiCache();
@@ -699,16 +716,43 @@ const Dashboard = () => {
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(symbol, stockName, category);
     
-    const classification = assetClassifications[symbol] || 'CORE'; 
+    const settings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID' };
+    const classification = settings.type; 
     const classLabel = ASSET_TYPES[classification].label;
+    const isDCA = settings.isDCA;
+    const addonLogic = settings.addon;
+    const addonLabel = ADDON_LOGICS[addonLogic].label;
+
     const performanceInfo = assetInfo ? `目前損益：${formatCurrency(assetInfo.profitLoss)} (ROI: ${formatPercent(assetInfo.roi)})。` : "";
 
     const currentPrice = realTimePrices[symbol] || latest.close;
+    const prevClose = prevDay ? prevDay.close : latest.close;
 
-    // Enhanced Strategy Logic based on User Selection
-    const strategyLogic = classification === 'CORE' 
-        ? "【核心資產策略 (CORE)】此類資產追求長期穩健，以「左側交易」為主。策略：(1) 股價跌破季線(MA60)或半年線(MA120)為佈局點，視為「價值浮現」(SIGNAL:ADD)。(2) 若基本面未變，價格下跌不應恐慌，而是分批承接。(3) 僅在乖離率過大或基本面轉差時才考慮減碼。"
-        : "【衛星資產策略 (SATELLITE)】此類資產追求波段價差，以「右側交易」為主。策略：(1) 股價站上月線(MA20)且KD/MACD指標轉強，視為「動能增強」，建議追價(SIGNAL:ADD)。(2) 跌破月線或高檔爆量，代表動能轉弱，應嚴格執行停損/停利(SIGNAL:REDUCE)。(3) 不建議長期凹單。";
+    // Advanced Strategy Generation
+    let strategyLogic = "";
+
+    // 1. DCA Logic
+    if (isDCA) {
+        strategyLogic += "【定期定額策略 (DCA)】此標的為長期定期定額投資。投資判斷邏輯如下：(1) 逢低加碼：若近三日內出現死亡交叉(KD或MACD)，且MACD OSC為負值，且今日股價低於昨日收盤價，視為修正買點(SIGNAL:ADD)。(2) 定期扣款：若今日為該月份最後一個交易日，應執行扣款(SIGNAL:ADD)。若不符合上述兩者，則觀望(SIGNAL:HOLD)。";
+    } else {
+        // Non-DCA (Core vs Satellite)
+        if (classification === 'CORE') {
+            strategyLogic += "【核心資產策略 (CORE)】追求長期穩健，以「左側交易」為主。策略：(1) 跌破季線(MA60)或半年線(MA120)視為價值浮現，建議分批承接(SIGNAL:ADD)。(2) 除非基本面轉差，否則不輕易停損。";
+        } else {
+            strategyLogic += "【衛星資產策略 (SATELLITE)】追求波段價差，以「右側交易」為主。策略：(1) 站上月線(MA20)且動能強視為買進訊號(SIGNAL:ADD)。(2) 跌破月線或高檔爆量應嚴格停損/停利(SIGNAL:REDUCE)。";
+        }
+    }
+
+    // 2. Add-on Logic (Only append if not DCA, or if DCA needs secondary confirmation - but here DCA overrides main logic)
+    if (!isDCA) {
+        if (addonLogic === 'PYRAMID') {
+            strategyLogic += "\n\n【加碼邏輯：跌幅金字塔 (Pyramid)】請重點分析「回檔幅度」與「乖離率」。若股價較近期高點回檔超過5%~10%，或觸及布林通道下軌/長期均線，視為絕佳加碼點。";
+        } else if (addonLogic === 'TECHNICAL') {
+            strategyLogic += "\n\n【加碼邏輯：技術指標 (Technical)】請重點分析「動能訊號」。若 KD 指標低檔黃金交叉 (K<20且向上穿過D)、MACD 柱狀體翻紅或 RSI 突破 50，視為加碼訊號。";
+        } else if (addonLogic === 'YIELD_MACRO') {
+            strategyLogic += "\n\n【加碼邏輯：殖利率/總經訊號法 (Yield/Macro)】請重點分析「殖利率吸引力」與「總體經濟指標」。若目前殖利率高於歷史平均 (例如 >4% 或 >5%)，或總經數據 (如 CPI, 失業率) 顯示升息循環見頂/降息預期，視為長線佈局良機。請結合該標的之配息紀錄與對利率敏感度進行評估。";
+        }
+    }
 
     const prompt = `
       請以一位專業股票分析師的角色，進行個股深度分析。
@@ -719,9 +763,12 @@ const Dashboard = () => {
       - 資產屬性：${assetType}
       
       **基本資訊**：
-      - 投資定位：${classLabel} (這非常重要，請依此定位給出建議)
+      - 投資定位：${classLabel}
+      - 投資模式：${isDCA ? '定期定額 (DCA)' : '單筆投入'}
+      - 加碼邏輯：${addonLabel}
       - ${performanceInfo}
       - K線收盤價 (Data Date): ${formatPrice(latest.close)}
+      - 昨日收盤價 (Prev Close): ${formatPrice(prevClose)}
       - **目前即時價 (Real-time): ${formatPrice(currentPrice)}** (請以此價格判斷當下操作)
       
       **技術指標**：
@@ -732,7 +779,7 @@ const Dashboard = () => {
       **策略判斷邏輯**：
       ${strategyLogic}
       
-      請綜合考量目前即時價位與技術支撐/壓力位，給出符合「${classLabel}」屬性的操作建議。
+      請綜合考量目前即時價位、投資定位與加碼邏輯，給出精確的操作建議。
       
       請依序輸出 (請勿使用 Markdown 代碼區塊)：
       
@@ -740,7 +787,7 @@ const Dashboard = () => {
       (50字內簡評，結合投資定位與目前損益狀況)
       
       [DETAIL]
-      (完整分析報告。包含：1. 目前趨勢判斷 2. 重要支撐/壓力位 3. 針對 ${classLabel} 的具體操作建議。請使用 Markdown 排版)
+      (完整分析報告。請分點說明：1. 趨勢判斷 2. 針對「${addonLabel}」的訊號分析 3. 針對「${isDCA ? '定期定額' : classLabel}」的具體操作建議。請使用 Markdown 排版)
       
       [SIGNAL]
       (請輸出單一詞彙：ADD 或 REDUCE 或 HOLD)
@@ -930,6 +977,8 @@ const Dashboard = () => {
     const savedDiscount = localStorage.getItem('fee_discount');
     const savedSort = localStorage.getItem('investment_sort_config');
     const savedOrder = localStorage.getItem('investment_custom_order');
+    // Migration: Load new settings structure, fallback to old classification if needed
+    const savedSettings = localStorage.getItem('investment_settings');
     const savedClassifications = localStorage.getItem('investment_asset_classifications');
 
     if (savedKey) setGeminiApiKey(savedKey);
@@ -937,7 +986,24 @@ const Dashboard = () => {
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount));
     if (savedSort) setSortConfig(JSON.parse(savedSort));
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
-    if (savedClassifications) setAssetClassifications(JSON.parse(savedClassifications));
+
+    let initialSettings = {};
+    if (savedSettings) {
+        initialSettings = JSON.parse(savedSettings);
+    } else if (savedClassifications) {
+        // Backward compatibility
+        const oldClass = JSON.parse(savedClassifications);
+        Object.keys(oldClass).forEach(key => {
+            initialSettings[key] = { type: oldClass[key], isDCA: false, addon: 'PYRAMID' };
+        });
+    }
+    setInvestmentSettings(initialSettings);
+    // Sync assetClassifications for backward compatibility in other parts of the app
+    const flatClass = {};
+    Object.keys(initialSettings).forEach(key => {
+        flatClass[key] = initialSettings[key].type;
+    });
+    setAssetClassifications(flatClass);
 
     const cache = getAiCache();
     const signals = {};
@@ -1505,7 +1571,10 @@ const Dashboard = () => {
 
               {sortedHoldings.map((row, index) => {
                 const signal = aiSignals[row['標的']];
-                const classification = assetClassifications[row['標的']] || 'CORE';
+                const settings = investmentSettings[row['標的']] || { type: 'CORE', isDCA: false, addon: 'PYRAMID' };
+                const classification = settings.type;
+                const isDCA = settings.isDCA;
+                const addonLogic = settings.addon;
                 return (
                 <div key={row['標的']} className="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-md relative">
                   <div className="flex justify-between items-start mb-3">
@@ -1519,18 +1588,42 @@ const Dashboard = () => {
                       </div>
                       <div className="text-sm text-slate-400 mt-1">{row['名稱']}</div>
                       
-                      {/* Mobile Classification Switcher */}
-                      <div className="mt-2 flex items-center space-x-2">
-                          <span className="text-xs text-slate-500">定位:</span>
-                          <select 
-                            value={classification}
-                            onChange={(e) => handleClassificationChange(row['標的'], e.target.value)}
-                            className={`text-xs px-2 py-0.5 rounded border focus:outline-none cursor-pointer bg-slate-700 ${ASSET_TYPES[classification].color} ${ASSET_TYPES[classification].border}`}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <option value="CORE">核心 (穩健)</option>
-                            <option value="SATELLITE">衛星 (波段)</option>
-                          </select>
+                      {/* Mobile Investment Settings */}
+                      <div className="mt-3 bg-slate-700/50 p-2 rounded-lg space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-slate-400">定位</span>
+                            <select 
+                                value={classification}
+                                onChange={(e) => handleSettingChange(row['標的'], 'type', e.target.value)}
+                                className={`text-xs px-2 py-0.5 rounded border focus:outline-none cursor-pointer bg-slate-800 ${ASSET_TYPES[classification].color} ${ASSET_TYPES[classification].border}`}
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <option value="CORE">核心</option>
+                                <option value="SATELLITE">衛星</option>
+                            </select>
+                          </div>
+                          <div className="flex items-center justify-between">
+                             <span className="text-xs text-slate-400 flex items-center"><Repeat className="w-3 h-3 mr-1" />定期定額</span>
+                             <button 
+                                onClick={(e) => { e.stopPropagation(); handleSettingChange(row['標的'], 'isDCA', !isDCA); }}
+                                className={`w-8 h-4 rounded-full transition-colors relative ${isDCA ? 'bg-green-500' : 'bg-slate-600'}`}
+                             >
+                                <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${isDCA ? 'translate-x-4' : 'translate-x-0'}`} />
+                             </button>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-slate-400 flex items-center"><Crosshair className="w-3 h-3 mr-1" />加碼邏輯</span>
+                            <select 
+                                value={addonLogic}
+                                onChange={(e) => handleSettingChange(row['標的'], 'addon', e.target.value)}
+                                className="text-xs px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-300 focus:outline-none"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <option value="PYRAMID">跌幅金字塔</option>
+                                <option value="TECHNICAL">技術指標</option>
+                                <option value="YIELD_MACRO">殖利率/總經</option>
+                            </select>
+                          </div>
                       </div>
                     </div>
                     <div className="flex flex-col items-end">
@@ -1539,7 +1632,7 @@ const Dashboard = () => {
                     </div>
                   </div>
                   
-                  <div className="grid grid-cols-2 gap-4 text-sm mb-3">
+                  <div className="grid grid-cols-2 gap-4 text-sm mb-3 border-t border-slate-700/50 pt-3">
                     <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{row.isUS ? '$' : ''}{formatPrice(row.currentPriceRaw || row.currentPrice)}</span></div>
                     <div><span className="text-slate-500 block text-xs">成本</span><span className="text-slate-300">{row.isUS ? '$' : ''}{formatPrice(row.buyPriceRaw || row.buyPrice)}</span></div>
                     <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
@@ -1560,33 +1653,58 @@ const Dashboard = () => {
                   <thead className="bg-slate-900/50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider w-20">排序</th>
-                      {[ { label: '標的代號', key: '標的' }, { label: '名稱/類別', key: '類別' }, { label: '投資定位', key: 'class' }, { label: '平均成本', key: 'buyPrice' }, { label: 'Yahoo即時價', key: 'currentPrice' }, { label: '總股數', key: 'shares' }, { label: '總損益 (淨)', key: 'profitLoss' }, { label: '報酬率 (淨)', key: 'roi' } ].map(header => (
-                        <th key={header.key} onClick={() => header.key !== 'class' && requestSort(header.key)} className={`px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider ${header.key !== 'class' ? 'cursor-pointer hover:text-white' : ''} transition-colors group ${header.label.includes('代號') || header.label.includes('名稱') ? 'text-left' : 'text-right'}`}><div className={`flex items-center ${header.label.includes('代號') || header.label.includes('名稱') ? 'justify-start' : 'justify-end'}`}>{header.label}{header.key !== 'class' && <SortIcon columnKey={header.key} />}</div></th>
+                      {[ { label: '標的代號', key: '標的' }, { label: '名稱/類別', key: '類別' }, { label: '策略與設定', key: 'class' }, { label: '平均成本', key: 'buyPrice' }, { label: 'Yahoo即時價', key: 'currentPrice' }, { label: '總股數', key: 'shares' }, { label: '總損益 (淨)', key: 'profitLoss' }, { label: '報酬率 (淨)', key: 'roi' } ].map(header => (
+                        <th key={header.key} onClick={() => header.key !== 'class' && requestSort(header.key)} className={`px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider ${header.key !== 'class' ? 'cursor-pointer hover:text-white' : ''} transition-colors group ${header.label.includes('代號') || header.label.includes('名稱') || header.label.includes('策略') ? 'text-left' : 'text-right'}`}><div className={`flex items-center ${header.label.includes('代號') || header.label.includes('名稱') || header.label.includes('策略') ? 'justify-start' : 'justify-end'}`}>{header.label}{header.key !== 'class' && <SortIcon columnKey={header.key} />}</div></th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="bg-slate-800 divide-y divide-slate-700">
                     {sortedHoldings.map((row, index) => {
                       const signal = aiSignals[row['標的']];
-                      const classification = assetClassifications[row['標的']] || 'CORE';
+                      const settings = investmentSettings[row['標的']] || { type: 'CORE', isDCA: false, addon: 'PYRAMID' };
+                      const classification = settings.type;
+                      const isDCA = settings.isDCA;
+                      const addonLogic = settings.addon;
                       return (
                       <tr key={row['標的']} className="hover:bg-slate-700/50 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap"><div className="flex flex-col space-y-1">{index > 0 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], -1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowUp className="w-3 h-3" /></button>}{index < sortedHoldings.length - 1 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], 1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowDown className="w-3 h-3" /></button>}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-white font-medium flex items-center">{signal === 'ADD' && <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" title="AI建議: 加碼" />}{signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" title="AI建議: 減碼" />}{signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" title="AI建議: 觀望" />}{row['標的']}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}</div><div className="text-xs text-slate-500">最近交易: {row['日期']}</div></td>
                         <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-slate-200">{row['名稱']}</div><span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mt-1 ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span></td>
                         
-                        {/* Classification Dropdown - Desktop Style Enhanced */}
-                        <td className="px-6 py-4 whitespace-nowrap text-right">
-                          <div className="flex justify-end">
-                            <select 
-                              value={classification}
-                              onChange={(e) => handleClassificationChange(row['標的'], e.target.value)}
-                              className={`text-xs px-3 py-1.5 rounded-full border-2 focus:outline-none cursor-pointer bg-slate-800 transition-colors appearance-none text-center font-medium ${ASSET_TYPES[classification].color} ${ASSET_TYPES[classification].border} hover:bg-slate-700`}
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <option value="CORE">◉ 核心資產</option>
-                              <option value="SATELLITE">⚡ 衛星資產</option>
-                            </select>
+                        {/* Strategy Settings - Desktop */}
+                        <td className="px-6 py-4 whitespace-nowrap text-left">
+                          <div className="flex flex-col space-y-2">
+                             <div className="flex items-center space-x-2">
+                                <select 
+                                  value={classification}
+                                  onChange={(e) => handleSettingChange(row['標的'], 'type', e.target.value)}
+                                  className={`text-[10px] px-2 py-0.5 rounded border focus:outline-none cursor-pointer bg-slate-800 ${ASSET_TYPES[classification].color} ${ASSET_TYPES[classification].border}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <option value="CORE">核心</option>
+                                  <option value="SATELLITE">衛星</option>
+                                </select>
+                                <button 
+                                    onClick={(e) => { e.stopPropagation(); handleSettingChange(row['標的'], 'isDCA', !isDCA); }}
+                                    className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${isDCA ? 'bg-green-900/50 border-green-500 text-green-400' : 'bg-slate-800 border-slate-600 text-slate-500'}`}
+                                    title="定期定額開關"
+                                >
+                                    {isDCA ? 'DCA:ON' : 'DCA:OFF'}
+                                </button>
+                             </div>
+                             <div className="flex items-center space-x-2">
+                                <span className="text-[10px] text-slate-500">加碼:</span>
+                                <select 
+                                    value={addonLogic}
+                                    onChange={(e) => handleSettingChange(row['標的'], 'addon', e.target.value)}
+                                    className="text-[10px] px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-300 focus:outline-none cursor-pointer hover:border-slate-500"
+                                    onClick={(e) => e.stopPropagation()}
+                                >
+                                    <option value="PYRAMID">跌幅金字塔</option>
+                                    <option value="TECHNICAL">技術指標</option>
+                                    <option value="YIELD_MACRO">殖利率/總經</option>
+                                </select>
+                             </div>
                           </div>
                         </td>
 
