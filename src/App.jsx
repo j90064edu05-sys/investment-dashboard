@@ -11,13 +11,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v42.0
+ * Alpha 投資戰情室 v42.1
  * * 更新日誌：
- * 1. [Data Source] 整合 TWSE 證交所 ETF 淨值資料，提供精確的折溢價計算。
- * 2. [Tech Indicator] 新增布林通道 (Bollinger Bands, 20, 2) 計算與圖表繪製。
- * 3. [Strategy Upgrade] 債券類資產 (BOND) 專屬 DCA 邏輯：
- * - 忽略動能指標 (KD/MACD)。
- * - 改看：布林通道下軌、匯率優勢、折溢價。
+ * 1. [UI Fix] 修復布林通道圖例重複問題 (BBU/BBL 各出現兩次)。
+ * - 改用 BB_Range (Array) 進行通道區間填色，並隱藏其圖例。
+ * - 僅保留線條 (Line) 圖例，並正名為「布林上軌」、「布林下軌」。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -55,6 +53,7 @@ const CATEGORY_STYLES = {
   'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }   
 };
 
+// UPDATED MODEL LIST
 const AVAILABLE_MODELS = [
   { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview (最新快速)' },
   { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro Preview (最新精準)' },
@@ -86,11 +85,14 @@ const getTodayDate = () => {
 
 const isTaiwanTradingHours = () => {
     const now = new Date();
-    const day = now.getDay();
+    const day = now.getDay(); // 0 is Sunday, 6 is Saturday
     const hour = now.getHours();
     const minute = now.getMinutes();
+    
+    // Monday(1) to Friday(5)
     if (day >= 1 && day <= 5) {
         const currentMinutes = hour * 60 + minute;
+        // 09:00 (540 min) to 13:45 (825 min) - covering until settlement
         return currentMinutes >= 540 && currentMinutes <= 825; 
     }
     return false;
@@ -161,9 +163,9 @@ const isUsAsset = (symbol) => {
 
 const fetchWithProxyFallback = async (targetUrl) => {
   const proxies = [
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, 
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, // First priority (Most reliable)
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, // Second priority
+    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, // Backup
   ];
   for (const proxyGen of proxies) {
     try {
@@ -303,10 +305,6 @@ const processTechnicalData = (rawData) => {
   const rsi6 = calculateRSI(d, 6);
   const rsi12 = calculateRSI(d, 12);
   
-  // Calculate Bollinger Bands based on raw close prices, merge into d
-  // Note: calculateBollingerBands returns a NEW array of objects with BBU/BBL/BBM
-  // We need to merge carefully or just chain it.
-  // Ideally, re-implement to mutate or chain. Let's chain.
   const bbData = calculateBollingerBands(d, 20, 2);
   
   // Merge all
@@ -314,7 +312,9 @@ const processTechnicalData = (rawData) => {
       ...item,
       ...bbData[i], // Merge BB data
       RSI6: rsi6[i],
-      RSI12: rsi12[i]
+      RSI12: rsi12[i],
+      // Add range for Area chart
+      BB_Range: [bbData[i].BBL, bbData[i].BBU] 
   }));
 
   return d;
@@ -390,7 +390,8 @@ const Dashboard = () => {
   const [isHealthChecking, setIsHealthChecking] = useState(false);
    
   // Asset Classifications & Strategy Settings (Core/Satellite, DCA, Addon Logic)
-  const [investmentSettings, setInvestmentSettings] = useState({}); 
+  const [investmentSettings, setInvestmentSettings] = useState({}); // { symbol: { type: 'CORE', isDCA: false, addon: 'PYRAMID' } }
+  // Backwards compatibility state for assetClassifications
   const [assetClassifications, setAssetClassifications] = useState({});
 
   // Chat State
@@ -522,16 +523,25 @@ const Dashboard = () => {
     setUpdateError(null);
     setLoadingMessage('更新即時股價中...');
     
+    // 1. Identify unique symbols from portfolio
     const uniqueSymbols = [...new Set(data.map(item => item['標的']))];
+
+    // 2. Identify and filter symbols to fetch (exclude '定存' and deposits)
     const symbolsToFetchList = uniqueSymbols.filter(s => s !== '定存' && !s.includes('-TD'));
 
-    // USD Rate logic
+    // 3. STRICTLY check if we need USD Rate (TWD=X)
     let needsUsdRate = false;
-    if (uniqueSymbols.some(s => isUsAsset(s))) needsUsdRate = true;
-    if (uniqueSymbols.includes('USD-TD')) needsUsdRate = true;
-    if (needsUsdRate && !symbolsToFetchList.includes('TWD=X')) symbolsToFetchList.push('TWD=X');
+    if (uniqueSymbols.some(s => isUsAsset(s))) {
+        needsUsdRate = true;
+    }
+    if (uniqueSymbols.includes('USD-TD')) {
+        needsUsdRate = true;
+    }
+    if (needsUsdRate && !symbolsToFetchList.includes('TWD=X')) {
+        symbolsToFetchList.push('TWD=X');
+    }
 
-    // Other FX
+    // 4. Add other currency rates if needed (e.g., EUR-TD -> EURTWD=X)
     data.forEach(item => {
         if (item['類別'] === '定存' && item['標的'].includes('-TD')) {
             const currency = item['標的'].replace('-TD', '');
@@ -587,7 +597,9 @@ const Dashboard = () => {
           await delay(Math.random() * 1500); 
 
           while(attempts <= maxRetries && !success) {
+            // HYBRID FETCH STRATEGY: Quote API -> Chart API Fallback
             try {
+              // 1. Try Quote API (Best Accuracy)
               const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
               const result = await fetchWithProxyFallback(quoteUrl);
               const quote = result?.quoteResponse?.result?.[0];
@@ -866,7 +878,7 @@ const Dashboard = () => {
     if (addonLogic === 'PYRAMID') {
         addonStrategy = "【加碼邏輯：跌幅金字塔 (Pyramid)】重點分析「回檔幅度」與「乖離率」。若股價較近期高點回檔超過5%~10%或觸及長期均線支撐，視為加碼訊號。";
     } else if (addonLogic === 'TECHNICAL') {
-        addonStrategy = "【加碼邏輯：技術指標 (Technical)】重點分析「動能訊號」。若 KD 低檔金叉(K<20向上)、MACD 翻紅或突破關鍵均線，視為加碼訊號。";
+        addonStrategy = "【加碼邏輯：技術指標 (Technical)】重點分析「動能訊號」。若 KD 指標低檔黃金交叉 (K<20且向上穿過D)、MACD 柱狀體翻紅或 RSI 突破 50，視為加碼訊號。";
     } else if (addonLogic === 'YIELD_MACRO') {
         addonStrategy = "【加碼邏輯：殖利率/總經 (Yield/Macro)】重點分析「殖利率吸引力」。若殖利率高於歷史平均(>4%~5%)，或債券價格位於歷史低檔區(殖利率倒數)，視為加碼訊號。";
     }
@@ -985,9 +997,11 @@ const Dashboard = () => {
     }
 
     try {
+      // DEFAULT: 1y_1d (1 Year, Daily)
       let range = '1y'; let interval = '1d';
       if (tf === '5y_1wk') { range = '5y'; interval = '1wk'; }
       if (tf === '10y_1mo') { range = '10y'; interval = '1mo'; }
+      // tf === '1y_1d' falls through to default
       
       const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
       const result = await fetchWithProxyFallback(targetUrl);
@@ -1022,6 +1036,7 @@ const Dashboard = () => {
             
             const cachedPrices = getPriceCache();
             const flatPrices = {};
+            // Fix: Extract price from detailed cache object for processing
             Object.keys(cachedPrices).forEach(key => {
                 if (cachedPrices[key] && cachedPrices[key].price) {
                     flatPrices[key] = cachedPrices[key].price;
@@ -1649,10 +1664,9 @@ const Dashboard = () => {
                 <div className="flex flex-col space-y-2">
                   <div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} labelFormatter={(label) => `日期: ${label}`} formatter={(val) => formatPrice(val)} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} />
                   {/* Bollinger Bands */}
-                  <Area type="monotone" dataKey="BBU" stroke="none" fill="#8B5CF6" fillOpacity={0.1} />
-                  <Area type="monotone" dataKey="BBL" stroke="none" fill="#8B5CF6" fillOpacity={0.1} />
-                  <Line type="monotone" dataKey="BBU" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
-                  <Line type="monotone" dataKey="BBL" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
+                  <Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" />
+                  <Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
+                  <Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
                   <Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" /></ComposedChart></ResponsiveContainer></div>
                   <div className="h-32 w-full border-t border-slate-700 pt-2"><p className="text-xs text-slate-400 mb-1 ml-2">KD (9, 3, 3)</p><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" hide /><YAxis stroke="#94a3b8" domain={[0, 100]} ticks={[20, 50, 80]} tick={{fontSize: 10}} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} /><ReferenceLine y={80} stroke="#EF4444" strokeDasharray="3 3" /><ReferenceLine y={20} stroke="#10B981" strokeDasharray="3 3" /><Line type="monotone" dataKey="K" stroke="#F59E0B" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="D" stroke="#3B82F6" dot={false} strokeWidth={1} /></ComposedChart></ResponsiveContainer></div>
                   <div className="h-32 w-full border-t border-slate-700 pt-2"><p className="text-xs text-slate-400 mb-1 ml-2">MACD (12, 26, 9)</p><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" hide /><YAxis stroke="#94a3b8" tick={{fontSize: 10}} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} /><Bar dataKey="OSC" name="OSC" barSize={4}>{currentChartData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.OSC >= 0 ? '#EF4444' : '#10B981'} />)}</Bar><Line type="monotone" dataKey="DIF" stroke="#3B82F6" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="Signal" name="MACD" stroke="#F59E0B" dot={false} strokeWidth={1} /></ComposedChart></ResponsiveContainer></div>
