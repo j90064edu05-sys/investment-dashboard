@@ -11,11 +11,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v42.1
- * * 更新日誌：
- * 1. [UI Fix] 修復布林通道圖例重複問題 (BBU/BBL 各出現兩次)。
- * - 改用 BB_Range (Array) 進行通道區間填色，並隱藏其圖例。
- * - 僅保留線條 (Line) 圖例，並正名為「布林上軌」、「布林下軌」。
+ * Alpha 投資戰情室 v42.2
+ * * 修復日誌：
+ * 1. [UI Fix] 解決歷史走勢圖中 Tooltip 重複顯示布林通道數據的問題。
+ * - 實作 `CustomChartTooltip`，在渲染 Tooltip 前過濾掉輔助繪圖用的 `BB_Range` 數據。
+ * - 保持 Tooltip 樣式與整體 UI 一致。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -344,6 +344,26 @@ const Toast = ({ message, onClose }) => {
       <span>{message}</span>
     </div>
   );
+};
+
+// Custom Chart Tooltip
+const CustomChartTooltip = ({ active, payload, label }) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="p-3 border border-slate-700 rounded-lg shadow-xl bg-slate-800 text-slate-100 text-xs">
+        <p className="mb-2 font-bold text-slate-300">{`日期: ${label}`}</p>
+        {payload
+          .filter(p => p.dataKey !== 'BB_Range')
+          .map((entry, index) => (
+          <div key={index} className="flex items-center justify-between gap-4 mb-1">
+            <span style={{ color: entry.color }}>{entry.name}</span>
+            <span className="font-mono font-medium">{formatPrice(entry.value)}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return null;
 };
 
 // --- 主要元件 ---
@@ -1662,12 +1682,17 @@ const Dashboard = () => {
               
               {historyLoading ? <div className="flex-1 flex items-center justify-center min-h-[400px]"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div> : currentChartData && currentChartData.length > 0 ? (
                 <div className="flex flex-col space-y-2">
-                  <div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} labelFormatter={(label) => `日期: ${label}`} formatter={(val) => formatPrice(val)} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} />
-                  {/* Bollinger Bands */}
-                  <Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" />
-                  <Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
-                  <Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
-                  <Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" /></ComposedChart></ResponsiveContainer></div>
+                  <div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId">
+                    <defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} />
+                    <RechartsTooltip content={<CustomChartTooltip />} />
+                    <Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} />
+                    {/* Bollinger Bands */}
+                    <Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" />
+                    <Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
+                    <Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
+                    <Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" />
+                  </ComposedChart></ResponsiveContainer></div>
                   <div className="h-32 w-full border-t border-slate-700 pt-2"><p className="text-xs text-slate-400 mb-1 ml-2">KD (9, 3, 3)</p><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" hide /><YAxis stroke="#94a3b8" domain={[0, 100]} ticks={[20, 50, 80]} tick={{fontSize: 10}} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} /><ReferenceLine y={80} stroke="#EF4444" strokeDasharray="3 3" /><ReferenceLine y={20} stroke="#10B981" strokeDasharray="3 3" /><Line type="monotone" dataKey="K" stroke="#F59E0B" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="D" stroke="#3B82F6" dot={false} strokeWidth={1} /></ComposedChart></ResponsiveContainer></div>
                   <div className="h-32 w-full border-t border-slate-700 pt-2"><p className="text-xs text-slate-400 mb-1 ml-2">MACD (12, 26, 9)</p><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" hide /><YAxis stroke="#94a3b8" tick={{fontSize: 10}} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} /><Bar dataKey="OSC" name="OSC" barSize={4}>{currentChartData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.OSC >= 0 ? '#EF4444' : '#10B981'} />)}</Bar><Line type="monotone" dataKey="DIF" stroke="#3B82F6" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="Signal" name="MACD" stroke="#F59E0B" dot={false} strokeWidth={1} /></ComposedChart></ResponsiveContainer></div>
                   {/* NEW RSI CHART SECTION */}
