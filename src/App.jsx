@@ -11,11 +11,14 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v42.2
- * * 修復日誌：
- * 1. [UI Fix] 解決歷史走勢圖中 Tooltip 重複顯示布林通道數據的問題。
- * - 實作 `CustomChartTooltip`，在渲染 Tooltip 前過濾掉輔助繪圖用的 `BB_Range` 數據。
- * - 保持 Tooltip 樣式與整體 UI 一致。
+ * Alpha 投資戰情室 v42.5
+ * * 更新日誌：
+ * 1. [AI Upgrade] 強制目標價分析：
+ * - 針對「基礎投資 (DCA Base)」，AI 需提供【建議扣款區間】或【安全價格上限】。
+ * - 針對「加碼/減碼」，維持提供技術面目標價。
+ * 2. [Data Logic] ETF 折溢價全面整合：
+ * - 不論股票型 (0050) 或債券型 (00679B) ETF，只要偵測為 ETF，AI 分析時皆會參考折溢價數據。
+ * - 持股明細中，所有 ETF 皆顯示折溢價標籤。
  */
 
 // --- 靜態配置與輔助函式 ---
@@ -119,7 +122,8 @@ const savePriceCache = (newPrices, extraData) => {
             price: newPrices[symbol], 
             date: today, 
             timestamp: Date.now(),
-            nav: extraData[symbol]?.nav 
+            nav: extraData[symbol]?.nav,
+            yield: extraData[symbol]?.yield // Store Yield
         }; 
     });
     localStorage.setItem('investment_price_cache', JSON.stringify(updatedCache));
@@ -163,7 +167,7 @@ const isUsAsset = (symbol) => {
 
 const fetchWithProxyFallback = async (targetUrl) => {
   const proxies = [
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, // First priority (Most reliable)
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, // First priority
     (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, // Second priority
     (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, // Backup
   ];
@@ -409,9 +413,8 @@ const Dashboard = () => {
   const [portfolioHealth, setPortfolioHealth] = useState(null);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
    
-  // Asset Classifications & Strategy Settings (Core/Satellite, DCA, Addon Logic)
-  const [investmentSettings, setInvestmentSettings] = useState({}); // { symbol: { type: 'CORE', isDCA: false, addon: 'PYRAMID' } }
-  // Backwards compatibility state for assetClassifications
+  // Asset Classifications & Strategy Settings
+  const [investmentSettings, setInvestmentSettings] = useState({}); 
   const [assetClassifications, setAssetClassifications] = useState({});
 
   // Chat State
@@ -604,7 +607,8 @@ const Dashboard = () => {
         }
         
         newPrices[symbol] = cachedItem.price;
-        if (cachedItem.nav) newEtfData[symbol] = { nav: cachedItem.nav };
+        if (cachedItem.nav) newEtfData[symbol] = { ...newEtfData[symbol], nav: cachedItem.nav };
+        if (cachedItem.yield) newEtfData[symbol] = { ...newEtfData[symbol], yield: cachedItem.yield };
         return false; 
     });
 
@@ -627,14 +631,21 @@ const Dashboard = () => {
               if (quote && quote.regularMarketPrice !== undefined) {
                 newPrices[symbol] = quote.regularMarketPrice;
                 
+                const extra = {};
                 // Hybrid NAV Logic: TWSE > Yahoo
                 const pureCode = symbol.split('.')[0]; // 0050.TW -> 0050
                 if (twseEtfMap[pureCode]) {
-                    newEtfData[symbol] = { nav: twseEtfMap[pureCode] };
+                    extra.nav = twseEtfMap[pureCode];
                 } else if (quote.navPrice) {
-                    newEtfData[symbol] = { nav: quote.navPrice };
+                    extra.nav = quote.navPrice;
                 }
                 
+                // Capture Yield
+                if (quote.trailingAnnualDividendYield) {
+                    extra.yield = quote.trailingAnnualDividendYield;
+                }
+
+                newEtfData[symbol] = { ...newEtfData[symbol], ...extra };
                 success = true;
               } else { 
                   throw new Error('Quote API No Data'); 
@@ -650,8 +661,9 @@ const Dashboard = () => {
                     newPrices[symbol] = meta.regularMarketPrice;
                     // Fallback to TWSE NAV if available
                     const pureCode = symbol.split('.')[0];
-                    if (twseEtfMap[pureCode]) newEtfData[symbol] = { nav: twseEtfMap[pureCode] };
-                    
+                    if (twseEtfMap[pureCode]) {
+                        newEtfData[symbol] = { ...newEtfData[symbol], nav: twseEtfMap[pureCode] };
+                    }
                     success = true;
                   } else { throw new Error('Chart API No Data'); }
               } catch (chartErr) {
@@ -865,6 +877,7 @@ const Dashboard = () => {
     const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(symbol, stockName, category);
     const isBond = category === '債券' || assetType === 'BOND';
+    const isETF = assetType === 'ETF' || assetType === 'BOND'; // ETF logic for both stock & bond ETFs
     
     const settings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID' };
     const classification = settings.type; 
@@ -878,12 +891,30 @@ const Dashboard = () => {
     const currentPrice = realTimePrices[symbol] || latest.close;
     const prevClose = prevDay ? prevDay.close : latest.close;
     
-    // Calculate Premium/Discount for AI context
+    // Calculate Key Metrics for AI context
     const etfData = etfExtraData[symbol];
-    let premDiscInfo = "";
-    if (etfData && etfData.nav) {
-        const pd = (currentPrice - etfData.nav) / etfData.nav;
-        premDiscInfo = `目前淨值:${etfData.nav}, 折溢價:${(pd*100).toFixed(2)}% (${pd>0?'溢價':'折價'})`;
+    let keyMetrics = "";
+    
+    // 1. Premium/Discount (For ALL ETFs)
+    if (isETF) {
+        if (etfData && etfData.nav) {
+            const pd = (currentPrice - etfData.nav) / etfData.nav;
+            keyMetrics += `\n- 折溢價 (Premium/Discount): ${(pd*100).toFixed(2)}% (淨值: ${etfData.nav})`;
+        } else {
+            keyMetrics += `\n- 折溢價: 無資料`;
+        }
+    }
+
+    // 2. Yield
+    if (etfData && etfData.yield) {
+        keyMetrics += `\n- 殖利率 (Yield): ${(etfData.yield * 100).toFixed(2)}%`;
+    } else {
+        keyMetrics += `\n- 殖利率: 無資料`;
+    }
+
+    // 3. FX Rate (If Bond or US)
+    if (isBond || isUsAsset(symbol)) {
+        keyMetrics += `\n- 參考匯率 (USD/TWD): ${usdRate}`;
     }
 
     // Advanced Strategy Logic Construction (Independent)
@@ -927,10 +958,12 @@ const Dashboard = () => {
       - 投資模式：${isDCA ? '定期定額 (DCA)' : '單筆投入'}
       - 加碼邏輯：${addonLabel}
       - ${performanceInfo}
-      - ${premDiscInfo}
       - K線收盤價 (Data Date): ${formatPrice(latest.close)}
       - 昨日收盤價 (Prev Close): ${formatPrice(prevClose)}
       - **目前即時價 (Real-time): ${formatPrice(currentPrice)}** (請以此價格判斷當下操作)
+
+      **關鍵數據 (Key Metrics)**：
+      ${keyMetrics}
       
       **技術指標**：
       - 均線：MA20 ${latest.MA20?formatPrice(latest.MA20):'-'} / MA60 ${latest.MA60?formatPrice(latest.MA60):'-'} / MA120 ${latest.MA120?formatPrice(latest.MA120):'-'}
@@ -943,6 +976,11 @@ const Dashboard = () => {
       1. ${strategyContext}
       2. ${addonStrategy}
       3. ${dcaStrategy}
+
+      **目標價分析指令 (Target Price / Safe Zone)**：
+      請在 [DETAIL] 的最後一段，根據上述分析提供具體的價格指引：
+      - 若建議為 **ADD (加碼)** 或 **REDUCE (減碼)**：請根據布林通道、均線或前高/前低，提供一個明確的【預估目標價 (Target Price)】或【操作區間】。
+      - 若建議為 **ADD_BASIC (定期定額基礎扣款)**：請分析目前的【安全扣款價格上限】或建議的【合理扣款區間】，避免買在乖離過大的高點。
 
       **最終燈號判定規則 (複合燈號)**：
       請根據您的分析，選擇以下其中一個燈號輸出：
@@ -958,7 +996,7 @@ const Dashboard = () => {
       (50字內簡評，結合投資定位與目前損益狀況)
       
       [DETAIL]
-      (完整分析報告。請分點說明：1. 趨勢判斷 2. 針對「${addonLabel}」的訊號分析 ${isDCA ? '3. 針對「定期定額」的條件分析' : ''} 4. 綜合操作建議。請使用 Markdown 排版)
+      (完整分析報告。請分點說明：1. 趨勢判斷 2. 針對「${addonLabel}」的訊號分析 ${isDCA ? '3. 針對「定期定額」的條件分析' : ''} 4. 目標價與操作建議。請使用 Markdown 排版)
       
       [SIGNAL]
       (請輸出單一詞彙，例如：ADD_ALL)
@@ -1070,6 +1108,9 @@ const Dashboard = () => {
             Object.keys(cachedPrices).forEach(key => {
                 if(cachedPrices[key]?.nav) {
                     cachedEtfData[key] = { nav: cachedPrices[key].nav };
+                }
+                if(cachedPrices[key]?.yield) {
+                    cachedEtfData[key] = { ...cachedEtfData[key], yield: cachedPrices[key].yield };
                 }
             });
             setEtfExtraData(cachedEtfData);
