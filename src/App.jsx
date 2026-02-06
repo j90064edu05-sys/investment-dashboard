@@ -11,13 +11,14 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v42.9.5 (Missing Handler Fix)
- * * [修復說明]
- * 1. 補回遺失的 handleSettingChange 函式：解決點擊設定（核心/衛星、定期定額、加碼邏輯）時發生的 ReferenceError。
- * 2. 結構優化：將事件處理函式集中管理，確保所有 UI 互動邏輯皆已定義。
+ * Alpha 投資戰情室 v42.2
+ * * 修復日誌：
+ * 1. [UI Fix] 解決歷史走勢圖中 Tooltip 重複顯示布林通道數據的問題。
+ * - 實作 `CustomChartTooltip`，在渲染 Tooltip 前過濾掉輔助繪圖用的 `BB_Range` 數據。
+ * - 保持 Tooltip 樣式與整體 UI 一致。
  */
 
-// --- 靜態配置 ---
+// --- 靜態配置與輔助函式 ---
 
 const DEMO_DATA = [
   { 日期: '2015-01-15', 標的: '2330.TW', 名稱: '台積電', 類別: '股票', 價格: 140, 股數: 1000, 策略: '基礎買入', 金額: 140000 },
@@ -35,27 +36,29 @@ const DEMO_DATA = [
 const COLORS = ['#3B82F6', '#8B5CF6', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#6366F1'];
 
 const STRATEGY_CONFIG = {
-  '基礎買入':      { color: '#EF4444', label: '基礎買入',       shape: 'circle' },
-  '金字塔_S1':    { color: '#F97316', label: '金字塔_S1',      shape: 'triangle' },
-  '金字塔_S2':    { color: '#EAB308', label: '金字塔_S2',      shape: 'triangle' },
-  '金字塔_S3':    { color: '#84CC16', label: '金字塔_S3',      shape: 'triangle' },
-  'K值超賣':       { color: '#3B82F6', label: 'K值超賣',        shape: 'diamond' },
-  'MA60有撐':      { color: '#8B5CF6', label: 'MA60有撐',       shape: 'star' },
-  'MA120有撐':     { color: '#06B6D4', label: 'MA120有撐',      shape: 'square' },
-  'default':       { color: '#64748B', label: '其他策略',       shape: 'cross' }
+  '基礎買入':     { color: '#EF4444', label: '基礎買入',      shape: 'circle' },
+  '金字塔_S1':    { color: '#F97316', label: '金字塔_S1',     shape: 'triangle' },
+  '金字塔_S2':    { color: '#EAB308', label: '金字塔_S2',     shape: 'triangle' },
+  '金字塔_S3':    { color: '#84CC16', label: '金字塔_S3',     shape: 'triangle' },
+  'K值超賣':      { color: '#3B82F6', label: 'K值超賣',       shape: 'diamond' },
+  'MA60有撐':     { color: '#8B5CF6', label: 'MA60有撐',      shape: 'star' },
+  'MA120有撐':    { color: '#06B6D4', label: 'MA120有撐',     shape: 'square' },
+  'default':      { color: '#64748B', label: '其他策略',      shape: 'cross' }
 };
 
 const CATEGORY_STYLES = {
-  '股票': { color: '#3B82F6', badge: 'bg-blue-900 text-blue-200' },        
-  '債券': { color: '#A855F7', badge: 'bg-purple-900 text-purple-200' },    
-  '定存': { color: '#22C55E', badge: 'bg-green-900 text-green-200' },      
-  'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }    
+  '股票': { color: '#3B82F6', badge: 'bg-blue-900 text-blue-200' },       
+  '債券': { color: '#A855F7', badge: 'bg-purple-900 text-purple-200' },   
+  '定存': { color: '#22C55E', badge: 'bg-green-900 text-green-200' },     
+  'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }   
 };
 
+// UPDATED MODEL LIST
 const AVAILABLE_MODELS = [
-  { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash (最新快速)' },
-  { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro (精準)' },
-  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash (平衡)' },
+  { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview (最新快速)' },
+  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro Preview (最新精準)' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (平衡)' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (進階)' },
 ];
 
 const ASSET_TYPES = {
@@ -68,8 +71,6 @@ const ADDON_LOGICS = {
     'TECHNICAL': { label: '技術指標', icon: BarChart4 },
     'YIELD_MACRO': { label: '殖利率/總經訊號', icon: Globe }
 };
-
-// --- 輔助函式 (Helpers) ---
 
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
 const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
@@ -84,17 +85,19 @@ const getTodayDate = () => {
 
 const isTaiwanTradingHours = () => {
     const now = new Date();
-    const day = now.getDay(); 
+    const day = now.getDay(); // 0 is Sunday, 6 is Saturday
     const hour = now.getHours();
     const minute = now.getMinutes();
+    
+    // Monday(1) to Friday(5)
     if (day >= 1 && day <= 5) {
         const currentMinutes = hour * 60 + minute;
+        // 09:00 (540 min) to 13:45 (825 min) - covering until settlement
         return currentMinutes >= 540 && currentMinutes <= 825; 
     }
     return false;
 };
 
-// --- 快取管理 ---
 const getAiCache = () => { try { return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}'); } catch { return {}; } };
 const updateAiCache = (symbol, data, dataDate) => { 
   const today = getTodayDate();
@@ -110,19 +113,18 @@ const savePriceCache = (newPrices, extraData) => {
     const cache = getPriceCache();
     const today = getTodayDate();
     const updatedCache = { ...cache };
+    
     Object.keys(newPrices).forEach(symbol => { 
         updatedCache[symbol] = { 
             price: newPrices[symbol], 
             date: today, 
             timestamp: Date.now(),
-            nav: extraData[symbol]?.nav,
-            yield: extraData[symbol]?.yield 
+            nav: extraData[symbol]?.nav 
         }; 
     });
     localStorage.setItem('investment_price_cache', JSON.stringify(updatedCache));
 };
 
-// --- 圖表繪製輔助 ---
 const renderShape = (shape, cx, cy, color, size = 6) => {
   const stroke = "#fff";
   const strokeWidth = 1.5;
@@ -144,12 +146,13 @@ const CustomStrategyDot = (props) => {
   return renderShape(config.shape, cx, cy, config.color, 6);
 };
 
-// --- 資產類型判斷 ---
 const detectAssetType = (symbol, name, category) => {
-  const isBondEtfSymbol = /^00\d{2,3}B/i.test(symbol);
-  if (category === '債券' || name.includes('債') || isBondEtfSymbol) return 'BOND';
-  if (symbol.startsWith('00') || name.toUpperCase().includes('ETF') || name.includes('基金')) {
-    return 'ETF';
+  if (category === '債券' || name.includes('債')) return 'BOND';
+  if (category === '股票') {
+    if (symbol.startsWith('00') || name.toUpperCase().includes('ETF') || name.includes('基金')) {
+      return 'ETF';
+    }
+    return 'STOCK';
   }
   return 'STOCK'; 
 };
@@ -158,12 +161,11 @@ const isUsAsset = (symbol) => {
     return !symbol.includes('.TW') && !symbol.includes('.TWO') && symbol !== '定存' && !symbol.includes('TWD=X');
 };
 
-// --- 網路請求與代理 ---
 const fetchWithProxyFallback = async (targetUrl) => {
   const proxies = [
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, 
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, 
-    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, 
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, // First priority (Most reliable)
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, // Second priority
+    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, // Backup
   ];
   for (const proxyGen of proxies) {
     try {
@@ -175,7 +177,7 @@ const fetchWithProxyFallback = async (targetUrl) => {
   throw new Error('All proxies failed');
 };
 
-// --- 技術指標計算函式 ---
+// --- 技術指標計算 ---
 const calculateSMA = (data, period) => {
   return data.map((item, index, arr) => {
     if (index < period - 1) return { ...item, [`MA${period}`]: null };
@@ -203,36 +205,59 @@ const calculateEMA = (data, period, key = 'close') => {
   return emaArray;
 };
 
+// RSI Calculation
 const calculateRSI = (data, period) => {
     let rsiArray = new Array(data.length).fill(null);
     if (data.length < period + 1) return rsiArray;
+
     let changes = [];
-    for (let i = 1; i < data.length; i++) { changes.push(data[i].close - data[i-1].close); }
-    let gains = 0; let losses = 0;
-    for (let i = 0; i < period; i++) { if (changes[i] > 0) gains += changes[i]; else losses += Math.abs(changes[i]); }
-    let avgGain = gains / period; let avgLoss = losses / period;
+    for (let i = 1; i < data.length; i++) {
+        changes.push(data[i].close - data[i-1].close);
+    }
+
+    let gains = 0;
+    let losses = 0;
+    for (let i = 0; i < period; i++) {
+        if (changes[i] > 0) gains += changes[i];
+        else losses += Math.abs(changes[i]);
+    }
+    let avgGain = gains / period;
+    let avgLoss = losses / period;
+    
     rsiArray[period] = 100 - (100 / (1 + (avgGain / (avgLoss === 0 ? 1 : avgLoss))));
+
     for (let i = period + 1; i < data.length; i++) {
         const change = changes[i-1];
         const gain = change > 0 ? change : 0;
         const loss = change < 0 ? Math.abs(change) : 0;
+
         avgGain = ((avgGain * (period - 1)) + gain) / period;
         avgLoss = ((avgLoss * (period - 1)) + loss) / period;
+
         rsiArray[i] = 100 - (100 / (1 + (avgGain / (avgLoss === 0 ? 1 : avgLoss))));
     }
     return rsiArray;
 };
 
+// Bollinger Bands Calculation
 const calculateBollingerBands = (data, period = 20, multiplier = 2) => {
     const sma = calculateSMA(data, period);
     return data.map((item, i) => {
         if (i < period - 1) return { ...item, BBU: null, BBL: null, BBM: null };
         const slice = data.slice(i - period + 1, i + 1);
         const mean = sma[i][`MA${period}`];
+        
+        // StdDev
         const squaredDiffs = slice.map(d => Math.pow(d.close - mean, 2));
         const variance = squaredDiffs.reduce((a, b) => a + b, 0) / period;
         const stdDev = Math.sqrt(variance);
-        return { ...item, BBM: mean, BBU: mean + (multiplier * stdDev), BBL: mean - (multiplier * stdDev) };
+
+        return {
+            ...item,
+            BBM: mean,
+            BBU: mean + (multiplier * stdDev),
+            BBL: mean - (multiplier * stdDev)
+        };
     });
 };
 
@@ -241,17 +266,21 @@ const calculateKD = (data, period = 9) => {
   return data.map((item, index, arr) => {
     if (index < period - 1) return { ...item, K: null, D: null };
     const slice = arr.slice(index - period + 1, index + 1);
-    const highs = slice.map(d => d.high); const lows = slice.map(d => d.low);
-    const highestHigh = Math.max(...highs); const lowestLow = Math.min(...lows);
+    const highs = slice.map(d => d.high);
+    const lows = slice.map(d => d.low);
+    const highestHigh = Math.max(...highs);
+    const lowestLow = Math.min(...lows);
     let rsv = 50;
     if (highestHigh !== lowestLow) { rsv = ((item.close - lowestLow) / (highestHigh - lowestLow)) * 100; }
-    k = (2/3) * k + (1/3) * rsv; d = (2/3) * d + (1/3) * k;
+    k = (2/3) * k + (1/3) * rsv;
+    d = (2/3) * d + (1/3) * k;
     return { ...item, K: k, D: d };
   });
 };
 
 const calculateMACD = (data) => {
-  const ema12 = calculateEMA(data, 12, 'close'); const ema26 = calculateEMA(data, 26, 'close');
+  const ema12 = calculateEMA(data, 12, 'close');
+  const ema26 = calculateEMA(data, 26, 'close');
   const difArray = data.map((d, i) => {
     const e12 = ema12[i]; const e26 = ema26[i];
     if (e12 === null || e26 === null) return { ...d, DIF: null };
@@ -267,9 +296,27 @@ const calculateMACD = (data) => {
 
 const processTechnicalData = (rawData) => {
   if (!rawData || rawData.length === 0) return [];
-  let d = calculateSMA(rawData, 20); d = calculateSMA(d, 60); d = calculateSMA(d, 120); d = calculateKD(d, 9); d = calculateMACD(d);
-  const rsi6 = calculateRSI(d, 6); const rsi12 = calculateRSI(d, 12); const bbData = calculateBollingerBands(d, 20, 2);
-  d = d.map((item, i) => ({ ...item, ...bbData[i], RSI6: rsi6[i], RSI12: rsi12[i], BB_Range: [bbData[i].BBL, bbData[i].BBU] }));
+  let d = calculateSMA(rawData, 20);
+  d = calculateSMA(d, 60);
+  d = calculateSMA(d, 120);
+  d = calculateKD(d, 9);
+  d = calculateMACD(d);
+  
+  const rsi6 = calculateRSI(d, 6);
+  const rsi12 = calculateRSI(d, 12);
+  
+  const bbData = calculateBollingerBands(d, 20, 2);
+  
+  // Merge all
+  d = d.map((item, i) => ({
+      ...item,
+      ...bbData[i], // Merge BB data
+      RSI6: rsi6[i],
+      RSI12: rsi12[i],
+      // Add range for Area chart
+      BB_Range: [bbData[i].BBL, bbData[i].BBU] 
+  }));
+
   return d;
 };
 
@@ -284,22 +331,44 @@ const loadPapaParse = () => {
   });
 };
 
+// UI Component: Toast Notification
 const Toast = ({ message, onClose }) => {
-  useEffect(() => { const timer = setTimeout(onClose, 3000); return () => clearTimeout(timer); }, [onClose]);
-  return (<div className="fixed bottom-20 md:bottom-10 left-1/2 transform -translate-x-1/2 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg flex items-center z-[100] animate-fade-in-up"><CheckCircle className="w-5 h-5 mr-2" /><span>{message}</span></div>);
+  useEffect(() => {
+    const timer = setTimeout(onClose, 3000);
+    return () => clearTimeout(timer);
+  }, [onClose]);
+
+  return (
+    <div className="fixed bottom-20 md:bottom-10 left-1/2 transform -translate-x-1/2 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg flex items-center z-[100] animate-fade-in-up">
+      <CheckCircle className="w-5 h-5 mr-2" />
+      <span>{message}</span>
+    </div>
+  );
 };
 
+// Custom Chart Tooltip
 const CustomChartTooltip = ({ active, payload, label }) => {
   if (active && payload && payload.length) {
-    return (<div className="p-3 border border-slate-700 rounded-lg shadow-xl bg-slate-800 text-slate-100 text-xs"><p className="mb-2 font-bold text-slate-300">{`日期: ${label}`}</p>{payload.filter(p => p.dataKey !== 'BB_Range').map((entry, index) => (<div key={index} className="flex items-center justify-between gap-4 mb-1"><span style={{ color: entry.color }}>{entry.name}</span><span className="font-mono font-medium">{formatPrice(entry.value)}</span></div>))}</div>);
+    return (
+      <div className="p-3 border border-slate-700 rounded-lg shadow-xl bg-slate-800 text-slate-100 text-xs">
+        <p className="mb-2 font-bold text-slate-300">{`日期: ${label}`}</p>
+        {payload
+          .filter(p => p.dataKey !== 'BB_Range')
+          .map((entry, index) => (
+          <div key={index} className="flex items-center justify-between gap-4 mb-1">
+            <span style={{ color: entry.color }}>{entry.name}</span>
+            <span className="font-mono font-medium">{formatPrice(entry.value)}</span>
+          </div>
+        ))}
+      </div>
+    );
   }
   return null;
 };
 
-// --- 主應用程式 ---
+// --- 主要元件 ---
 
-const App = () => {
-  // 1. State Declarations
+const Dashboard = () => {
   const [sheetUrl, setSheetUrl] = useState('');
   const [geminiApiKey, setGeminiApiKey] = useState(''); 
   const [rawData, setRawData] = useState([]);
@@ -310,11 +379,10 @@ const App = () => {
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(new Date()); 
   const [activeTab, setActiveTab] = useState('overview');
-    
+   
   const [realTimePrices, setRealTimePrices] = useState({});
   const [etfExtraData, setEtfExtraData] = useState({}); 
   const [usdRate, setUsdRate] = useState(1); 
-  const [usBondYield, setUsBondYield] = useState(null); // ^TNX
   const [updateError, setUpdateError] = useState(null);
   const [historicalData, setHistoricalData] = useState({});
   const [selectedHistorySymbol, setSelectedHistorySymbol] = useState(null);
@@ -322,7 +390,7 @@ const App = () => {
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('1y_1d'); 
   const [isLastTradingDay, setIsLastTradingDay] = useState(false);
-    
+   
   const [sortConfig, setSortConfig] = useState({ key: 'manual', direction: 'asc' });
   const [customOrder, setCustomOrder] = useState([]);
 
@@ -334,141 +402,36 @@ const App = () => {
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
-  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash'); 
+  const [selectedModel, setSelectedModel] = useState('gemini-3-flash-preview'); 
   const [aiSignals, setAiSignals] = useState({}); 
 
+  // Portfolio Health Check State
   const [portfolioHealth, setPortfolioHealth] = useState(null);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
-  const [investmentSettings, setInvestmentSettings] = useState({}); 
+   
+  // Asset Classifications & Strategy Settings (Core/Satellite, DCA, Addon Logic)
+  const [investmentSettings, setInvestmentSettings] = useState({}); // { symbol: { type: 'CORE', isDCA: false, addon: 'PYRAMID' } }
+  // Backwards compatibility state for assetClassifications
   const [assetClassifications, setAssetClassifications] = useState({});
 
+  // Chat State
   const [chatMessages, setChatMessages] = useState([
     { role: 'assistant', content: '您好！我是您的 AI 投資助理。我可以根據您的持股狀況與投資分類回答問題，請試著問我：「我的核心資產績效如何？」或「目前投資組合風險？」' }
   ]);
   const [chatInput, setChatInput] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
   const chatEndRef = useRef(null);
+
+  // Race Condition Control
   const analysisInProgressRef = useRef({});
+
+  // Fee Settings
   const [feeDiscount, setFeeDiscount] = useState(1); 
   const [toast, setToast] = useState(null);
 
-  // 2. Memos - Core Data (Defined BEFORE use)
-  const summary = useMemo(() => {
-    const totalCost = portfolioData.reduce((sum, item) => sum + item.costBasis, 0);
-    const totalValue = portfolioData.reduce((sum, item) => sum + item.marketValue, 0);
-    const totalPL = portfolioData.reduce((sum, item) => sum + item.profitLoss, 0); 
-    const totalROI = totalCost > 0 ? totalPL / totalCost : 0;
-    return { totalCost, totalValue, totalPL, totalROI };
-  }, [portfolioData]);
-
-  const allocationData = useMemo(() => {
-    const group = {};
-    portfolioData.forEach(item => { const cat = item['類別'] || '其他'; group[cat] = (group[cat] || 0) + item.marketValue; });
-    const total = Object.values(group).reduce((a, b) => a + b, 0);
-    return Object.keys(group).map(key => ({ name: key, value: group[key], percentage: total > 0 ? (group[key] / total) : 0 }));
-  }, [portfolioData]);
-
-  const aggregatedHoldings = useMemo(() => {
-    const map = new Map();
-    portfolioData.forEach(item => {
-      const key = item['標的'];
-      if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, costBasisRaw: 0, marketValue: 0, profitLoss: 0, estimateFee: 0, estimateTax: 0, dates: new Set(), isUS: item.isUS }); }
-      const entry = map.get(key);
-      entry.shares += item.shares; entry.costBasis += item.costBasis; entry.marketValue += item.marketValue; 
-      entry.costBasisRaw += (item.buyPriceRaw * item.shares); 
-      entry.profitLoss += item.profitLoss; 
-      entry.estimateFee += item.estimateFee;
-      entry.estimateTax += item.estimateTax;
-      entry.dates.add(item['日期']);
-      if (item.currentPrice !== item.buyPrice) entry.currentPrice = item.currentPrice;
-      if (item.currentPriceRaw) entry.currentPriceRaw = item.currentPriceRaw; 
-    });
-    return Array.from(map.values()).map(item => {
-      const roi = item.costBasis > 0 ? item.profitLoss / item.costBasis : 0;
-      const sortedDates = Array.from(item.dates).sort((a, b) => new Date(a) - new Date(b));
-      const latestDate = sortedDates[sortedDates.length - 1];
-      
-      const avgPriceTwd = item.shares > 0 ? item.costBasis / item.shares : 0;
-      const avgPriceRaw = item.shares > 0 ? item.costBasisRaw / item.shares : 0;
-      
-      const finalBuyPrice = item.isUS ? avgPriceRaw : avgPriceTwd;
-      const finalCurrentPrice = item.isUS ? item.currentPriceRaw : item.currentPrice;
-      
-      return { 
-        ...item, 
-        buyPrice: finalBuyPrice, 
-        currentPrice: finalCurrentPrice, 
-        buyPriceRaw: avgPriceRaw, 
-        currentPriceRaw: item.currentPriceRaw,
-        roi, 
-        '日期': latestDate 
-      };
-    });
-  }, [portfolioData]);
-
-  const sortedHoldings = useMemo(() => {
-    let sortableItems = [...aggregatedHoldings];
-    if (sortConfig.key === 'manual') {
-       sortableItems.sort((a, b) => {
-         const idxA = customOrder.indexOf(a['標的']);
-         const idxB = customOrder.indexOf(b['標的']);
-         if (idxA === -1) return 1; if (idxB === -1) return -1;
-         return idxA - idxB;
-       });
-    } else if (sortConfig.key !== null) {
-      sortableItems.sort((a, b) => {
-        let aValue = a[sortConfig.key]; let bValue = b[sortConfig.key];
-        if (sortConfig.key === '標的') aValue = a['標的']; if (sortConfig.key === '類別') aValue = a['類別'];
-        if (typeof aValue === 'string') { aValue = aValue.toLowerCase(); bValue = bValue.toLowerCase(); }
-        if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
-        if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
-        return 0;
-      });
-    }
-    return sortableItems;
-  }, [aggregatedHoldings, sortConfig, customOrder]);
-
-  const tradableSymbols = useMemo(() => sortedHoldings.filter(h => h['類別'] !== '定存'), [sortedHoldings]);
-   
-  const currentChartData = useMemo(() => {
-    const baseData = historicalData[`${selectedHistorySymbol}_${timeframe}`];
-    if (!baseData || !selectedHistorySymbol) return [];
-    const buys = portfolioData.filter(p => p['標的'] === selectedHistorySymbol);
-    const merged = [...baseData];
-    buys.forEach(buy => {
-        const rawDate = (buy['日期'] || '').toString().trim().replace(/\//g, '-');
-        let closestIdx = merged.findIndex(pt => pt.date === rawDate);
-        if (closestIdx === -1) {
-            const buyDateTs = new Date(rawDate).getTime();
-            if (!isNaN(buyDateTs)) {
-                let minDiff = Infinity;
-                merged.forEach((pt, i) => {
-                    const ptDateTs = new Date(pt.date).getTime();
-                    const diff = Math.abs(buyDateTs - ptDateTs);
-                    if (diff < minDiff && diff < 604800000) { minDiff = diff; closestIdx = i; }
-                });
-            }
-        }
-        if (closestIdx !== -1) { merged[closestIdx] = { ...merged[closestIdx], buyPricePoint: buy['價格'], buyAction: buy }; }
-    });
-    return merged;
-  }, [historicalData, selectedHistorySymbol, timeframe, portfolioData]);
-
-  // 3. UI Helpers
-  const getResponsiveFontSize = (text) => {
-    const str = String(text); 
-    const len = str.length;
-    if (len > 25) return 'text-xs';
-    if (len > 18) return 'text-sm';
-    if (len > 14) return 'text-base';
-    if (len > 11) return 'text-lg';
-    if (len > 9) return 'text-xl';
-    return 'text-2xl';
-  };
-
-  // 4. Data Processing Functions
   const processData = (data, pricesMap) => {
     const currentUsdRate = pricesMap['TWD=X'] || 30; 
+
     const enrichedData = data.map((item, index) => {
       const shares = parseFloat(item['股數']) || 0;
       const buyPriceRaw = parseFloat(item['價格']) || 0; 
@@ -476,31 +439,57 @@ const App = () => {
       const symbol = item['標的'];
       const category = item['類別'];
       const name = item['名稱'] || '';
+
       const isTD = category === '定存' && symbol.includes('-TD');
       const isUS = isUsAsset(symbol) || isTD; 
-      let fxRate = 1; let currentPriceRaw = buyPriceRaw;
+       
+      let fxRate = 1;
+      let currentPriceRaw = buyPriceRaw;
+
       if (isTD) {
           const currency = symbol.replace('-TD', '');
-          if (currency === 'TWD') { fxRate = 1; } 
-          else { const ticker = currency === 'USD' ? 'TWD=X' : `${currency}TWD=X`; fxRate = pricesMap[ticker] || 1; }
+          if (currency === 'TWD') {
+              fxRate = 1;
+          } else {
+              const ticker = currency === 'USD' ? 'TWD=X' : `${currency}TWD=X`;
+              fxRate = pricesMap[ticker] || 1; 
+          }
           currentPriceRaw = 1; 
-      } else if (isUS) { fxRate = currentUsdRate; currentPriceRaw = pricesMap?.[symbol] || buyPriceRaw;
-      } else { fxRate = 1; currentPriceRaw = category === '定存' ? buyPriceRaw : (pricesMap?.[symbol] || buyPriceRaw); }
-      const buyPriceTwd = buyPriceRaw * fxRate; const currentPriceTwd = currentPriceRaw * fxRate; const costBasisTwd = costBasisRaw; 
+      } else if (isUS) {
+          fxRate = currentUsdRate; 
+          currentPriceRaw = pricesMap?.[symbol] || buyPriceRaw;
+      } else {
+          fxRate = 1;
+          currentPriceRaw = category === '定存' ? buyPriceRaw : (pricesMap?.[symbol] || buyPriceRaw);
+      }
+
+      const buyPriceTwd = buyPriceRaw * fxRate;
+      const currentPriceTwd = currentPriceRaw * fxRate;
+      const costBasisTwd = costBasisRaw; 
+
       const marketValueTwd = shares * currentPriceTwd;
+       
       const assetType = detectAssetType(symbol, name, category);
-      let taxRate = 0; let feeRate = 0;
+      let taxRate = 0;
+      let feeRate = 0;
+
       if (!isUS && category !== '定存') {
           feeRate = 0.001425 * feeDiscount;
-          if (assetType === 'ETF') taxRate = 0.001; else if (assetType === 'BOND') taxRate = 0; else taxRate = 0.003; 
+          if (assetType === 'ETF') taxRate = 0.001;
+          else if (assetType === 'BOND') taxRate = 0;
+          else taxRate = 0.003; 
       }
+       
       const estimateFee = Math.round(marketValueTwd * feeRate);
       const estimateTax = category === '定存' ? 0 : Math.round(marketValueTwd * taxRate);
       const feeFinal = category === '定存' ? 0 : estimateFee;
+
       const grossProfit = marketValueTwd - costBasisTwd;
       const netProfit = grossProfit - feeFinal - estimateTax;
+       
       const calculatedBuyPriceTwd = shares > 0 ? costBasisTwd / shares : 0;
       const roi = costBasisTwd > 0 ? netProfit / costBasisTwd : 0;
+
       return { 
         ...item, id: index, shares, isUS, isTD,
         buyPrice: calculatedBuyPriceTwd, currentPrice: currentPriceTwd, currentPriceRaw,
@@ -514,37 +503,65 @@ const App = () => {
   };
 
   const checkLastTradingDay = async () => {
-      const today = new Date(); const year = today.getFullYear(); const month = today.getMonth(); 
-      const todayStr = today.toISOString().split('T')[0].replace(/-/g, '');
+      const today = new Date();
+      const year = today.getFullYear();
+      const month = today.getMonth(); 
+      const todayStr = today.toISOString().split('T')[0].replace(/-/g, ''); // YYYYMMDD
+      
       let holidays = [];
       try {
         const response = await fetchWithProxyFallback('https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule');
-        if (response && Array.isArray(response)) { holidays = response.map(item => item.Date.replace(/\//g, '')); }
-      } catch (e) { console.warn('Failed to fetch holidays, defaulting to basic check', e); }
+        if (response && Array.isArray(response)) {
+            holidays = response.map(item => item.Date.replace(/\//g, '')); 
+        }
+      } catch (e) {
+        console.warn('Failed to fetch holidays, defaulting to basic check', e);
+      }
+
       let d = new Date(year, month + 1, 0); 
       let foundDateStr = '';
       while (d.getDate() > 0) {
-        const day = d.getDay(); const y = d.getFullYear(); const m = String(d.getMonth() + 1).padStart(2, '0'); const dayDate = String(d.getDate()).padStart(2, '0'); const dateStr = `${y}${m}${dayDate}`; 
-        if (day === 0 || day === 6 || holidays.includes(dateStr)) { d.setDate(d.getDate() - 1); } else { foundDateStr = dateStr; break; }
+        const day = d.getDay();
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dayDate = String(d.getDate()).padStart(2, '0');
+        const dateStr = `${y}${m}${dayDate}`; 
+
+        if (day === 0 || day === 6 || holidays.includes(dateStr)) {
+          d.setDate(d.getDate() - 1);
+        } else {
+          foundDateStr = dateStr;
+          break;
+        }
       }
+      
       setIsLastTradingDay(foundDateStr === todayStr);
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    setPriceLoading(true); setUpdateError(null); setLoadingMessage('更新即時股價中...');
+    setPriceLoading(true);
+    setUpdateError(null);
+    setLoadingMessage('更新即時股價中...');
+    
+    // 1. Identify unique symbols from portfolio
     const uniqueSymbols = [...new Set(data.map(item => item['標的']))];
-    const symbolsToFetchList = uniqueSymbols.filter(s => s !== '定存' && !s.includes('-TD'));
-    let needsUsdRate = false;
-    if (uniqueSymbols.some(s => isUsAsset(s))) { needsUsdRate = true; }
-    if (uniqueSymbols.includes('USD-TD')) { needsUsdRate = true; }
-    let needsBondYield = false;
-    if (uniqueSymbols.some(s => /^00\d{2,3}B/i.test(s) || s.includes('債'))) {
-        needsUsdRate = true;
-        needsBondYield = true;
-    }
-    if (needsUsdRate && !symbolsToFetchList.includes('TWD=X')) { symbolsToFetchList.push('TWD=X'); }
-    if (needsBondYield && !symbolsToFetchList.includes('^TNX')) { symbolsToFetchList.push('^TNX'); }
 
+    // 2. Identify and filter symbols to fetch (exclude '定存' and deposits)
+    const symbolsToFetchList = uniqueSymbols.filter(s => s !== '定存' && !s.includes('-TD'));
+
+    // 3. STRICTLY check if we need USD Rate (TWD=X)
+    let needsUsdRate = false;
+    if (uniqueSymbols.some(s => isUsAsset(s))) {
+        needsUsdRate = true;
+    }
+    if (uniqueSymbols.includes('USD-TD')) {
+        needsUsdRate = true;
+    }
+    if (needsUsdRate && !symbolsToFetchList.includes('TWD=X')) {
+        symbolsToFetchList.push('TWD=X');
+    }
+
+    // 4. Add other currency rates if needed (e.g., EUR-TD -> EURTWD=X)
     data.forEach(item => {
         if (item['類別'] === '定存' && item['標的'].includes('-TD')) {
             const currency = item['標的'].replace('-TD', '');
@@ -561,101 +578,116 @@ const App = () => {
     const newEtfData = { ...etfExtraData };
     const isTrading = isTaiwanTradingHours();
     
+    // NEW: Fetch TWSE ETF NAV for accurate Premium/Discount
     const twseEtfMap = {};
-    const tpexEtfMap = {}; 
-
     try {
-        const navRes = await fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/a1271825'); 
+        const navRes = await fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/a1271825'); // ETF Daily Info (NAV, Premium/Discount)
         if (Array.isArray(navRes)) {
-            navRes.forEach(item => { twseEtfMap[item.Code] = parseFloat(item.NetAssetValue); });
-        }
-    } catch (e) { console.warn('TWSE NAV Fetch Failed', e); }
-
-    try {
-        const tpexNavRes = await fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/etf/net_value/net_value_result.php?l=zh-tw&o=json');
-        if (tpexNavRes && tpexNavRes.aaData) {
-            tpexNavRes.aaData.forEach(item => {
-                const code = item[0];
-                const nav = parseFloat(item[3]);
-                if (!isNaN(nav)) { tpexEtfMap[code] = nav; }
+            navRes.forEach(item => {
+                const code = item.Code;
+                const nav = parseFloat(item.NetAssetValue);
+                // Map "0050" to "0050.TW" logic handles below
+                twseEtfMap[code] = nav;
             });
         }
-    } catch (e) { console.warn('TPEx NAV Fetch Failed', e); }
+    } catch (e) { console.warn('TWSE NAV Fetch Failed', e); }
 
     const symbolsToFetch = symbolsToFetchList.filter(symbol => {
         if (forceUpdate) return true;
         const cachedItem = cache[symbol];
         if (!cachedItem) return true;
         if (cachedItem.date !== today) return true;
+        
         if (isTrading && (symbol.includes('.TW') || symbol.includes('.TWO') || symbol === 'TWD=X')) {
             const cacheAge = Date.now() - (cachedItem.timestamp || 0);
             if (cacheAge > 300000) return true; 
         }
+        
         newPrices[symbol] = cachedItem.price;
-        if (cachedItem.nav) newEtfData[symbol] = { ...newEtfData[symbol], nav: cachedItem.nav };
-        if (cachedItem.yield) newEtfData[symbol] = { ...newEtfData[symbol], yield: cachedItem.yield };
+        if (cachedItem.nav) newEtfData[symbol] = { nav: cachedItem.nav };
         return false; 
     });
 
     if (symbolsToFetch.length > 0) {
         const failedSymbols = [];
         const promises = symbolsToFetch.map(async (symbol) => {
-          const maxRetries = 2; let attempts = 0; let success = false;
+          const maxRetries = 2;
+          let attempts = 0;
+          let success = false;
           await delay(Math.random() * 1500); 
+
           while(attempts <= maxRetries && !success) {
+            // HYBRID FETCH STRATEGY: Quote API -> Chart API Fallback
             try {
+              // 1. Try Quote API (Best Accuracy)
               const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
               const result = await fetchWithProxyFallback(quoteUrl);
               const quote = result?.quoteResponse?.result?.[0];
+              
               if (quote && quote.regularMarketPrice !== undefined) {
                 newPrices[symbol] = quote.regularMarketPrice;
-                const extra = {};
-                const pureCode = symbol.split('.')[0]; 
-                if (twseEtfMap[pureCode]) { extra.nav = twseEtfMap[pureCode]; } 
-                else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; } 
-                else if (quote.navPrice) { extra.nav = quote.navPrice; }
                 
-                if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield; } 
-                else if (quote.yield) { extra.yield = quote.yield; } 
-                else if (quote.dividendYield) { extra.yield = quote.dividendYield; }
-
-                newEtfData[symbol] = { ...newEtfData[symbol], ...extra };
+                // Hybrid NAV Logic: TWSE > Yahoo
+                const pureCode = symbol.split('.')[0]; // 0050.TW -> 0050
+                if (twseEtfMap[pureCode]) {
+                    newEtfData[symbol] = { nav: twseEtfMap[pureCode] };
+                } else if (quote.navPrice) {
+                    newEtfData[symbol] = { nav: quote.navPrice };
+                }
+                
                 success = true;
-              } else { throw new Error('Quote API No Data'); }
+              } else { 
+                  throw new Error('Quote API No Data'); 
+              }
             } catch (quoteErr) {
               console.warn(`Quote API failed for ${symbol}, trying Chart API fallback...`);
               try {
                   const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
                   const result = await fetchWithProxyFallback(chartUrl);
                   const meta = result?.chart?.result?.[0]?.meta;
+                  
                   if (meta && meta.regularMarketPrice !== undefined) {
                     newPrices[symbol] = meta.regularMarketPrice;
+                    // Fallback to TWSE NAV if available
                     const pureCode = symbol.split('.')[0];
-                    if (twseEtfMap[pureCode]) { newEtfData[symbol] = { ...newEtfData[symbol], nav: twseEtfMap[pureCode] }; } 
-                    else if (tpexEtfMap[pureCode]) { newEtfData[symbol] = { ...newEtfData[symbol], nav: tpexEtfMap[pureCode] }; }
+                    if (twseEtfMap[pureCode]) newEtfData[symbol] = { nav: twseEtfMap[pureCode] };
+                    
                     success = true;
                   } else { throw new Error('Chart API No Data'); }
               } catch (chartErr) {
                   attempts++;
-                  if (attempts <= maxRetries) { setLoadingMessage(`更新 ${symbol} 失敗，正在重試 (${attempts}/${maxRetries})...`); await delay(1000); } 
-                  else { console.warn(`標的 ${symbol} 更新失敗:`, chartErr); failedSymbols.push(symbol); }
+                  if (attempts <= maxRetries) {
+                    setLoadingMessage(`更新 ${symbol} 失敗，正在重試 (${attempts}/${maxRetries})...`);
+                    await delay(1000);
+                  } else {
+                    console.warn(`標的 ${symbol} 更新失敗:`, chartErr);
+                    failedSymbols.push(symbol);
+                  }
               }
             }
           }
         });
+
         await Promise.all(promises);
         if (failedSymbols.length > 0) setUpdateError(`更新失敗的標的: ${failedSymbols.join(', ')}`);
         savePriceCache(newPrices, newEtfData);
     }
     
     if (newPrices['TWD=X']) setUsdRate(newPrices['TWD=X']);
-    if (newPrices['^TNX']) setUsBondYield(newPrices['^TNX']);
     setRealTimePrices(newPrices);
     setEtfExtraData(newEtfData);
+    
     setHistoricalData({});
     localStorage.removeItem('gemini_analysis_cache');
-    setAiSignals({}); setAiSummary(null); setAiDetail(null); setUsedModel(null); setPortfolioHealth(null); 
-    setPriceLoading(false); setLastUpdated(new Date()); setLoadingMessage('更新即時股價中...'); 
+    setAiSignals({});
+    setAiSummary(null);
+    setAiDetail(null);
+    setUsedModel(null);
+    setPortfolioHealth(null); 
+    
+    setPriceLoading(false);
+    setLastUpdated(new Date()); 
+    setLoadingMessage('更新即時股價中...'); 
     processData(data, newPrices);
   };
 
@@ -665,141 +697,253 @@ const App = () => {
       if (confirm) setActiveTab('config');
       throw new Error("請先至「設定」頁面儲存 API Key");
     }
+
     const defaultModels = AVAILABLE_MODELS.map(m => m.id);
     const models = [selectedModel, ...defaultModels.filter(m => m !== selectedModel)];
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); 
+
     try {
       for (const model of models) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000); 
         try {
-          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
+          const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`,
+            {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 8192 } }),
+              body: JSON.stringify({ 
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                  maxOutputTokens: 8192,
+                }
+              }),
               signal: controller.signal
-            });
-          if (!response.ok) { console.warn(`Model ${model} failed: ${response.status}`); continue; }
+            }
+          );
+
+          if (!response.ok) {
+            console.warn(`Model ${model} failed: ${response.status}`);
+            continue;
+          }
+
           const data = await response.json();
           const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) { return { text, model }; }
+          if (text) {
+            return { text, model }; 
+          }
         } catch (err) {
-          if (err.name === 'AbortError') { console.warn(`Model ${model} timed out after 60s, switching to next model...`); } 
-          else { console.error(`Error calling ${model}:`, err); }
-        } finally { clearTimeout(timeoutId); }
+          console.error(`Error calling ${model}:`, err);
+        }
       }
-    } finally {}
+    } finally {
+      clearTimeout(timeoutId);
+    }
     throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
   };
 
+  const handleSettingChange = (symbol, key, value) => {
+    const currentSettings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID' };
+    const newSettings = { ...investmentSettings, [symbol]: { ...currentSettings, [key]: value } };
+    setInvestmentSettings(newSettings);
+    localStorage.setItem('investment_settings', JSON.stringify(newSettings));
+    
+    if (key === 'type') {
+        const newClassifications = { ...assetClassifications, [symbol]: value };
+        setAssetClassifications(newClassifications);
+        localStorage.setItem('investment_asset_classifications', JSON.stringify(newClassifications));
+    }
+  };
+
+  // --- Portfolio Health Check Function ---
   const generatePortfolioHealthCheck = async () => {
-    if (!geminiApiKey) { alert("請先設定 API Key"); setActiveTab('config'); return; }
+    if (!geminiApiKey) {
+        alert("請先設定 API Key");
+        setActiveTab('config');
+        return;
+    }
     if (isHealthChecking) return;
-    setIsHealthChecking(true); setPortfolioHealth(null);
+    setIsHealthChecking(true);
+    setPortfolioHealth(null);
+
     const totalAsset = summary.totalValue;
     const topHoldings = sortedHoldings.slice(0, 5).map(h => `${h['名稱']}(${h['標的']}): ${formatPercent(h.marketValue / totalAsset)}`);
     const allocationStr = allocationData.map(d => `${d.name} ${formatPercent(d.percentage)}`).join(', ');
-    const prompt = `角色：首席投資長 (CIO) 與風險控管經理。任務：對目前的投資組合進行總體風險與健康度健檢。【資產數據】- 總資產：${formatCurrency(summary.totalValue)}- 總損益：${formatCurrency(summary.totalPL)} (ROI: ${formatPercent(summary.totalROI)})- 資產配置：${allocationStr}- 前五大持股 (集中度風險)：${topHoldings.join(', ')} 請分析並輸出以下格式 (請嚴格遵守 TAG 格式，不要使用 Markdown 代碼區塊)：[SCORE] (請給出 0-100 的分數，根據風險分散性與配置合理性評分) [RISK] (低風險 / 中低風險 / 中風險 / 中高風險 / 高風險 - 請選一個) [COMMENT] (200字以內的總評，包含風險提示與資產配置建議。語氣專業、客觀) [SUGGESTION] (請列出 3 點具體調整方向，每點一行)`;
+
+    const prompt = `
+      角色：首席投資長 (CIO) 與風險控管經理。
+      任務：對目前的投資組合進行總體風險與健康度健檢。
+      
+      【資產數據】
+      - 總資產：${formatCurrency(summary.totalValue)}
+      - 總損益：${formatCurrency(summary.totalPL)} (ROI: ${formatPercent(summary.totalROI)})
+      - 資產配置：${allocationStr}
+      - 前五大持股 (集中度風險)：${topHoldings.join(', ')}
+      
+      請分析並輸出以下格式 (請嚴格遵守 TAG 格式，不要使用 Markdown 代碼區塊)：
+      
+      [SCORE]
+      (請給出 0-100 的分數，根據風險分散性與配置合理性評分)
+      
+      [RISK]
+      (低風險 / 中低風險 / 中風險 / 中高風險 / 高風險 - 請選一個)
+      
+      [COMMENT]
+      (200字以內的總評，包含風險提示與資產配置建議。語氣專業、客觀)
+      
+      [SUGGESTION]
+      (請列出 3 點具體調整方向，每點一行，例如「增加債券部位以降低波動」或「減少單一持股佔比」)
+    `;
+
     try {
         const { text } = await callGeminiWithFallback(prompt);
-        const scoreMatch = text.match(/\[SCORE\]\s*(\d+)/i); const riskMatch = text.match(/\[RISK\]\s*(.+)/i); const commentMatch = text.match(/\[COMMENT\]\s*([\s\S]*?)\s*(?=\[SUGGESTION\]|$)/i); const suggestionMatch = text.match(/\[SUGGESTION\]\s*([\s\S]*)/i);
-        setPortfolioHealth({ score: scoreMatch ? parseInt(scoreMatch[1]) : 0, risk: riskMatch ? riskMatch[1].trim() : "未知", comment: commentMatch ? commentMatch[1].trim() : "無法解析評論", suggestions: suggestionMatch ? suggestionMatch[1].trim().split('\n').filter(s => s.trim().length > 0) : [] });
-    } catch (err) { setPortfolioHealth({ score: 0, risk: "Error", comment: "AI 分析失敗，請稍後再試。", suggestions: [] }); } finally { setIsHealthChecking(false); }
+        
+        const scoreMatch = text.match(/\[SCORE\]\s*(\d+)/i);
+        const riskMatch = text.match(/\[RISK\]\s*(.+)/i);
+        const commentMatch = text.match(/\[COMMENT\]\s*([\s\S]*?)\s*(?=\[SUGGESTION\]|$)/i);
+        const suggestionMatch = text.match(/\[SUGGESTION\]\s*([\s\S]*)/i);
+
+        setPortfolioHealth({
+            score: scoreMatch ? parseInt(scoreMatch[1]) : 0,
+            risk: riskMatch ? riskMatch[1].trim() : "未知",
+            comment: commentMatch ? commentMatch[1].trim() : "無法解析評論",
+            suggestions: suggestionMatch ? suggestionMatch[1].trim().split('\n').filter(s => s.trim().length > 0) : []
+        });
+
+    } catch (err) {
+        setPortfolioHealth({
+            score: 0,
+            risk: "Error",
+            comment: "AI 分析失敗，請稍後再試。",
+            suggestions: []
+        });
+    } finally {
+        setIsHealthChecking(false);
+    }
   };
 
   const generateFullAnalysis = async (symbol, data, forceUpdate = false) => {
     if (!data || data.length === 0) return;
+    
     if (analysisInProgressRef.current[symbol]) return;
     analysisInProgressRef.current[symbol] = true;
 
-    const latest = data[data.length - 1]; const prevDay = data.length > 1 ? data[data.length - 2] : null; const dataDate = latest.date;
-    const today = getTodayDate(); const cache = getAiCache();
+    const latest = data[data.length - 1];
+    const prevDay = data.length > 1 ? data[data.length - 2] : null;
+    const dataDate = latest.date;
+    const today = getTodayDate();
+    const cache = getAiCache();
 
     if (!forceUpdate && cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
-      setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
+      setAiSummary(String(cache[symbol].summary));
+      setAiDetail(String(cache[symbol].detail));
       if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
-      setUsedModel(cache[symbol].model); setIsCachedResult(true); setAnalysisSymbol(symbol); setIsDetailExpanded(true); setIsAiSummarizing(false); 
-      delete analysisInProgressRef.current[symbol]; return;
+      setUsedModel(cache[symbol].model); 
+      setIsCachedResult(true); 
+      setAnalysisSymbol(symbol);
+      setIsDetailExpanded(true); 
+      setIsAiSummarizing(false); 
+      delete analysisInProgressRef.current[symbol];
+      return;
     }
 
-    setIsAiSummarizing(true); setAiSummary(null); setAiDetail(null); setUsedModel(null); setIsCachedResult(false); setAnalysisSymbol(symbol); 
-    setAiSignals(prev => { const next = { ...prev }; delete next[symbol]; return next; });
+    setIsAiSummarizing(true); 
+    setAiSummary(null);
+    setAiDetail(null); 
+    setUsedModel(null); 
+    setIsCachedResult(false); 
+    setAnalysisSymbol(symbol); 
+    
+    setAiSignals(prev => {
+        const next = { ...prev };
+        delete next[symbol];
+        return next;
+    });
 
     const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
-    const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票';
+    const stockName = assetInfo?.['名稱'] || symbol;
+    const category = assetInfo?.['類別'] || '股票';
     const assetType = detectAssetType(symbol, stockName, category);
     const isBond = category === '債券' || assetType === 'BOND';
-    const etfData = etfExtraData[symbol];
-    const hasNav = etfData && etfData.nav;
-    // Force ETF type if we have NAV data, regardless of name
-    const isETF = assetType === 'ETF' || assetType === 'BOND' || hasNav; 
     
     const settings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID' };
-    const classification = settings.type; const classLabel = ASSET_TYPES[classification].label;
-    const isDCA = settings.isDCA; const addonLogic = settings.addon; const addonLabel = ADDON_LOGICS[addonLogic].label;
+    const classification = settings.type; 
+    const classLabel = ASSET_TYPES[classification].label;
+    const isDCA = settings.isDCA;
+    const addonLogic = settings.addon;
+    const addonLabel = ADDON_LOGICS[addonLogic].label;
+
     const performanceInfo = assetInfo ? `目前損益：${formatCurrency(assetInfo.profitLoss)} (ROI: ${formatPercent(assetInfo.roi)})。` : "";
-    const currentPrice = realTimePrices[symbol] || latest.close; const prevClose = prevDay ? prevDay.close : latest.close;
+
+    const currentPrice = realTimePrices[symbol] || latest.close;
+    const prevClose = prevDay ? prevDay.close : latest.close;
     
-    let keyMetrics = "";
-    if (isETF) {
-        if (etfData && etfData.nav) {
-            const pd = (currentPrice - etfData.nav) / etfData.nav;
-            keyMetrics += `\n- 折溢價 (Premium/Discount): ${(pd*100).toFixed(2)}% (淨值: ${etfData.nav})`;
-        } else { keyMetrics += `\n- 折溢價: 無資料`; }
-    }
-    if (etfData && etfData.yield) {
-        const yieldVal = etfData.yield < 1 ? etfData.yield * 100 : etfData.yield;
-        keyMetrics += `\n- 殖利率 (Yield): ${yieldVal.toFixed(2)}%`;
-    } else { keyMetrics += `\n- 殖利率: 無資料`; }
-    
-    if (isBond || isUsAsset(symbol) || symbol.includes('00679B')) {
-        keyMetrics += `\n- 參考匯率 (USD/TWD): ${usdRate}`;
-        if (usBondYield) keyMetrics += `\n- 美國10年期公債殖利率 (^TNX): ${usBondYield}% (市場基準)`;
+    // Calculate Premium/Discount for AI context
+    const etfData = etfExtraData[symbol];
+    let premDiscInfo = "";
+    if (etfData && etfData.nav) {
+        const pd = (currentPrice - etfData.nav) / etfData.nav;
+        premDiscInfo = `目前淨值:${etfData.nav}, 折溢價:${(pd*100).toFixed(2)}% (${pd>0?'溢價':'折價'})`;
     }
 
+    // Advanced Strategy Logic Construction (Independent)
     let strategyContext = "";
-    if (classification === 'CORE') { strategyContext = "【核心資產 (CORE)】策略屬性：左側交易、價值投資。目標：長期持有，跌破季線(MA60)或半年線(MA120)視為價值浮現。"; } 
-    else { strategyContext = "【衛星資產 (SATELLITE)】策略屬性：右側交易、波段操作。目標：抓取波段價差，站上月線(MA20)且動能強視為買進，跌破月線應停利停損。"; }
+    if (classification === 'CORE') {
+        strategyContext = "【核心資產 (CORE)】策略屬性：左側交易、價值投資。目標：長期持有，跌破季線(MA60)或半年線(MA120)視為價值浮現。";
+    } else {
+        strategyContext = "【衛星資產 (SATELLITE)】策略屬性：右側交易、波段操作。目標：抓取波段價差，站上月線(MA20)且動能強視為買進，跌破月線應停利停損。";
+    }
 
     let addonStrategy = "";
-    if (addonLogic === 'PYRAMID') { addonStrategy = "【加碼邏輯：跌幅金字塔 (Pyramid)】重點分析「回檔幅度」與「乖離率」。若股價較近期高點回檔超過5%~10%或觸及長期均線支撐，視為加碼訊號。"; } 
-    else if (addonLogic === 'TECHNICAL') { addonStrategy = "【加碼邏輯：技術指標 (Technical)】重點分析「動能訊號」。若 KD 指標低檔黃金交叉 (K<20且向上穿過D)、MACD 柱狀體翻紅或 RSI 突破 50，視為加碼訊號。"; } 
-    else if (addonLogic === 'YIELD_MACRO') { addonStrategy = "【加碼邏輯：殖利率/總經 (Yield/Macro)】重點分析「殖利率吸引力」。若殖利率高於歷史平均(>4%~5%)，或債券價格位於歷史低檔區(殖利率倒數)，視為加碼訊號。"; }
+    if (addonLogic === 'PYRAMID') {
+        addonStrategy = "【加碼邏輯：跌幅金字塔 (Pyramid)】重點分析「回檔幅度」與「乖離率」。若股價較近期高點回檔超過5%~10%或觸及長期均線支撐，視為加碼訊號。";
+    } else if (addonLogic === 'TECHNICAL') {
+        addonStrategy = "【加碼邏輯：技術指標 (Technical)】重點分析「動能訊號」。若 KD 指標低檔黃金交叉 (K<20且向上穿過D)、MACD 柱狀體翻紅或 RSI 突破 50，視為加碼訊號。";
+    } else if (addonLogic === 'YIELD_MACRO') {
+        addonStrategy = "【加碼邏輯：殖利率/總經 (Yield/Macro)】重點分析「殖利率吸引力」。若殖利率高於歷史平均(>4%~5%)，或債券價格位於歷史低檔區(殖利率倒數)，視為加碼訊號。";
+    }
 
     let dcaStrategy = "";
     if (isDCA) {
-       if (isBond) { dcaStrategy = `【定期定額 (債券型資產)】此為債券部位，不參考KD/MACD等動能指標。邏輯：(1) 價值面：檢查布林通道(20,2)是否觸及下軌(BBL)視為超跌買點。 (2) 折溢價：若出現折價 (Price < NAV) 優先考慮。 (3) 匯率(若為美債)：考量 TWD=X 匯率優勢。 (4) 時間保底：今日 ${isLastTradingDay ? '是' : '不是'} 本月最後一個交易日。${isLastTradingDay ? '符合定期定額扣款條件(SIGNAL:ADD)。' : '若無上述價值低點則觀望。'}`; } 
-       else if (classification === 'SATELLITE') { dcaStrategy = `【定期定額 (衛星資產)】邏輯：(1) 技術找低點：檢查 RSI(6/12) 是否出現底背離(股價創低但RSI墊高)，或 MACD 綠柱縮短/翻紅。 (2) 時間保底：今日 ${isLastTradingDay ? '是' : '不是'} 本月最後一個交易日。${isLastTradingDay ? '符合定期定額扣款條件(SIGNAL:ADD)。' : '若無技術低點則觀望。'}`; } 
-       else { dcaStrategy = `【定期定額 (核心資產)】邏輯：(1) 技術找低點：檢查 KD(9) 是否低檔(<20)金叉，或股價回測 MA60/MA120 均線有撐。 (2) 時間保底：今日 ${isLastTradingDay ? '是' : '不是'} 本月最後一個交易日。${isLastTradingDay ? '符合定期定額扣款條件(SIGNAL:ADD)。' : '若無技術低點則觀望。'}`; }
+       if (isBond) {
+           dcaStrategy = `【定期定額 (債券型資產)】此為債券部位，不參考KD/MACD等動能指標。邏輯：(1) 價值面：檢查布林通道(20,2)是否觸及下軌(BBL)視為超跌買點。 (2) 折溢價：若出現折價 (Price < NAV) 優先考慮。 (3) 匯率(若為美債)：考量 TWD=X 匯率優勢。 (4) 時間保底：今日 ${isLastTradingDay ? '是' : '不是'} 本月最後一個交易日。${isLastTradingDay ? '符合定期定額扣款條件(SIGNAL:ADD)。' : '若無上述價值低點則觀望。'}`;
+       } else if (classification === 'SATELLITE') {
+           dcaStrategy = `【定期定額 (衛星資產)】邏輯：(1) 技術找低點：檢查 RSI(6/12) 是否出現底背離(股價創低但RSI墊高)，或 MACD 綠柱縮短/翻紅。 (2) 時間保底：今日 ${isLastTradingDay ? '是' : '不是'} 本月最後一個交易日。${isLastTradingDay ? '符合定期定額扣款條件(SIGNAL:ADD)。' : '若無技術低點則觀望。'}`;
+       } else {
+           dcaStrategy = `【定期定額 (核心資產)】邏輯：(1) 技術找低點：檢查 KD(9) 是否低檔(<20)金叉，或股價回測 MA60/MA120 均線有撐。 (2) 時間保底：今日 ${isLastTradingDay ? '是' : '不是'} 本月最後一個交易日。${isLastTradingDay ? '符合定期定額扣款條件(SIGNAL:ADD)。' : '若無技術低點則觀望。'}`;
+       }
     }
 
-    const prompt = `請以一位專業股票分析師的角色，進行個股深度分析。
+    const prompt = `
+      請以一位專業股票分析師的角色，進行個股深度分析。
+      
       **分析標的確認**：
       - 股票代號 (Symbol)：${symbol}
       - 股票名稱 (Name)：${stockName}
       - 資產屬性：${assetType} ${isBond ? '(債券類)' : ''}
+      
       **基本資訊**：
       - 投資定位：${classLabel}
       - 投資模式：${isDCA ? '定期定額 (DCA)' : '單筆投入'}
       - 加碼邏輯：${addonLabel}
       - ${performanceInfo}
+      - ${premDiscInfo}
       - K線收盤價 (Data Date): ${formatPrice(latest.close)}
       - 昨日收盤價 (Prev Close): ${formatPrice(prevClose)}
       - **目前即時價 (Real-time): ${formatPrice(currentPrice)}** (請以此價格判斷當下操作)
-      **關鍵數據 (Key Metrics)**：${keyMetrics}
+      
       **技術指標**：
       - 均線：MA20 ${latest.MA20?formatPrice(latest.MA20):'-'} / MA60 ${latest.MA60?formatPrice(latest.MA60):'-'} / MA120 ${latest.MA120?formatPrice(latest.MA120):'-'}
       - KD指標：K=${latest.K?formatPrice(latest.K):'-'}, D=${latest.D?formatPrice(latest.D):'-'}
       - MACD：OSC=${latest.OSC?formatPrice(latest.OSC):'-'}
       - RSI指標：RSI6=${latest.RSI6?formatPrice(latest.RSI6):'-'}, RSI12=${latest.RSI12?formatPrice(latest.RSI12):'-'}
       - 布林通道：上軌=${latest.BBU?formatPrice(latest.BBU):'-'}, 中軌=${latest.BBM?formatPrice(latest.BBM):'-'}, 下軌=${latest.BBL?formatPrice(latest.BBL):'-'}
+
       **策略模組 (請獨立評估)**：
       1. ${strategyContext}
       2. ${addonStrategy}
       3. ${dcaStrategy}
-      **目標價與操作區間分析 (Mandatory)**：
-      請在 [DETAIL] 的最後一段，根據上述分析提供明確的價格指引：
-      - 若建議為 **ADD (加碼) / REDUCE (減碼)**：請根據技術支撐/壓力位(如布林通道、均線)，提供一個【預估目標價 (Target Price)】或【合理操作區間】。
-      - 若建議為 **ADD_BASIC (定期定額基礎扣款)**：請分析目前的【安全扣款價格上限】或【建議扣款區間】，避免在乖離過大時盲目扣款。
+
       **最終燈號判定規則 (複合燈號)**：
       請根據您的分析，選擇以下其中一個燈號輸出：
       - **SIGNAL: REDUCE**：(紅燈) 若趨勢轉空、跌破關鍵支撐或基本面轉差 (優先級最高)。
@@ -807,25 +951,46 @@ const App = () => {
       - **SIGNAL: ADD_BASIC**：(綠燈) 若「定期定額條件成立」 但 「加碼邏輯不成立」。(建議基礎投資)
       - **SIGNAL: ADD_BONUS**：(綠燈) 若「定期定額條件不成立」 但 「加碼邏輯成立」。(建議加碼投資)
       - **SIGNAL: HOLD**：(黃燈) 若上述皆不成立 (建議觀望)。
+      
       請依序輸出 (請勿使用 Markdown 代碼區塊)：
-      [SUMMARY] (50字內簡評，結合投資定位與目前損益狀況)
-      [DETAIL] (完整分析報告。請分點說明：1. 趨勢判斷 2. 針對「${addonLabel}」的訊號分析 ${isDCA ? '3. 針對「定期定額」的條件分析' : ''} 4. 目標價與操作建議。請使用 Markdown 排版)
-      [SIGNAL] (請輸出單一詞彙，例如：ADD_ALL)`;
+      
+      [SUMMARY]
+      (50字內簡評，結合投資定位與目前損益狀況)
+      
+      [DETAIL]
+      (完整分析報告。請分點說明：1. 趨勢判斷 2. 針對「${addonLabel}」的訊號分析 ${isDCA ? '3. 針對「定期定額」的條件分析' : ''} 4. 綜合操作建議。請使用 Markdown 排版)
+      
+      [SIGNAL]
+      (請輸出單一詞彙，例如：ADD_ALL)
+    `;
 
     try {
       const { text, model } = await callGeminiWithFallback(prompt);
+      
       setUsedModel(model);
+
       const summaryMatch = text.match(/\[SUMMARY\]\s*([\s\S]*?)\s*(?=\[DETAIL\]|$)/i);
       const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
       const signalMatch = text.match(/\[SIGNAL\]\s*(ADD_ALL|ADD_BASIC|ADD_BONUS|REDUCE|HOLD)/i);
-      let summary = summaryMatch ? summaryMatch[1].trim() : "分析完成"; summary = summary.replace(/[`*#]/g, '').replace(/\n/g, ' ').trim();
+
+      let summary = summaryMatch ? summaryMatch[1].trim() : "分析完成";
+      summary = summary.replace(/[`*#]/g, '').replace(/\n/g, ' ').trim();
+
       const detail = detailMatch ? detailMatch[1].trim() : text;
       const signalCode = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
-      setAiSummary(String(summary)); setAiDetail(String(detail)); setAiSignals(prev => ({ ...prev, [symbol]: signalCode }));
+
+      setAiSummary(String(summary));
+      setAiDetail(String(detail));
+      setAiSignals(prev => ({ ...prev, [symbol]: signalCode }));
+      
       updateAiCache(symbol, { summary, detail, signal: signalCode, model }, dataDate); 
       setIsDetailExpanded(true); 
-    } catch (err) { setAiSummary(String(err.message) || "分析暫時無法使用。"); } 
-    finally { setIsAiSummarizing(false); delete analysisInProgressRef.current[symbol]; }
+    } catch (err) {
+      setAiSummary(String(err.message) || "分析暫時無法使用。");
+    } finally {
+      setIsAiSummarizing(false); 
+      delete analysisInProgressRef.current[symbol];
+    }
   };
 
   const fetchHistoricalData = async (symbol, tf) => {
@@ -906,9 +1071,6 @@ const App = () => {
                 if(cachedPrices[key]?.nav) {
                     cachedEtfData[key] = { nav: cachedPrices[key].nav };
                 }
-                if(cachedPrices[key]?.yield) {
-                    cachedEtfData[key] = { ...cachedEtfData[key], yield: cachedPrices[key].yield };
-                }
             });
             setEtfExtraData(cachedEtfData);
             
@@ -927,8 +1089,6 @@ const App = () => {
       });
     } catch (e) { setError('無法載入解析庫'); setLoading(false); }
   };
-
-  // --- 事件處理函式 (Event Handlers) ---
 
   const handleFetchButton = () => { if (!sheetUrl) { alert("請輸入 URL"); return; } performFetch(sheetUrl); };
   
@@ -983,45 +1143,16 @@ const App = () => {
     }
   };
 
-  // 補回遺失的 handleSettingChange
-  const handleSettingChange = (symbol, key, value) => {
-    const currentSettings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID' };
-    const newSettings = { ...investmentSettings, [symbol]: { ...currentSettings, [key]: value } };
-    setInvestmentSettings(newSettings);
-    localStorage.setItem('investment_settings', JSON.stringify(newSettings));
-    
-    if (key === 'type') {
-        const newClassifications = { ...assetClassifications, [symbol]: value };
-        setAssetClassifications(newClassifications);
-        localStorage.setItem('investment_asset_classifications', JSON.stringify(newClassifications));
-    }
+  const getResponsiveFontSize = (text) => {
+    const str = String(text); const len = str.length;
+    if (len > 25) return 'text-xs';
+    if (len > 18) return 'text-sm';
+    if (len > 14) return 'text-base';
+    if (len > 11) return 'text-lg';
+    if (len > 9) return 'text-xl';
+    return 'text-2xl';
   };
 
-  const requestSort = (key) => {
-    let direction = 'desc'; 
-    if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
-    setSortConfig({ key, direction });
-  };
-
-  const moveItem = (symbol, direction) => {
-    if (sortConfig.key !== 'manual') setSortConfig({ key: 'manual', direction: 'asc' });
-    setCustomOrder(prev => {
-      const currentIndex = prev.indexOf(symbol);
-      if (currentIndex === -1) return prev;
-      const newIndex = currentIndex + direction;
-      if (newIndex < 0 || newIndex >= prev.length) return prev;
-      const newOrder = [...prev];
-      [newOrder[currentIndex], newOrder[newIndex]] = [newOrder[newIndex], newOrder[currentIndex]];
-      return newOrder;
-    });
-  };
-
-  const SortIcon = ({ columnKey }) => {
-    if (sortConfig.key !== columnKey) return <ArrowUpDown className="w-3 h-3 ml-1 text-slate-600 opacity-50" />;
-    return sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3 ml-1 text-blue-400" /> : <ArrowDown className="w-3 h-3 ml-1 text-blue-400" />;
-  };
-
-  // 6. Effects (All functions must be defined before this)
   useEffect(() => {
     const savedUrl = localStorage.getItem('investment_sheet_url');
     const savedKey = localStorage.getItem('gemini_api_key');
@@ -1034,14 +1165,7 @@ const App = () => {
     const savedClassifications = localStorage.getItem('investment_asset_classifications');
 
     if (savedKey) setGeminiApiKey(savedKey);
-    // Validate if saved model still exists, else default to first available
-    const isValidModel = AVAILABLE_MODELS.some(m => m.id === savedModel);
-    if (savedModel && isValidModel) {
-        setSelectedModel(savedModel);
-    } else {
-        setSelectedModel(AVAILABLE_MODELS[2].id); // Default to Gemini 1.5 Flash
-    }
-    
+    if (savedModel) setSelectedModel(savedModel);
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount));
     if (savedSort) setSortConfig(JSON.parse(savedSort));
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
@@ -1108,6 +1232,159 @@ const App = () => {
     }
   }, [chatMessages]);
 
+  const summary = useMemo(() => {
+    const totalCost = portfolioData.reduce((sum, item) => sum + item.costBasis, 0);
+    const totalValue = portfolioData.reduce((sum, item) => sum + item.marketValue, 0);
+    const totalPL = portfolioData.reduce((sum, item) => sum + item.profitLoss, 0); 
+    const totalROI = totalCost > 0 ? totalPL / totalCost : 0;
+    return { totalCost, totalValue, totalPL, totalROI };
+  }, [portfolioData]);
+
+  const allocationData = useMemo(() => {
+    const group = {};
+    portfolioData.forEach(item => { const cat = item['類別'] || '其他'; group[cat] = (group[cat] || 0) + item.marketValue; });
+    const total = Object.values(group).reduce((a, b) => a + b, 0);
+    return Object.keys(group).map(key => ({ name: key, value: group[key], percentage: total > 0 ? (group[key] / total) : 0 }));
+  }, [portfolioData]);
+
+  const aggregatedHoldings = useMemo(() => {
+    const map = new Map();
+    portfolioData.forEach(item => {
+      const key = item['標的'];
+      if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, costBasisRaw: 0, marketValue: 0, profitLoss: 0, estimateFee: 0, estimateTax: 0, dates: new Set(), isUS: item.isUS }); }
+      const entry = map.get(key);
+      entry.shares += item.shares; entry.costBasis += item.costBasis; entry.marketValue += item.marketValue; 
+      entry.costBasisRaw += (item.buyPriceRaw * item.shares); 
+      entry.profitLoss += item.profitLoss; 
+      entry.estimateFee += item.estimateFee;
+      entry.estimateTax += item.estimateTax;
+      entry.dates.add(item['日期']);
+      if (item.currentPrice !== item.buyPrice) entry.currentPrice = item.currentPrice;
+      if (item.currentPriceRaw) entry.currentPriceRaw = item.currentPriceRaw; 
+    });
+    return Array.from(map.values()).map(item => {
+      const roi = item.costBasis > 0 ? item.profitLoss / item.costBasis : 0;
+      const sortedDates = Array.from(item.dates).sort((a, b) => new Date(a) - new Date(b));
+      const latestDate = sortedDates[sortedDates.length - 1];
+      
+      const avgPriceTwd = item.shares > 0 ? item.costBasis / item.shares : 0;
+      const avgPriceRaw = item.shares > 0 ? item.costBasisRaw / item.shares : 0;
+      
+      const finalBuyPrice = item.isUS ? avgPriceRaw : avgPriceTwd;
+      const finalCurrentPrice = item.isUS ? item.currentPriceRaw : item.currentPrice;
+      
+      return { 
+        ...item, 
+        buyPrice: finalBuyPrice, 
+        currentPrice: finalCurrentPrice, 
+        buyPriceRaw: avgPriceRaw, 
+        currentPriceRaw: item.currentPriceRaw,
+        roi, 
+        '日期': latestDate 
+      };
+    });
+  }, [portfolioData]);
+
+  useEffect(() => {
+    if (aggregatedHoldings.length > 0) {
+      setCustomOrder(prev => {
+        const currentSymbols = aggregatedHoldings.map(h => h['標的']);
+        if (prev.length === 0) return currentSymbols;
+        const existing = prev.filter(s => currentSymbols.includes(s));
+        const newSymbols = currentSymbols.filter(s => !prev.includes(s));
+        const combined = [...existing, ...newSymbols];
+        if (JSON.stringify(prev) !== JSON.stringify(combined)) return combined;
+        return prev;
+      });
+    }
+  }, [aggregatedHoldings]);
+
+  useEffect(() => {
+    if (customOrder.length > 0) {
+      localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
+    }
+  }, [customOrder]);
+
+  useEffect(() => {
+    localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
+  }, [sortConfig]);
+
+  const sortedHoldings = useMemo(() => {
+    let sortableItems = [...aggregatedHoldings];
+    if (sortConfig.key === 'manual') {
+       sortableItems.sort((a, b) => {
+         const idxA = customOrder.indexOf(a['標的']);
+         const idxB = customOrder.indexOf(b['標的']);
+         if (idxA === -1) return 1; if (idxB === -1) return -1;
+         return idxA - idxB;
+       });
+    } else if (sortConfig.key !== null) {
+      sortableItems.sort((a, b) => {
+        let aValue = a[sortConfig.key]; let bValue = b[sortConfig.key];
+        if (sortConfig.key === '標的') aValue = a['標的']; if (sortConfig.key === '類別') aValue = a['類別'];
+        if (typeof aValue === 'string') { aValue = aValue.toLowerCase(); bValue = bValue.toLowerCase(); }
+        if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return sortableItems;
+  }, [aggregatedHoldings, sortConfig, customOrder]);
+
+  const requestSort = (key) => {
+    let direction = 'desc'; 
+    if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
+    setSortConfig({ key, direction });
+  };
+
+  const moveItem = (symbol, direction) => {
+    if (sortConfig.key !== 'manual') setSortConfig({ key: 'manual', direction: 'asc' });
+    setCustomOrder(prev => {
+      const currentIndex = prev.indexOf(symbol);
+      if (currentIndex === -1) return prev;
+      const newIndex = currentIndex + direction;
+      if (newIndex < 0 || newIndex >= prev.length) return prev;
+      const newOrder = [...prev];
+      [newOrder[currentIndex], newOrder[newIndex]] = [newOrder[newIndex], newOrder[currentIndex]];
+      return newOrder;
+    });
+  };
+
+  const tradableSymbols = useMemo(() => sortedHoldings.filter(h => h['類別'] !== '定存'), [sortedHoldings]);
+  const currentChartData = useMemo(() => {
+    const baseData = historicalData[`${selectedHistorySymbol}_${timeframe}`];
+    if (!baseData || !selectedHistorySymbol) return [];
+    const buys = portfolioData.filter(p => p['標的'] === selectedHistorySymbol);
+    const merged = [...baseData];
+    buys.forEach(buy => {
+        const rawDate = (buy['日期'] || '').toString().trim().replace(/\//g, '-');
+        
+        let closestIdx = merged.findIndex(pt => pt.date === rawDate);
+        if (closestIdx === -1) {
+            const buyDateTs = new Date(rawDate).getTime();
+            if (!isNaN(buyDateTs)) {
+                let minDiff = Infinity;
+                merged.forEach((pt, i) => {
+                    const ptDateTs = new Date(pt.date).getTime();
+                    const diff = Math.abs(buyDateTs - ptDateTs);
+                    if (diff < minDiff && diff < 604800000) { 
+                        minDiff = diff; 
+                        closestIdx = i; 
+                    }
+                });
+            }
+        }
+        if (closestIdx !== -1) {
+            merged[closestIdx] = { ...merged[closestIdx], buyPricePoint: buy['價格'], buyAction: buy };
+        }
+    });
+    return merged;
+  }, [historicalData, selectedHistorySymbol, timeframe, portfolioData]);
+
+  const SortIcon = ({ columnKey }) => {
+    if (sortConfig.key !== columnKey) return <ArrowUpDown className="w-3 h-3 ml-1 text-slate-600 opacity-50" />;
+    return sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3 ml-1 text-blue-400" /> : <ArrowDown className="w-3 h-3 ml-1 text-blue-400" />;
+  };
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20 md:pb-0">
@@ -1118,7 +1395,6 @@ const App = () => {
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
             <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室</span>
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
-            {usBondYield && <span className="ml-2 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Activity className="w-3 h-3 mr-1"/> US10Y: {usBondYield}%</span>}
           </div>
           <div className="flex space-x-4">
             {['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (
@@ -1138,67 +1414,158 @@ const App = () => {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 md:py-8">
         {priceLoading && <div className="mb-6 bg-blue-900/30 border border-blue-500/30 rounded-lg p-3 flex items-center animate-pulse"><Loader2 className="w-5 h-5 text-blue-400 animate-spin mr-3" /><span className="text-sm text-blue-200">{loadingMessage}</span></div>}
-        {updateError && <div className="mb-6 bg-red-900/30 border border-red-500/30 rounded-lg p-3 flex items-center"><AlertTriangle className="w-5 h-5 text-red-400 mr-3 flex-shrink-0" /><span className="text-sm text-red-200">{String(updateError)}</span></div>}
+        {updateError && <div className="mb-6 bg-red-900/30 border border-red-500/30 rounded-lg p-3 flex items-center"><AlertTriangle className="w-5 h-5 text-red-400 mr-3 flex-shrink-0" /><span className="text-sm text-red-200">{updateError}</span></div>}
 
         {activeTab === 'overview' && (
           <div className="space-y-8">
+            {/* 1. Summary Cards */}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                {[
                  { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' },
                  { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' },
                  { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' },
                  { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' }
-               ].map((item, idx) => (
+               ].map((item, idx) => {
+                 const fontSizeClass = getResponsiveFontSize(item.value);
+                 return (
                    <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center">
                      <div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div>
-                     <div className="ml-5 flex-1 min-w-0"><p className="text-sm font-medium text-slate-400 truncate">{item.label}</p><p className={`${getResponsiveFontSize(item.value)} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{item.value}</p></div>
+                     <div className="ml-5 flex-1 min-w-0">
+                       <p className="text-sm font-medium text-slate-400 truncate">{item.label}</p>
+                       <p className={`${fontSizeClass} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{item.value}</p>
+                     </div>
                    </div>
-               ))}
+                 );
+               })}
             </div>
             
+            {/* 2. Charts */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                 <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
                   <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><PieIcon className="w-5 h-5 mr-2 text-blue-400" /> 資產類別配置</h3>
                   <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
                     {allocationData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">{allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}</Pie><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} /><Legend /></PieChart></ResponsiveContainer>
-                    ) : <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>}
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">
+                            {allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}
+                          </Pie>
+                          <RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} />
+                          <Legend content={(props) => <ul className="flex flex-wrap justify-center gap-4 mt-4">{props.payload.map((entry, index) => <li key={`item-${index}`} className="flex items-center text-sm text-slate-300"><span className="block w-3 h-3 rounded-full mr-2" style={{ backgroundColor: entry.color }}></span>{entry.value} <span className="ml-1 text-slate-400">({formatPercent(allocationData.find(d => d.name === entry.value)?.percentage)})</span></li>)}</ul>} verticalAlign="bottom" />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>
+                    )}
                   </div>
                 </div>
                 <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
-                  <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><BarChart2 className="w-5 h-5 mr-2 text-purple-400" /> 持股標的分佈</h3>
+                  <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><BarChart2 className="w-5 h-5 mr-2 text-purple-400" /> 持股標的分佈 (不含定存)</h3>
                   <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
                     {tradableSymbols.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%"><BarChart data={tradableSymbols.map(item => ({ name: item['名稱'], value: item.marketValue })).sort((a, b) => b.value - a.value)} layout="vertical"><CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} /><XAxis type="number" stroke="#94a3b8" tickFormatter={(val) => `${val / 1000}k`} /><YAxis dataKey="name" type="category" stroke="#94a3b8" width={80} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} /><Bar dataKey="value" fill="#8B5CF6" radius={[0, 4, 4, 0]}>{tradableSymbols.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}</Bar></BarChart></ResponsiveContainer>
-                    ) : <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>}
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={tradableSymbols.map(item => ({ name: item['名稱'], value: item.marketValue })).sort((a, b) => b.value - a.value)} layout="vertical" margin={{ top: 5, right: 40, left: 40, bottom: 5 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
+                          <XAxis type="number" stroke="#94a3b8" tickFormatter={(val) => `${val / 1000}k`} />
+                          <YAxis dataKey="name" type="category" stroke="#94a3b8" width={80} />
+                          <RechartsTooltip cursor={{fill: '#334155', opacity: 0.4}} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} itemStyle={{ color: '#FACC15' }} formatter={(value) => formatCurrency(value)} />
+                          <Bar dataKey="value" fill="#8B5CF6" radius={[0, 4, 4, 0]} barSize={30}>
+                            {tradableSymbols.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>
+                    )}
                   </div>
                 </div>
             </div>
-            
-            {/* AI Health Check Section */}
+
+            {/* 3. NEW AI Portfolio Health Check Section */}
             <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-xl border border-slate-700 shadow-lg relative overflow-hidden">
                 <div className="absolute top-0 right-0 w-64 h-64 bg-purple-500/10 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none"></div>
+                
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 z-10 relative">
-                    <div><h3 className="text-xl font-bold text-white flex items-center"><Activity className="w-6 h-6 mr-2 text-purple-400" /> AI 投資組合總體健檢室</h3><p className="text-sm text-slate-400 mt-1">由 AI 擔任首席投資長，針對您的資產配置、風險分散度與績效進行綜合評分。</p></div>
-                    {!portfolioHealth && !isHealthChecking && (<button onClick={generatePortfolioHealthCheck} className="mt-4 md:mt-0 px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium shadow-lg hover:shadow-purple-500/25 transition-all flex items-center"><BrainCircuit className="w-5 h-5 mr-2" />開始健檢</button>)}
+                    <div>
+                        <h3 className="text-xl font-bold text-white flex items-center">
+                            <Activity className="w-6 h-6 mr-2 text-purple-400" /> 
+                            AI 投資組合總體健檢室
+                        </h3>
+                        <p className="text-sm text-slate-400 mt-1">由 AI 擔任首席投資長，針對您的資產配置、風險分散度與績效進行綜合評分。</p>
+                    </div>
+                    {!portfolioHealth && !isHealthChecking && (
+                        <button 
+                            onClick={generatePortfolioHealthCheck}
+                            className="mt-4 md:mt-0 px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium shadow-lg hover:shadow-purple-500/25 transition-all flex items-center"
+                        >
+                            <BrainCircuit className="w-5 h-5 mr-2" />
+                            開始健檢
+                        </button>
+                    )}
                 </div>
-                {isHealthChecking && <div className="flex flex-col items-center justify-center py-12"><Loader2 className="w-12 h-12 text-purple-500 animate-spin mb-4" /><p className="text-slate-300 font-medium">AI 正在分析您的投資組合風險結構...</p></div>}
+
+                {isHealthChecking && (
+                    <div className="flex flex-col items-center justify-center py-12">
+                        <Loader2 className="w-12 h-12 text-purple-500 animate-spin mb-4" />
+                        <p className="text-slate-300 font-medium">AI 正在分析您的投資組合風險結構...</p>
+                        <p className="text-slate-500 text-sm mt-1">正在計算夏普比率、集中度風險與資產相關性</p>
+                    </div>
+                )}
+
                 {portfolioHealth && (
                     <div className="animate-fade-in-up">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center"><span className="text-slate-400 text-sm mb-2">健康度評分</span><div className="relative"><svg className="w-24 h-24 transform -rotate-90"><circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-slate-700" /><circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" strokeDasharray={251.2} strokeDashoffset={251.2 - (251.2 * portfolioHealth.score) / 100} className={portfolioHealth.score >= 80 ? "text-green-500" : portfolioHealth.score >= 60 ? "text-yellow-500" : "text-red-500"} /></svg><span className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-3xl font-bold text-white">{portfolioHealth.score}</span></div></div>
-                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center"><span className="text-slate-400 text-sm mb-2">風險屬性判定</span><ShieldAlert className={`w-12 h-12 mb-2 ${portfolioHealth.risk.includes('高') ? 'text-red-400' : portfolioHealth.risk.includes('低') ? 'text-green-400' : 'text-yellow-400'}`} /><span className="text-xl font-bold text-white">{portfolioHealth.risk}</span></div>
-                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 md:col-span-1"><span className="text-slate-400 text-sm mb-2 block text-center md:text-left">AI 調整建議</span><ul className="space-y-2 mt-2">{portfolioHealth.suggestions.slice(0, 3).map((suggestion, idx) => (<li key={idx} className="flex items-start text-sm text-slate-300"><ClipboardCheck className="w-4 h-4 text-purple-400 mr-2 mt-0.5 flex-shrink-0" />{suggestion.replace(/^\d+\.\s*/, '').replace(/^- /, '')}</li>))}</ul></div>
+                            {/* Score Card */}
+                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center">
+                                <span className="text-slate-400 text-sm mb-2">健康度評分</span>
+                                <div className="relative">
+                                    <svg className="w-24 h-24 transform -rotate-90">
+                                        <circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-slate-700" />
+                                        <circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" strokeDasharray={251.2} strokeDashoffset={251.2 - (251.2 * portfolioHealth.score) / 100} className={portfolioHealth.score >= 80 ? "text-green-500" : portfolioHealth.score >= 60 ? "text-yellow-500" : "text-red-500"} />
+                                    </svg>
+                                    <span className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-3xl font-bold text-white">{portfolioHealth.score}</span>
+                                </div>
+                            </div>
+
+                            {/* Risk Level */}
+                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center">
+                                <span className="text-slate-400 text-sm mb-2">風險屬性判定</span>
+                                <ShieldAlert className={`w-12 h-12 mb-2 ${portfolioHealth.risk.includes('高') ? 'text-red-400' : portfolioHealth.risk.includes('低') ? 'text-green-400' : 'text-yellow-400'}`} />
+                                <span className="text-xl font-bold text-white">{portfolioHealth.risk}</span>
+                            </div>
+
+                            {/* Suggestions Summary */}
+                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 md:col-span-1">
+                                <span className="text-slate-400 text-sm mb-2 block text-center md:text-left">AI 調整建議</span>
+                                <ul className="space-y-2 mt-2">
+                                    {portfolioHealth.suggestions.slice(0, 3).map((suggestion, idx) => (
+                                        <li key={idx} className="flex items-start text-sm text-slate-300">
+                                            <ClipboardCheck className="w-4 h-4 text-purple-400 mr-2 mt-0.5 flex-shrink-0" />
+                                            {suggestion.replace(/^\d+\.\s*/, '').replace(/^- /, '')}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
                         </div>
-                        <div className="bg-slate-900/50 rounded-lg p-5 border border-slate-700/50"><h4 className="text-white font-medium mb-2 flex items-center"><MessageSquare className="w-4 h-4 mr-2 text-blue-400" /> 總體分析報告</h4><p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">{portfolioHealth.comment}</p></div>
-                        <div className="mt-4 flex justify-end"><button onClick={generatePortfolioHealthCheck} className="text-xs text-slate-500 hover:text-slate-300 flex items-center"><RefreshCw className="w-3 h-3 mr-1" /> 重新健檢</button></div>
+
+                        {/* Detailed Comment */}
+                        <div className="bg-slate-900/50 rounded-lg p-5 border border-slate-700/50">
+                            <h4 className="text-white font-medium mb-2 flex items-center"><MessageSquare className="w-4 h-4 mr-2 text-blue-400" /> 總體分析報告</h4>
+                            <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">{portfolioHealth.comment}</p>
+                        </div>
+                        
+                        <div className="mt-4 flex justify-end">
+                            <button onClick={generatePortfolioHealthCheck} className="text-xs text-slate-500 hover:text-slate-300 flex items-center">
+                                <RefreshCw className="w-3 h-3 mr-1" /> 重新健檢
+                            </button>
+                        </div>
                     </div>
                 )}
             </div>
           </div>
         )}
 
-        {/* ... (Other Tabs omitted for brevity but logic is preserved in full code block) ... */}
+        {/* ... (Holdings, History, Chat, Config tabs remain mostly the same, just keeping structure) ... */}
         {activeTab !== 'overview' && activeTab !== 'chat' && (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
              {[
@@ -1206,21 +1573,67 @@ const App = () => {
                { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' },
                { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' },
                { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' }
-             ].map((item, idx) => (
+             ].map((item, idx) => {
+               const fontSizeClass = getResponsiveFontSize(item.value);
+               return (
                  <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center">
                    <div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div>
-                   <div className="ml-5 flex-1 min-w-0"><p className="text-sm font-medium text-slate-400 truncate">{item.label}</p><p className={`${getResponsiveFontSize(item.value)} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{item.value}</p></div>
+                   <div className="ml-5 flex-1 min-w-0">
+                     <p className="text-sm font-medium text-slate-400 truncate">{item.label}</p>
+                     <p className={`${fontSizeClass} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{item.value}</p>
+                   </div>
                  </div>
-             ))}
+               );
+             })}
           </div>
         )}
         
         {activeTab === 'chat' && (
             <div className="max-w-4xl mx-auto h-[70vh] flex flex-col bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
-                {/* Chat UI */}
-                <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center"><Bot className="w-6 h-6 text-purple-400 mr-2" /><h3 className="font-semibold text-white">AI 投資顧問</h3></div>
-                <div className="flex-1 overflow-y-auto p-4 space-y-4">{chatMessages.map((msg, idx) => (<div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'}`}><p className="text-sm whitespace-pre-wrap">{msg.content}</p></div></div>))}{isChatLoading && (<div className="flex justify-start"><div className="bg-slate-700 p-3 rounded-lg flex items-center"><Loader2 className="w-4 h-4 animate-spin text-purple-400 mr-2" /><span className="text-xs text-slate-400">AI 正在思考中...</span></div></div>)}<div ref={chatEndRef} /></div>
-                <div className="p-4 border-t border-slate-700 bg-slate-900/50"><div className="flex gap-2"><input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleChatSend()} placeholder="輸入您的問題..." className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 text-sm" disabled={isChatLoading} /><button onClick={handleChatSend} disabled={isChatLoading || !chatInput.trim()} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg disabled:opacity-50 transition-colors"><Send className="w-4 h-4" /></button></div></div>
+                <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center">
+                    <Bot className="w-6 h-6 text-purple-400 mr-2" />
+                    <h3 className="font-semibold text-white">AI 投資顧問</h3>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {chatMessages.map((msg, idx) => (
+                        <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'}`}>
+                                <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                            </div>
+                        </div>
+                    ))}
+                    {isChatLoading && (
+                        <div className="flex justify-start">
+                            <div className="bg-slate-700 p-3 rounded-lg flex items-center">
+                                <Loader2 className="w-4 h-4 animate-spin text-purple-400 mr-2" />
+                                <span className="text-xs text-slate-400">AI 正在思考中...</span>
+                            </div>
+                        </div>
+                    )}
+                    <div ref={chatEndRef} />
+                </div>
+
+                <div className="p-4 border-t border-slate-700 bg-slate-900/50">
+                    <div className="flex gap-2">
+                        <input 
+                            type="text" 
+                            value={chatInput} 
+                            onChange={(e) => setChatInput(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleChatSend()}
+                            placeholder="輸入您的問題..." 
+                            className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 text-sm"
+                            disabled={isChatLoading}
+                        />
+                        <button 
+                            onClick={handleChatSend} 
+                            disabled={isChatLoading || !chatInput.trim()}
+                            className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg disabled:opacity-50 transition-colors"
+                        >
+                            <Send className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
             </div>
         )}
 
@@ -1230,7 +1643,16 @@ const App = () => {
               <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center sticky top-0 z-10"><h3 className="font-semibold text-white flex items-center"><LineIcon className="w-5 h-5 mr-2 text-blue-400" /> 持股列表</h3></div>
               <div className={`overflow-y-auto flex-1 p-2 space-y-2 ${isAiSummarizing ? 'opacity-50 pointer-events-none' : ''}`}>
                 {tradableSymbols.map((item) => (
-                  <button key={item['標的']} disabled={isAiSummarizing} onClick={() => { if (selectedHistorySymbol !== item['標的']) { setSelectedHistorySymbol(item['標的']); }}} className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${selectedHistorySymbol === item['標的'] ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-slate-700/30 border-transparent text-slate-300 hover:bg-slate-700'}`}>
+                  <button 
+                      key={item['標的']} 
+                      disabled={isAiSummarizing}
+                      onClick={() => { 
+                          if (selectedHistorySymbol !== item['標的']) {
+                              setSelectedHistorySymbol(item['標的']);
+                          }
+                      }} 
+                      className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${selectedHistorySymbol === item['標的'] ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-slate-700/30 border-transparent text-slate-300 hover:bg-slate-700'}`}
+                  >
                     <div className="flex justify-between items-center"><span className="font-bold">{item['標的']}</span><span className="text-xs opacity-70">{item['類別']}</span></div>
                     <div className="text-sm mt-1 truncate">{item['名稱']}</div>
                     <div className="flex justify-between mt-1 text-xs opacity-60"><span>{formatCurrency(item.marketValue)}</span><span className={item.profitLoss >= 0 ? 'text-red-300' : 'text-green-300'}>{formatPercent(item.roi)}</span></div>
@@ -1240,21 +1662,44 @@ const App = () => {
             </div>
 
             <div className="lg:col-span-3 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-4 md:p-6 flex flex-col relative" style={{ minHeight: '600px' }}>
-              {/* History Chart & AI Analysis UI */}
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-2">
                 <h3 className="text-xl font-bold text-white flex items-center">{selectedHistorySymbol} <span className="ml-2 text-base font-normal text-slate-400">{tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱']}</span></h3>
-                <div className={`flex space-x-2 self-end sm:self-auto ${isAiSummarizing ? 'opacity-50 pointer-events-none' : ''}`}>{[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (<button key={tf.id} disabled={isAiSummarizing} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{tf.label}</button>))}</div>
+                <div className={`flex space-x-2 self-end sm:self-auto ${isAiSummarizing ? 'opacity-50 pointer-events-none' : ''}`}>
+                  {[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (
+                    <button key={tf.id} disabled={isAiSummarizing} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{tf.label}</button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mb-4 bg-slate-900/50 p-3 rounded-lg border border-slate-700 overflow-x-auto">
+                <div className="text-xs text-slate-400 mb-2 flex items-center whitespace-nowrap"><Info className="w-3 h-3 mr-1" /> 買點策略圖示說明</div>
+                <div className="flex gap-4 min-w-max">
+                  {Object.entries(STRATEGY_CONFIG).filter(([key]) => key !== 'default').map(([key, config]) => (
+                    <div key={key} className="flex items-center space-x-2"><svg width="12" height="12" className="overflow-visible">{renderShape(config.shape, 6, 6, config.color, 5)}</svg><span className="text-xs text-slate-300">{config.label}</span></div>
+                  ))}
+                </div>
               </div>
               
-              {/* Chart Component Omitted for Brevity - Standard Recharts Implementation */}
               {historyLoading ? <div className="flex-1 flex items-center justify-center min-h-[400px]"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div> : currentChartData && currentChartData.length > 0 ? (
                 <div className="flex flex-col space-y-2">
-                  <div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip content={<CustomChartTooltip />} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} /><Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" /><Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" /></ComposedChart></ResponsiveContainer></div>
+                  <div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId">
+                    <defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} />
+                    <RechartsTooltip content={<CustomChartTooltip />} />
+                    <Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} />
+                    {/* Bollinger Bands */}
+                    <Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" />
+                    <Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
+                    <Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} />
+                    <Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" />
+                  </ComposedChart></ResponsiveContainer></div>
                   <div className="h-32 w-full border-t border-slate-700 pt-2"><p className="text-xs text-slate-400 mb-1 ml-2">KD (9, 3, 3)</p><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" hide /><YAxis stroke="#94a3b8" domain={[0, 100]} ticks={[20, 50, 80]} tick={{fontSize: 10}} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} /><ReferenceLine y={80} stroke="#EF4444" strokeDasharray="3 3" /><ReferenceLine y={20} stroke="#10B981" strokeDasharray="3 3" /><Line type="monotone" dataKey="K" stroke="#F59E0B" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="D" stroke="#3B82F6" dot={false} strokeWidth={1} /></ComposedChart></ResponsiveContainer></div>
+                  <div className="h-32 w-full border-t border-slate-700 pt-2"><p className="text-xs text-slate-400 mb-1 ml-2">MACD (12, 26, 9)</p><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" hide /><YAxis stroke="#94a3b8" tick={{fontSize: 10}} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} /><Bar dataKey="OSC" name="OSC" barSize={4}>{currentChartData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.OSC >= 0 ? '#EF4444' : '#10B981'} />)}</Bar><Line type="monotone" dataKey="DIF" stroke="#3B82F6" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="Signal" name="MACD" stroke="#F59E0B" dot={false} strokeWidth={1} /></ComposedChart></ResponsiveContainer></div>
+                  {/* NEW RSI CHART SECTION */}
+                  <div className="h-32 w-full border-t border-slate-700 pt-2"><p className="text-xs text-slate-400 mb-1 ml-2">RSI (6, 12)</p><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" hide /><YAxis stroke="#94a3b8" domain={[0, 100]} ticks={[30, 50, 70]} tick={{fontSize: 10}} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} /><ReferenceLine y={70} stroke="#EF4444" strokeDasharray="3 3" /><ReferenceLine y={30} stroke="#10B981" strokeDasharray="3 3" /><Line type="monotone" dataKey="RSI6" stroke="#F472B6" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="RSI12" stroke="#60A5FA" dot={false} strokeWidth={1} /></ComposedChart></ResponsiveContainer></div>
                 </div>
               ) : <div className="flex-1 flex items-center justify-center min-h-[400px] text-slate-500">{historyError ? <span className="text-red-400">{historyError}</span> : "請選擇左側標的以查看走勢"}</div>}
 
-              {/* AI Section */}
               <div className="mt-4 pt-4 border-t border-slate-700">
                 <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符)</span>} {selectedModel !== usedModel && !isCachedResult && <span className="text-yellow-400 ml-1 text-[10px]">(自動切換)</span>}</span>}
                 {/* NEW COMPOSITE SIGNAL DISPLAY */}
@@ -1493,8 +1938,8 @@ const App = () => {
                           </div>
                         </td>
 
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{formatPrice(row.buyPriceRaw || row.buyPrice)}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{formatPrice(row.currentPriceRaw || row.currentPrice)}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.isUS ? '$' : ''}{formatPrice(row.buyPriceRaw || row.buyPrice)}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{row.isUS ? '$' : ''}{formatPrice(row.currentPriceRaw || row.currentPrice)}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.shares.toLocaleString()}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold relative group">
                           <span className={`cursor-help border-b border-dotted ${(row.profitLoss || 0) >= 0 ? 'text-red-500 border-red-500' : 'text-green-500 border-green-500'}`}>{(row.profitLoss || 0) > 0 ? '+' : ''}{formatCurrency(row.profitLoss)}</span>
@@ -1563,7 +2008,7 @@ const App = () => {
                 <p className="mt-1 text-xs text-slate-500 ml-7">* 預設使用 Flash 模型以節省額度，Pro 模型分析更精準但速度較慢。</p>
               </div>
 
-              {error && <div className="p-3 bg-red-900/30 border border-red-500/50 text-red-300 rounded-md text-sm">{String(error)}</div>}
+              {error && <div className="p-3 bg-red-900/30 border border-red-500/50 text-red-300 rounded-md text-sm">{error}</div>}
               <button onClick={handleFetchButton} disabled={loading} className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 focus:ring-offset-slate-800 transition-colors ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}>{loading ? '資料載入中...' : '匯入並更新股價'}</button>
             </div>
           </div>
@@ -1573,4 +2018,6 @@ const App = () => {
   );
 };
 
-export default App;
+export default function App() {
+  return <Dashboard />;
+}
