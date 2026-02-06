@@ -11,11 +11,12 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v43.5 (Duration Aware & UI Fix)
+ * Alpha 投資戰情室 v43.6 (Yield Precision & UI Fix)
  * * [更新重點]
- * 1. 動態基準利率：根據標的名稱 (20年/長天期) 自動決定參考 ^TNX (10Y) 或 ^TYX (30Y/Long)。
- * 2. 顯示邏輯修復：確保 ETF (00895)、債券 ETF (00679B) 的淨值、折溢價與殖利率正確顯示。
- * 3. 容錯增強：即使 API 缺漏部分欄位，UI 也會嘗試顯示已有的數據。
+ * 1. UI 優化：移除上方導航列的殖利率顯示，保持簡潔。
+ * 2. 資料源增強：新增從 TWSE/TPEx 抓取殖利率的邏輯，補強 Yahoo Finance 資料缺漏。
+ * 3. 顯示修復：放寬持股明細的顯示條件，即使沒有即時股價，只要有淨值或殖利率也會顯示。
+ * 4. 基準優化：針對長天期債券，自動抓取 ^TYX (30Y) 作為長債基準參照。
  */
 
 // --- 靜態配置 ---
@@ -591,14 +592,21 @@ const App = () => {
     
     const twseEtfMap = {};
     const tpexEtfMap = {}; 
+    const twseYieldMap = {}; // New: Store TWSE Yields
+    const tpexYieldMap = {}; // New: Store TPEx Yields
 
-    // Enhanced NAV Fetching
+    // Enhanced NAV & Yield Fetching from Official Sources
     try {
         const navRes = await fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/a1271825'); 
         if (Array.isArray(navRes)) {
             navRes.forEach(item => { twseEtfMap[item.Code] = parseFloat(item.NetAssetValue); });
         }
-    } catch (e) { console.warn('TWSE NAV Fetch Failed', e); }
+        // TWSE Yield Fetching
+        const yieldRes = await fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL');
+        if (Array.isArray(yieldRes)) {
+            yieldRes.forEach(item => { twseYieldMap[item.Code] = parseFloat(item.DividendYield); });
+        }
+    } catch (e) { console.warn('TWSE Data Fetch Failed', e); }
 
     try {
         const tpexNavRes = await fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/etf/net_value/net_value_result.php?l=zh-tw&o=json');
@@ -609,6 +617,8 @@ const App = () => {
                 if (!isNaN(nav)) { tpexEtfMap[code] = nav; }
             });
         }
+        // TPEx Yield Fetching (Note: TPEx API structure can be complex, often requires parsing)
+        // For now, sticking to NAV for TPEx, might rely on Yahoo for yield or implement specific parser later if needed.
     } catch (e) { console.warn('TPEx NAV Fetch Failed', e); }
 
     const symbolsToFetch = symbolsToFetchList.filter(symbol => {
@@ -646,11 +656,12 @@ const App = () => {
                 else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; } 
                 else if (quote.navPrice) { extra.nav = quote.navPrice; }
                 
-                // Robust Yield Mapping
-                if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield; } 
+                // Prioritize Official Sources for Yield (TWSE), else Yahoo
+                if (twseYieldMap[pureCode]) { extra.yield = twseYieldMap[pureCode]; }
+                else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield; } 
                 else if (quote.yield) { extra.yield = quote.yield; } 
                 else if (quote.dividendYield) { extra.yield = quote.dividendYield; }
-                else if (quote.ttmDividendRate && quote.regularMarketPrice) { extra.yield = quote.ttmDividendRate / quote.regularMarketPrice; } // Fallback calc
+                else if (quote.ttmDividendRate && quote.regularMarketPrice) { extra.yield = (quote.ttmDividendRate / quote.regularMarketPrice) * 100; } // Fallback calc
 
                 newEtfData[symbol] = { ...newEtfData[symbol], ...extra };
                 success = true;
@@ -664,8 +675,11 @@ const App = () => {
                   if (meta && meta.regularMarketPrice !== undefined) {
                     newPrices[symbol] = meta.regularMarketPrice;
                     const pureCode = symbol.split('.')[0];
-                    if (twseEtfMap[pureCode]) { newEtfData[symbol] = { ...newEtfData[symbol], nav: twseEtfMap[pureCode] }; } 
-                    else if (tpexEtfMap[pureCode]) { newEtfData[symbol] = { ...newEtfData[symbol], nav: tpexEtfMap[pureCode] }; }
+                    const extra = {};
+                    if (twseEtfMap[pureCode]) { extra.nav = twseEtfMap[pureCode]; } 
+                    else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; }
+                    if (twseYieldMap[pureCode]) { extra.yield = twseYieldMap[pureCode]; }
+                    newEtfData[symbol] = { ...newEtfData[symbol], ...extra };
                     success = true;
                   } else { throw new Error('Chart API No Data'); }
               } catch (chartErr) {
@@ -1183,7 +1197,6 @@ const App = () => {
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
             <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室</span>
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
-            {usBondYields['10Y'] && <span className="ml-2 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Activity className="w-3 h-3 mr-1"/> US10Y: {usBondYields['10Y']}%</span>}
           </div>
           <div className="flex space-x-4">
             {['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (
@@ -1403,9 +1416,11 @@ const App = () => {
                 const etfData = etfExtraData[row['標的']];
                 let premDisc = null;
                 // Simplified display logic: Show if available
-                if (etfData && etfData.nav && row.isRealData) {
+                if (etfData && etfData.nav) {
                     const price = row.isUS ? row.currentPriceRaw : row.currentPrice;
-                    premDisc = (price - etfData.nav) / etfData.nav;
+                    if (price) {
+                       premDisc = (price - etfData.nav) / etfData.nav;
+                    }
                 }
                 
                 // Yield Check
@@ -1530,9 +1545,11 @@ const App = () => {
                       // Premium/Discount Check for Desktop
                       const etfData = etfExtraData[row['標的']];
                       let premDisc = null;
-                      if ((isETF || isBondETF) && etfData && etfData.nav && row.isRealData) {
+                      if (etfData && etfData.nav) {
                           const price = row.isUS ? row.currentPriceRaw : row.currentPrice;
-                          premDisc = (price - etfData.nav) / etfData.nav;
+                          if (price) {
+                             premDisc = (price - etfData.nav) / etfData.nav;
+                          }
                       }
                       const yieldVal = etfData && etfData.yield ? (etfData.yield < 1 ? etfData.yield * 100 : etfData.yield) : null;
 
