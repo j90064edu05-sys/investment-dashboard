@@ -35,28 +35,27 @@ const DEMO_DATA = [
 const COLORS = ['#3B82F6', '#8B5CF6', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#6366F1'];
 
 const STRATEGY_CONFIG = {
-  '基礎買入':     { color: '#EF4444', label: '基礎買入',      shape: 'circle' },
-  '金字塔_S1':    { color: '#F97316', label: '金字塔_S1',     shape: 'triangle' },
-  '金字塔_S2':    { color: '#EAB308', label: '金字塔_S2',     shape: 'triangle' },
-  '金字塔_S3':    { color: '#84CC16', label: '金字塔_S3',     shape: 'triangle' },
-  'K值超賣':      { color: '#3B82F6', label: 'K值超賣',       shape: 'diamond' },
-  'MA60有撐':     { color: '#8B5CF6', label: 'MA60有撐',      shape: 'star' },
-  'MA120有撐':    { color: '#06B6D4', label: 'MA120有撐',     shape: 'square' },
-  'default':      { color: '#64748B', label: '其他策略',      shape: 'cross' }
+  '基礎買入':      { color: '#EF4444', label: '基礎買入',       shape: 'circle' },
+  '金字塔_S1':    { color: '#F97316', label: '金字塔_S1',      shape: 'triangle' },
+  '金字塔_S2':    { color: '#EAB308', label: '金字塔_S2',      shape: 'triangle' },
+  '金字塔_S3':    { color: '#84CC16', label: '金字塔_S3',      shape: 'triangle' },
+  'K值超賣':       { color: '#3B82F6', label: 'K值超賣',        shape: 'diamond' },
+  'MA60有撐':      { color: '#8B5CF6', label: 'MA60有撐',       shape: 'star' },
+  'MA120有撐':     { color: '#06B6D4', label: 'MA120有撐',      shape: 'square' },
+  'default':       { color: '#64748B', label: '其他策略',       shape: 'cross' }
 };
 
 const CATEGORY_STYLES = {
-  '股票': { color: '#3B82F6', badge: 'bg-blue-900 text-blue-200' },       
-  '債券': { color: '#A855F7', badge: 'bg-purple-900 text-purple-200' },   
-  '定存': { color: '#22C55E', badge: 'bg-green-900 text-green-200' },     
-  'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }   
+  '股票': { color: '#3B82F6', badge: 'bg-blue-900 text-blue-200' },        
+  '債券': { color: '#A855F7', badge: 'bg-purple-900 text-purple-200' },    
+  '定存': { color: '#22C55E', badge: 'bg-green-900 text-green-200' },      
+  'default': { color: '#64748B', badge: 'bg-slate-700 text-slate-300' }    
 };
 
 const AVAILABLE_MODELS = [
-  { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview (最新快速)' },
-  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro Preview (最新精準)' },
-  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (平衡)' },
-  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (進階)' },
+  { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash (最新快速)' },
+  { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro (精準)' },
+  { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash (平衡)' },
 ];
 
 const ASSET_TYPES = {
@@ -311,7 +310,7 @@ const App = () => {
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(new Date()); 
   const [activeTab, setActiveTab] = useState('overview');
-   
+    
   const [realTimePrices, setRealTimePrices] = useState({});
   const [etfExtraData, setEtfExtraData] = useState({}); 
   const [usdRate, setUsdRate] = useState(1); 
@@ -323,7 +322,7 @@ const App = () => {
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('1y_1d'); 
   const [isLastTradingDay, setIsLastTradingDay] = useState(false);
-   
+    
   const [sortConfig, setSortConfig] = useState({ key: 'manual', direction: 'asc' });
   const [customOrder, setCustomOrder] = useState([]);
 
@@ -335,7 +334,7 @@ const App = () => {
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
   const [analysisSymbol, setAnalysisSymbol] = useState(null); 
-  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash'); 
+  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash'); 
   const [aiSignals, setAiSignals] = useState({}); 
 
   const [portfolioHealth, setPortfolioHealth] = useState(null);
@@ -430,7 +429,7 @@ const App = () => {
   }, [aggregatedHoldings, sortConfig, customOrder]);
 
   const tradableSymbols = useMemo(() => sortedHoldings.filter(h => h['類別'] !== '定存'), [sortedHoldings]);
-  
+   
   const currentChartData = useMemo(() => {
     const baseData = historicalData[`${selectedHistorySymbol}_${timeframe}`];
     if (!baseData || !selectedHistorySymbol) return [];
@@ -1040,7 +1039,7 @@ const App = () => {
     if (savedModel && isValidModel) {
         setSelectedModel(savedModel);
     } else {
-        setSelectedModel(AVAILABLE_MODELS[2].id); // Default to Gemini 2.5 Flash
+        setSelectedModel(AVAILABLE_MODELS[2].id); // Default to Gemini 1.5 Flash
     }
     
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount));
