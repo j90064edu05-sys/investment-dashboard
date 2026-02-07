@@ -7,16 +7,15 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair, Repeat, BarChart4, TrendingDown, Percent
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair, Repeat, BarChart4, TrendingDown, Percent, Layers
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v43.6 (Yield Precision & UI Fix)
- * * [更新重點]
- * 1. UI 優化：移除上方導航列的殖利率顯示，保持簡潔。
- * 2. 資料源增強：新增從 TWSE/TPEx 抓取殖利率的邏輯，補強 Yahoo Finance 資料缺漏。
- * 3. 顯示修復：放寬持股明細的顯示條件，即使沒有即時股價，只要有淨值或殖利率也會顯示。
- * 4. 基準優化：針對長天期債券，自動抓取 ^TYX (30Y) 作為長債基準參照。
+ * Alpha 投資戰情室 v46.2 (Proxy Parser Fix)
+ * * [修正內容]
+ * 1. Proxy 解析：增加對 allorigins JSON 包裝格式的拆解邏輯，解決 TPEx 資料抓取失敗問題。
+ * 2. 資料源：新增 TPEx 殖利率官方來源 (pera_result)。
+ * 3. 容錯：優化資料合併邏輯，確保官方資料優先覆蓋。
  */
 
 // --- 靜態配置 ---
@@ -72,6 +71,12 @@ const ADDON_LOGICS = {
     'YIELD_MACRO': { label: '殖利率/總經訊號', icon: Globe }
 };
 
+const INDICATOR_TYPES = {
+    'KD': { label: 'KD指標' },
+    'MACD': { label: 'MACD' },
+    'RSI': { label: 'RSI相對強弱' }
+};
+
 // --- 輔助函式 (Helpers) ---
 
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
@@ -114,12 +119,15 @@ const savePriceCache = (newPrices, extraData) => {
     const today = getTodayDate();
     const updatedCache = { ...cache };
     Object.keys(newPrices).forEach(symbol => { 
+        // Merge with existing cache if new data is partial, but prioritize new data
+        const existing = updatedCache[symbol] || {};
         updatedCache[symbol] = { 
+            ...existing,
             price: newPrices[symbol], 
             date: today, 
             timestamp: Date.now(),
-            nav: extraData[symbol]?.nav,
-            yield: extraData[symbol]?.yield 
+            nav: extraData[symbol]?.nav || existing.nav, // Persist NAV if fetch failed
+            yield: extraData[symbol]?.yield || existing.yield // Persist Yield if fetch failed
         }; 
     });
     localStorage.setItem('investment_price_cache', JSON.stringify(updatedCache));
@@ -178,14 +186,15 @@ const isUsAsset = (symbol) => {
     return !symbol.includes('.TW') && !symbol.includes('.TWO') && symbol !== '定存' && !symbol.includes('TWD=X');
 };
 
-// --- 網路請求與代理 ---
+// --- 網路請求與代理 (Updated to handle allorigins wrapper) ---
 const fetchWithProxyFallback = async (targetUrl) => {
   const proxies = [
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, 
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, 
-    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, 
+    { url: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, isAllOrigins: true },
+    { url: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, isAllOrigins: false },
+    { url: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, isAllOrigins: false },
   ];
-  // Try direct fetch first for some domains that might support CORS or if local
+  
+  // Try direct fetch first (for TWSE if CORS allowed)
   try {
       if(targetUrl.includes('openapi.twse.com.tw')) {
           const response = await fetch(targetUrl);
@@ -193,11 +202,21 @@ const fetchWithProxyFallback = async (targetUrl) => {
       }
   } catch(e) { /* ignore direct fetch fail */ }
 
-  for (const proxyGen of proxies) {
+  for (const proxy of proxies) {
     try {
-      const response = await fetch(proxyGen(targetUrl));
+      const response = await fetch(proxy.url(targetUrl));
       if (!response.ok) throw new Error('Proxy error');
-      return await response.json();
+      
+      const data = await response.json();
+      // Handle allorigins wrapper
+      if (proxy.isAllOrigins && data.contents) {
+          try {
+              return JSON.parse(data.contents); // Parse internal stringified JSON
+          } catch (parseError) {
+              return data.contents; // Return raw if not JSON
+          }
+      }
+      return data;
     } catch (e) { console.warn('Proxy failed, trying next...', e); await delay(500); }
   }
   throw new Error('All proxies failed');
@@ -350,6 +369,7 @@ const App = () => {
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('1y_1d'); 
   const [isLastTradingDay, setIsLastTradingDay] = useState(false);
+  const [selectedIndicator, setSelectedIndicator] = useState('KD'); // New State for Mobile Indicator
     
   const [sortConfig, setSortConfig] = useState({ key: 'manual', direction: 'asc' });
   const [customOrder, setCustomOrder] = useState([]);
@@ -565,10 +585,8 @@ const App = () => {
     
     // Always fetch critical reference data
     if (!symbolsToFetchList.includes('TWD=X')) symbolsToFetchList.push('TWD=X');
-    // ^TNX (10Y) is base. ^TYX (30Y) is for 20Y+ bonds.
     if (!symbolsToFetchList.includes('^TNX')) symbolsToFetchList.push('^TNX');
     
-    // Check if we need 20Y+ yield (using ^TYX as proxy)
     const hasLongTermBond = data.some(item => isLongTermBond(item['名稱']));
     if (hasLongTermBond && !symbolsToFetchList.includes('^TYX')) {
         symbolsToFetchList.push('^TYX');
@@ -587,13 +605,13 @@ const App = () => {
     const today = getTodayDate();
     const cache = getPriceCache();
     const newPrices = { ...realTimePrices }; 
-    const newEtfData = { ...etfExtraData };
+    const newEtfData = { ...etfExtraData }; // Start with current, merge later
     const isTrading = isTaiwanTradingHours();
     
     const twseEtfMap = {};
     const tpexEtfMap = {}; 
-    const twseYieldMap = {}; // New: Store TWSE Yields
-    const tpexYieldMap = {}; // New: Store TPEx Yields
+    const twseYieldMap = {}; 
+    const tpexYieldMap = {}; // TPEx Yield Map
 
     // Enhanced NAV & Yield Fetching from Official Sources
     try {
@@ -609,6 +627,7 @@ const App = () => {
     } catch (e) { console.warn('TWSE Data Fetch Failed', e); }
 
     try {
+        // TPEx NAV
         const tpexNavRes = await fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/etf/net_value/net_value_result.php?l=zh-tw&o=json');
         if (tpexNavRes && tpexNavRes.aaData) {
             tpexNavRes.aaData.forEach(item => {
@@ -617,9 +636,17 @@ const App = () => {
                 if (!isNaN(nav)) { tpexEtfMap[code] = nav; }
             });
         }
-        // TPEx Yield Fetching (Note: TPEx API structure can be complex, often requires parsing)
-        // For now, sticking to NAV for TPEx, might rely on Yahoo for yield or implement specific parser later if needed.
-    } catch (e) { console.warn('TPEx NAV Fetch Failed', e); }
+        // TPEx Yield (pera_result.php)
+        const tpexYieldRes = await fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json');
+        if(tpexYieldRes && tpexYieldRes.aaData) {
+             tpexYieldRes.aaData.forEach(item => {
+                const code = item[0];
+                const yieldVal = parseFloat(item[5]); // Dividend Yield is usually index 5
+                if (!isNaN(yieldVal)) { tpexYieldMap[code] = yieldVal; }
+            });
+        }
+
+    } catch (e) { console.warn('TPEx Data Fetch Failed', e); }
 
     const symbolsToFetch = symbolsToFetchList.filter(symbol => {
         if (forceUpdate) return true;
@@ -631,6 +658,7 @@ const App = () => {
             if (cacheAge > 300000) return true; 
         }
         newPrices[symbol] = cachedItem.price;
+        // Prioritize current fetch, fallback to cache
         if (cachedItem.nav) newEtfData[symbol] = { ...newEtfData[symbol], nav: cachedItem.nav };
         if (cachedItem.yield) newEtfData[symbol] = { ...newEtfData[symbol], yield: cachedItem.yield };
         return false; 
@@ -643,26 +671,43 @@ const App = () => {
           await delay(Math.random() * 1500); 
           while(attempts <= maxRetries && !success) {
             try {
+              // Priority 1: Fetch QuoteSummary which has better Yield/NAV data
+              const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=summaryDetail,defaultKeyStatistics,price,fundProfile`;
+              let summaryData = null;
+              
+              try {
+                  const summaryRes = await fetchWithProxyFallback(summaryUrl);
+                  summaryData = summaryRes?.quoteSummary?.result?.[0];
+              } catch (e) { /* ignore summary fetch fail, fallback to quote */ }
+
               const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
               const result = await fetchWithProxyFallback(quoteUrl);
               const quote = result?.quoteResponse?.result?.[0];
+
               if (quote && quote.regularMarketPrice !== undefined) {
                 newPrices[symbol] = quote.regularMarketPrice;
                 const extra = {};
-                const pureCode = symbol.split('.')[0]; 
+                // Improved Code Matching: 00679B.TWO -> 00679B, 2330.TW -> 2330
+                const pureCode = symbol.replace(/\.TWO$|\.TW$/i, ''); 
                 
-                // Prioritize Official Sources for NAV
+                // --- NAV Logic (Multi-tier Fallback) ---
                 if (twseEtfMap[pureCode]) { extra.nav = twseEtfMap[pureCode]; } 
                 else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; } 
                 else if (quote.navPrice) { extra.nav = quote.navPrice; }
-                
-                // Prioritize Official Sources for Yield (TWSE), else Yahoo
-                if (twseYieldMap[pureCode]) { extra.yield = twseYieldMap[pureCode]; }
-                else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield; } 
-                else if (quote.yield) { extra.yield = quote.yield; } 
-                else if (quote.dividendYield) { extra.yield = quote.dividendYield; }
-                else if (quote.ttmDividendRate && quote.regularMarketPrice) { extra.yield = (quote.ttmDividendRate / quote.regularMarketPrice) * 100; } // Fallback calc
+                else if (summaryData?.defaultKeyStatistics?.bookValue) { extra.nav = summaryData.defaultKeyStatistics.bookValue.raw; }
+                else if (summaryData?.fundProfile?.categoryName) { /* fundProfile exists but no direct NAV often, check other fields if needed */ }
 
+                // --- Yield Logic (Multi-tier Fallback) ---
+                if (twseYieldMap[pureCode]) { extra.yield = twseYieldMap[pureCode]; }
+                else if (tpexYieldMap[pureCode]) { extra.yield = tpexYieldMap[pureCode]; }
+                else if (summaryData?.summaryDetail?.yield && summaryData.summaryDetail.yield.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; }
+                else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; } 
+                else if (quote.yield) { extra.yield = quote.yield * 100; }
+                else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; }
+                // Fallback Calc: (trailingAnnualDividendRate / Price) * 100
+                else if (quote.trailingAnnualDividendRate && quote.regularMarketPrice) { extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; } 
+
+                // Merge with existing cache if new data is partial
                 newEtfData[symbol] = { ...newEtfData[symbol], ...extra };
                 success = true;
               } else { throw new Error('Quote API No Data'); }
@@ -674,7 +719,7 @@ const App = () => {
                   const meta = result?.chart?.result?.[0]?.meta;
                   if (meta && meta.regularMarketPrice !== undefined) {
                     newPrices[symbol] = meta.regularMarketPrice;
-                    const pureCode = symbol.split('.')[0];
+                    const pureCode = symbol.replace(/\.TWO$|\.TW$/i, '');
                     const extra = {};
                     if (twseEtfMap[pureCode]) { extra.nav = twseEtfMap[pureCode]; } 
                     else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; }
@@ -787,7 +832,7 @@ const App = () => {
     // Determine appropriate Treasury Yield Benchmark
     const isLongBond = isLongTermBond(stockName);
     const benchmarkYield = isLongBond && usBondYields['30Y'] ? usBondYields['30Y'] : usBondYields['10Y'];
-    const benchmarkLabel = isLongBond ? '美國30年期公債殖利率 (長債基準)' : '美國10年期公債殖利率 (市場基準)';
+    const benchmarkLabel = isLongBond ? '美國長天期公債殖利率 (20yr+ Benchmark)' : '美國10年期公債殖利率 (市場基準)';
 
     const etfData = etfExtraData[symbol];
     const hasNav = etfData && etfData.nav;
@@ -831,6 +876,37 @@ const App = () => {
         if (benchmarkYield) keyMetrics += `\n- ${benchmarkLabel}: ${benchmarkYield}%`;
     }
 
+    // **【資產屬性分類與分析邏輯 (第一優先遵守)】**
+    const specializedRules = `
+**【資產屬性分類與分析邏輯 (第一優先遵守)】**
+請先判斷標的屬於以下哪一類，並**只使用**該類別的指標進行判斷：
+
+1. **波動大股票 (科技股、飆股)**
+   - **主要 (第一濾網)**：MACD (綠柱收斂、DIF 黃金交叉)。
+   - **輔助 (確認訊號)**：RSI (底背離)。
+   - **地雷 (忽略)**：KD (易鈍化)。
+
+2. **波動小股票 (金融股、傳產股)**
+   - **主要 (第一濾網)**：布林通道 (觸碰下緣)。
+   - **輔助 (確認訊號)**：KD (低檔金叉)、殖利率 (>歷史平均)。
+   - **地雷 (忽略)**：MACD (反應太慢)。
+
+3. **大盤型 ETF (如 0050, 006208)**
+   - **主要 (第一濾網)**：KD 指標 (日/週 KD < 20)。
+   - **輔助 (確認訊號)**：均線 (回測季線/年線)。
+   - **地雷 (忽略)**：個股財報。
+
+4. **科技型/成長型 ETF (如 00895, QQQ)**
+   - **主要 (第一濾網)**：折溢價 (確認市價 < 淨值，即折價)。
+   - **輔助 (確認訊號)**：RSI (跌破 30)。
+   - **地雷 (忽略)**：殖利率 (意義不大)。
+
+5. **債券型 ETF (如 00679B, TLT)**
+   - **主要 (第一濾網)**：美債殖利率 (Yield 創新高時為買點)。
+   - **輔助 (確認訊號)**：匯率 (台幣強升段有利)、折溢價 (市價 < 淨值)。
+   - **地雷 (忽略)**：MACD / RSI (易失真)。
+`;
+
     let strategyContext = "";
     if (classification === 'CORE') { strategyContext = "【核心資產 (CORE)】策略屬性：左側交易、價值投資。目標：長期持有，跌破季線(MA60)或半年線(MA120)視為價值浮現。"; } 
     else { strategyContext = "【衛星資產 (SATELLITE)】策略屬性：右側交易、波段操作。目標：抓取波段價差，站上月線(MA20)且動能強視為買進，跌破月線應停利停損。"; }
@@ -867,7 +943,10 @@ const App = () => {
       - MACD：OSC=${latest.OSC?formatPrice(latest.OSC):'-'}
       - RSI指標：RSI6=${latest.RSI6?formatPrice(latest.RSI6):'-'}, RSI12=${latest.RSI12?formatPrice(latest.RSI12):'-'}
       - 布林通道：上軌=${latest.BBU?formatPrice(latest.BBU):'-'}, 中軌=${latest.BBM?formatPrice(latest.BBM):'-'}, 下軌=${latest.BBL?formatPrice(latest.BBL):'-'}
-      **策略模組 (請獨立評估)**：
+      
+      ${specializedRules}
+
+      **使用者策略模組 (需疊加分析)**：
       1. ${strategyContext}
       2. ${addonStrategy}
       3. ${dcaStrategy}
@@ -875,8 +954,8 @@ const App = () => {
       請在 [DETAIL] 的最後一段，根據上述分析提供明確的價格指引：
       - 若建議為 **ADD (加碼) / REDUCE (減碼)**：請根據技術支撐/壓力位(如布林通道、均線)，提供一個【預估目標價 (Target Price)】或【合理操作區間】。
       - 若建議為 **ADD_BASIC (定期定額基礎扣款)**：請分析目前的【安全扣款價格上限】或【建議扣款區間】，避免在乖離過大時盲目扣款。
-      **最終燈號判定規則 (複合燈號)**：
-      請根據您的分析，選擇以下其中一個燈號輸出：
+      **最終燈號判定規則 (複合燈號 - 極重要)**：
+      請確保您的 [SIGNAL] 輸出與您的文字分析**完全一致**。如果分析建議「買進」、「扣款」或「加碼」，[SIGNAL] 必須是綠燈 (ADD_...)。
       - **SIGNAL: REDUCE**：(紅燈) 若趨勢轉空、跌破關鍵支撐或基本面轉差 (優先級最高)。
       - **SIGNAL: ADD_ALL**：(綠燈) 若「定期定額條件成立」 且 「加碼邏輯成立」。(建議基礎及加碼投資)
       - **SIGNAL: ADD_BASIC**：(綠燈) 若「定期定額條件成立」 但 「加碼邏輯不成立」。(建議基礎投資)
@@ -884,7 +963,7 @@ const App = () => {
       - **SIGNAL: HOLD**：(黃燈) 若上述皆不成立 (建議觀望)。
       請依序輸出 (請勿使用 Markdown 代碼區塊)：
       [SUMMARY] (50字內簡評，結合投資定位與目前損益狀況)
-      [DETAIL] (完整分析報告。請分點說明：1. 趨勢判斷 2. 針對「${addonLabel}」的訊號分析 ${isDCA ? '3. 針對「定期定額」的條件分析' : ''} 4. 目標價與操作建議。請使用 Markdown 排版)
+      [DETAIL] (完整分析報告。請分點說明：1. 資產歸類確認(波動大/小股票/ETF類型) 2. 第一濾網分析 3. 輔助訊號分析 4. 策略疊加分析(核心/衛星/DCA) 5. 目標價與操作建議。請使用 Markdown 排版)
       [SIGNAL] (請輸出單一詞彙，例如：ADD_ALL)`;
 
     try {
@@ -892,7 +971,9 @@ const App = () => {
       setUsedModel(model);
       const summaryMatch = text.match(/\[SUMMARY\]\s*([\s\S]*?)\s*(?=\[DETAIL\]|$)/i);
       const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
-      const signalMatch = text.match(/\[SIGNAL\]\s*(ADD_ALL|ADD_BASIC|ADD_BONUS|REDUCE|HOLD)/i);
+      // Improved Regex for Signal Extraction - handles spaces, colons, newlines
+      const signalMatch = text.match(/\[SIGNAL\]\s*[:：\-]?\s*(ADD_ALL|ADD_BASIC|ADD_BONUS|REDUCE|HOLD)/i);
+      
       let summary = summaryMatch ? summaryMatch[1].trim() : "分析完成"; summary = summary.replace(/[`*#]/g, '').replace(/\n/g, ' ').trim();
       const detail = detailMatch ? detailMatch[1].trim() : text;
       const signalCode = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
@@ -1303,8 +1384,9 @@ const App = () => {
         )}
 
         {activeTab === 'history' && (
-          <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6">
-            <div className="lg:col-span-1 bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[700px]">
+          <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6 h-full pb-20 md:pb-0">
+            {/* List - Fixed Height on Desktop */}
+            <div className="lg:col-span-1 bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[700px] flex-none">
               <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center sticky top-0 z-10"><h3 className="font-semibold text-white flex items-center"><LineIcon className="w-5 h-5 mr-2 text-blue-400" /> 持股列表</h3></div>
               <div className={`overflow-y-auto flex-1 p-2 space-y-2 ${isAiSummarizing ? 'opacity-50 pointer-events-none' : ''}`}>
                 {tradableSymbols.map((item) => (
@@ -1317,63 +1399,130 @@ const App = () => {
               </div>
             </div>
 
-            <div className="lg:col-span-3 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-4 md:p-6 flex flex-col relative" style={{ minHeight: '600px' }}>
+            {/* Main Content - Flow Layout on Mobile, Fixed on Desktop */}
+            <div className="lg:col-span-3 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-2 md:p-6 block md:flex md:flex-col relative h-auto md:h-[700px]">
               {/* History Chart & AI Analysis UI */}
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-2">
+              <div className="flex-none flex flex-col sm:flex-row justify-between items-start sm:items-center mb-2 gap-2">
                 <h3 className="text-xl font-bold text-white flex items-center">{selectedHistorySymbol} <span className="ml-2 text-base font-normal text-slate-400">{tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱']}</span></h3>
                 <div className={`flex space-x-2 self-end sm:self-auto ${isAiSummarizing ? 'opacity-50 pointer-events-none' : ''}`}>{[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (<button key={tf.id} disabled={isAiSummarizing} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{tf.label}</button>))}</div>
               </div>
               
-              {/* Chart Component Omitted for Brevity - Standard Recharts Implementation */}
-              {historyLoading ? <div className="flex-1 flex items-center justify-center min-h-[400px]"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div> : currentChartData && currentChartData.length > 0 ? (
-                <div className="flex flex-col space-y-2">
-                  <div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip content={<CustomChartTooltip />} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} /><Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" /><Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" /></ComposedChart></ResponsiveContainer></div>
-                  <div className="h-32 w-full border-t border-slate-700 pt-2"><p className="text-xs text-slate-400 mb-1 ml-2">KD (9, 3, 3)</p><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" hide /><YAxis stroke="#94a3b8" domain={[0, 100]} ticks={[20, 50, 80]} tick={{fontSize: 10}} tickFormatter={formatPrice} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} /><ReferenceLine y={80} stroke="#EF4444" strokeDasharray="3 3" /><ReferenceLine y={20} stroke="#10B981" strokeDasharray="3 3" /><Line type="monotone" dataKey="K" stroke="#F59E0B" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="D" stroke="#3B82F6" dot={false} strokeWidth={1} /></ComposedChart></ResponsiveContainer></div>
-                </div>
-              ) : <div className="flex-1 flex items-center justify-center min-h-[400px] text-slate-500">{historyError ? <span className="text-red-400">{historyError}</span> : "請選擇左側標的以查看走勢"}</div>}
+              {/* Chart Component - Auto Height on Mobile */}
+              <div className="flex-none flex flex-col space-y-1 h-auto min-h-[400px] md:h-[400px]">
+              {historyLoading ? <div className="flex-1 flex items-center justify-center h-full"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div> : currentChartData && currentChartData.length > 0 ? (
+                <>
+                  <div className="h-64 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip content={<CustomChartTooltip />} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} /><Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" /><Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" /></ComposedChart></ResponsiveContainer></div>
+                  
+                  {/* Indicator Toggle for Mobile & Desktop */}
+                  <div className="h-32 w-full border-t border-slate-700 pt-1 relative group">
+                      {/* Mobile: Toggle Buttons */}
+                      <div className="md:hidden absolute top-1 right-2 z-10 flex space-x-1">
+                          {Object.keys(INDICATOR_TYPES).map(key => (
+                              <button 
+                                key={key} 
+                                onClick={() => setSelectedIndicator(key)} 
+                                className={`text-[10px] px-2 py-0.5 rounded border ${selectedIndicator === key ? 'bg-slate-700 text-white border-slate-500' : 'bg-slate-800 text-slate-500 border-slate-700'}`}
+                              >
+                                {key}
+                              </button>
+                          ))}
+                      </div>
 
-              {/* AI Section */}
-              <div className="mt-4 pt-4 border-t border-slate-700">
-                <div className="flex items-center justify-between mb-3"><div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符)</span>} {selectedModel !== usedModel && !isCachedResult && <span className="text-yellow-400 ml-1 text-[10px]">(自動切換)</span>}</span>}
-                {/* NEW COMPOSITE SIGNAL DISPLAY */}
-                {aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
-                {aiSignals[selectedHistorySymbol] === 'ADD_ALL' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
-                {aiSignals[selectedHistorySymbol] === 'ADD_BASIC' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎投資</span></div>)}
-                {aiSignals[selectedHistorySymbol] === 'ADD_BONUS' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼投資</span></div>)}
-                {aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}
-                </div>
-                
-                <div className="flex items-center space-x-2">
-                  {aiDetail && (
-                    <button 
-                        onClick={() => setIsDetailExpanded(!isDetailExpanded)} 
-                        className="text-xs text-blue-400 hover:text-blue-300 flex items-center transition-colors"
-                      >
-                        <FileSearch className="w-3 h-3 mr-1" />
-                        {isDetailExpanded ? "收合完整報告" : "展開完整報告"}
-                    </button>
-                  )}
-                  {geminiApiKey && !isAiSummarizing && (
-                      <button 
-                        onClick={() => generateFullAnalysis(selectedHistorySymbol, historicalData[`${selectedHistorySymbol}_${timeframe}`], true)}
-                        className={`text-xs flex items-center transition-colors text-red-400 hover:text-red-300`}
-                      >
-                        <RefreshCw className={`w-3 h-3 mr-1`} /> 
-                        重新載入分析
-                      </button>
-                  )}
-                </div>
+                      {/* Desktop: Hover to switch (Optional) or just show all if space permits, but sticking to toggle for consistency */}
+                      <div className="hidden md:flex absolute top-1 right-2 z-10 space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                           {Object.keys(INDICATOR_TYPES).map(key => (
+                              <button 
+                                key={key} 
+                                onClick={() => setSelectedIndicator(key)} 
+                                className={`text-[10px] px-2 py-0.5 rounded border ${selectedIndicator === key ? 'bg-slate-700 text-white border-slate-500' : 'bg-slate-800 text-slate-500 border-slate-700'}`}
+                              >
+                                {key}
+                              </button>
+                          ))}
+                      </div>
+                      
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={currentChartData} syncId="anyId">
+                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                            <XAxis dataKey="date" hide />
+                            {selectedIndicator === 'KD' && <YAxis stroke="#94a3b8" domain={[0, 100]} ticks={[20, 50, 80]} tick={{fontSize: 10}} tickFormatter={formatPrice} />}
+                            {selectedIndicator !== 'KD' && <YAxis stroke="#94a3b8" domain={['auto', 'auto']} tick={{fontSize: 10}} />}
+                            <RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} />
+                            
+                            {selectedIndicator === 'KD' && (
+                                <>
+                                    <ReferenceLine y={80} stroke="#EF4444" strokeDasharray="3 3" />
+                                    <ReferenceLine y={20} stroke="#10B981" strokeDasharray="3 3" />
+                                    <Line type="monotone" dataKey="K" stroke="#F59E0B" dot={false} strokeWidth={1} />
+                                    <Line type="monotone" dataKey="D" stroke="#3B82F6" dot={false} strokeWidth={1} />
+                                </>
+                            )}
+                            {selectedIndicator === 'MACD' && (
+                                <>
+                                    <ReferenceLine y={0} stroke="#94a3b8" />
+                                    <Bar dataKey="OSC" fill="#8B5CF6" />
+                                    <Line type="monotone" dataKey="DIF" stroke="#F59E0B" dot={false} strokeWidth={1} />
+                                    <Line type="monotone" dataKey="Signal" stroke="#3B82F6" dot={false} strokeWidth={1} />
+                                </>
+                            )}
+                            {selectedIndicator === 'RSI' && (
+                                <>
+                                    <ReferenceLine y={70} stroke="#EF4444" strokeDasharray="3 3" />
+                                    <ReferenceLine y={30} stroke="#10B981" strokeDasharray="3 3" />
+                                    <Line type="monotone" dataKey="RSI6" stroke="#F59E0B" dot={false} strokeWidth={1} />
+                                    <Line type="monotone" dataKey="RSI12" stroke="#3B82F6" dot={false} strokeWidth={1} />
+                                </>
+                            )}
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                  </div>
+                </>
+              ) : <div className="flex-1 flex items-center justify-center h-full text-slate-500">{historyError ? <span className="text-red-400">{historyError}</span> : "請選擇左側標的以查看走勢"}</div>}
+              </div>
+
+              {/* AI Section - Flexible Height with Scroll, Pushed Down */}
+              <div className="flex-1 md:min-h-0 flex flex-col mt-6 md:mt-8 pt-4 border-t-2 border-dashed border-slate-600/50 md:overflow-hidden relative z-10 bg-slate-800">
+                <div className="flex-none flex items-center justify-between mb-2">
+                    <div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="hidden md:inline ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符)</span>} {selectedModel !== usedModel && !isCachedResult && <span className="text-yellow-400 ml-1 text-[10px]">(自動切換)</span>}</span>}
+                    {/* NEW COMPOSITE SIGNAL DISPLAY */}
+                    {aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
+                    {aiSignals[selectedHistorySymbol] === 'ADD_ALL' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
+                    {aiSignals[selectedHistorySymbol] === 'ADD_BASIC' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎投資</span></div>)}
+                    {aiSignals[selectedHistorySymbol] === 'ADD_BONUS' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼投資</span></div>)}
+                    {aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}
+                    </div>
+                    
+                    <div className="flex items-center space-x-2">
+                    {aiDetail && (
+                        <button 
+                            onClick={() => setIsDetailExpanded(!isDetailExpanded)} 
+                            className="text-xs text-blue-400 hover:text-blue-300 flex items-center transition-colors"
+                        >
+                            <FileSearch className="w-3 h-3 mr-1" />
+                            {isDetailExpanded ? "收合" : "展開"}
+                        </button>
+                    )}
+                    {geminiApiKey && !isAiSummarizing && (
+                        <button 
+                            onClick={() => generateFullAnalysis(selectedHistorySymbol, historicalData[`${selectedHistorySymbol}_${timeframe}`], true)}
+                            className={`text-xs flex items-center transition-colors text-red-400 hover:text-red-300`}
+                        >
+                            <RefreshCw className={`w-3 h-3 mr-1`} /> 
+                            重新分析
+                        </button>
+                    )}
+                    </div>
                 </div>
 
-                <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700 shadow-inner">
+                <div className="flex-1 md:overflow-y-auto bg-slate-900/50 rounded-lg p-3 border border-slate-700 shadow-inner custom-scrollbar">
                   {isAiSummarizing ? (
                     <div className="flex items-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin mr-2" />AI 正在分析中...</div>
                   ) : (
                     <>
-                      {aiSummary ? <div className="mb-3"><p className="text-slate-300 text-sm leading-relaxed border-l-2 border-purple-500 pl-3">{String(aiSummary)}</p></div> : <div className="text-slate-500 text-sm">暫無 AI 分析數據 (請點擊上方按鈕重試)</div>}
+                      {aiSummary ? <div className="mb-2"><p className="text-slate-300 text-sm leading-relaxed border-l-2 border-purple-500 pl-3">{String(aiSummary)}</p></div> : <div className="text-slate-500 text-sm">暫無 AI 分析數據 (請點擊重析)</div>}
                       {aiDetail && (
-                        <div className={`mt-3 pt-3 border-t border-slate-700/50 transition-all duration-500 ease-in-out ${isDetailExpanded ? 'opacity-100 max-h-[1000px]' : 'opacity-0 max-h-0 overflow-hidden'}`}>
-                          <div><div className="flex justify-between items-center mb-2"><span className="text-xs font-semibold text-purple-300">完整技術報告</span></div><div className="prose prose-invert prose-sm max-w-none text-slate-300 whitespace-pre-wrap leading-relaxed text-xs max-h-64 overflow-y-auto pr-2 custom-scrollbar">{String(aiDetail)}</div></div>
+                        <div className={`pt-2 border-t border-slate-700/50 transition-all duration-300 ${isDetailExpanded ? 'block' : 'hidden'}`}>
+                          <div className="prose prose-invert prose-sm max-w-none text-slate-300 whitespace-pre-wrap leading-relaxed text-xs">{String(aiDetail)}</div>
                         </div>
                       )}
                     </>
@@ -1436,16 +1585,10 @@ const App = () => {
                         {signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-1" />}
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
                         <span className={`text-xs px-2 py-0.5 rounded ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span>
-                        {/* ETF Premium/Discount Tag */}
+                        {/* ETF Premium/Discount Tag - Mobile */}
                         {premDisc !== null && (
                             <span className={`text-[10px] px-1.5 py-0.5 rounded border ${premDisc > 0 ? 'bg-red-900/30 text-red-300 border-red-500/30' : 'bg-green-900/30 text-green-300 border-green-500/30'}`}>
                                 {premDisc > 0 ? '溢' : '折'} {Math.abs(premDisc * 100).toFixed(2)}%
-                            </span>
-                        )}
-                        {/* Yield Tag for Bond/Bond ETF */}
-                        {yieldVal !== null && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded border bg-purple-900/30 text-purple-300 border-purple-500/30">
-                                殖 {yieldVal.toFixed(2)}%
                             </span>
                         )}
                       </div>
@@ -1501,11 +1644,17 @@ const App = () => {
                     <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
                     <div><span className="text-slate-500 block text-xs">股數</span><span className="text-slate-300">{row.shares.toLocaleString()}</span></div>
                     
-                    {/* Extended Info for Bond/ETF */}
-                    {(isETF || isBondETF) && etfData?.nav && (
-                        <div className="col-span-2 flex justify-between bg-slate-700/30 p-1.5 rounded">
-                            <span className="text-slate-400 text-xs">參考淨值: <span className="text-slate-200">{etfData.nav}</span></span>
-                            {premDisc !== null && <span className={`text-xs ${premDisc > 0 ? 'text-red-300' : 'text-green-300'}`}>{premDisc > 0 ? '溢價' : '折價'} {(premDisc*100).toFixed(2)}%</span>}
+                    {/* Explicit NAV & Yield for Mobile */}
+                    {(isETF || isBondETF) && (
+                        <div className="col-span-2 flex justify-between bg-slate-700/30 p-2 rounded">
+                            <span className="text-slate-400 text-xs">參考淨值</span>
+                            <span className="text-slate-200 text-xs font-medium">{etfData?.nav ? formatPrice(etfData.nav) : '查無資料'}</span>
+                        </div>
+                    )}
+                    {(isBond || isBondETF) && (
+                        <div className="col-span-2 flex justify-between bg-slate-700/30 p-2 rounded -mt-2">
+                            <span className="text-slate-400 text-xs">參考殖利率</span>
+                            <span className="text-slate-200 text-xs font-medium">{yieldVal !== null ? `${yieldVal.toFixed(2)}%` : '查無資料'}</span>
                         </div>
                     )}
                   </div>
@@ -1524,8 +1673,9 @@ const App = () => {
                   <thead className="bg-slate-900/50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider w-20">排序</th>
-                      {[ { label: '標的代號', key: '標的' }, { label: '名稱/類別', key: '類別' }, { label: '策略與設定', key: 'class' }, { label: '平均成本', key: 'buyPrice' }, { label: 'Yahoo即時價', key: 'currentPrice' }, { label: '總股數', key: 'shares' }, { label: '總損益 (淨)', key: 'profitLoss' }, { label: '報酬率 (淨)', key: 'roi' } ].map(header => (
-                        <th key={header.key} onClick={() => header.key !== 'class' && requestSort(header.key)} className={`px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider ${header.key !== 'class' ? 'cursor-pointer hover:text-white' : ''} transition-colors group ${header.label.includes('代號') || header.label.includes('名稱') || header.label.includes('策略') ? 'text-left' : 'text-right'}`}><div className={`flex items-center ${header.label.includes('代號') || header.label.includes('名稱') || header.label.includes('策略') ? 'justify-start' : 'justify-end'}`}>{header.label}{header.key !== 'class' && <SortIcon columnKey={header.key} />}</div></th>
+                      {/* Updated Headers */}
+                      {[ { label: '標的代號', key: '標的' }, { label: '名稱/類別', key: '類別' }, { label: '參考淨值', key: 'nav' }, { label: '參考殖利率', key: 'yield' }, { label: '策略與設定', key: 'class' }, { label: '平均成本', key: 'buyPrice' }, { label: 'Yahoo即時價', key: 'currentPrice' }, { label: '總股數', key: 'shares' }, { label: '總損益 (淨)', key: 'profitLoss' }, { label: '報酬率 (淨)', key: 'roi' } ].map(header => (
+                        <th key={header.key} onClick={() => header.key !== 'class' && header.key !== 'nav' && header.key !== 'yield' && requestSort(header.key)} className={`px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider ${header.key !== 'class' && header.key !== 'nav' && header.key !== 'yield' ? 'cursor-pointer hover:text-white' : ''} transition-colors group ${['標的', '類別', 'nav', 'yield', 'class'].includes(header.key) ? 'text-left' : 'text-right'}`}><div className={`flex items-center ${['標的', '類別', 'nav', 'yield', 'class'].includes(header.key) ? 'justify-start' : 'justify-end'}`}>{header.label}{header.key !== 'class' && header.key !== 'nav' && header.key !== 'yield' && <SortIcon columnKey={header.key} />}</div></th>
                       ))}
                     </tr>
                   </thead>
@@ -1545,11 +1695,9 @@ const App = () => {
                       // Premium/Discount Check for Desktop
                       const etfData = etfExtraData[row['標的']];
                       let premDisc = null;
-                      if (etfData && etfData.nav) {
+                      if ((isETF || isBondETF) && etfData && etfData.nav && row.isRealData) {
                           const price = row.isUS ? row.currentPriceRaw : row.currentPrice;
-                          if (price) {
-                             premDisc = (price - etfData.nav) / etfData.nav;
-                          }
+                          premDisc = (price - etfData.nav) / etfData.nav;
                       }
                       const yieldVal = etfData && etfData.yield ? (etfData.yield < 1 ? etfData.yield * 100 : etfData.yield) : null;
 
@@ -1561,17 +1709,34 @@ const App = () => {
                             <div className="text-sm text-slate-200">{row['名稱']}</div>
                             <div className="flex flex-wrap items-center gap-2 mt-1">
                                 <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span>
-                                {premDisc !== null && (
-                                    <span className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded border ${premDisc > 0 ? 'bg-red-900/30 text-red-300 border-red-500/30' : 'bg-green-900/30 text-green-300 border-green-500/30'}`} title={`淨值: ${etfData.nav}`}>
-                                        {premDisc > 0 ? '溢' : '折'} {Math.abs(premDisc * 100).toFixed(2)}%
-                                    </span>
-                                )}
-                                {yieldVal !== null && (
-                                    <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded border bg-purple-900/30 text-purple-300 border-purple-500/30">
-                                        殖 {yieldVal.toFixed(2)}%
-                                    </span>
-                                )}
                             </div>
+                        </td>
+                        
+                        {/* New NAV Column */}
+                        <td className="px-6 py-4 whitespace-nowrap text-left">
+                            { (isETF || isBondETF) ? (
+                                etfData?.nav ? (
+                                    <div className="flex flex-col">
+                                        <span className="text-sm text-slate-300 font-medium">{formatPrice(etfData.nav)}</span>
+                                        {premDisc !== null && (
+                                            <span className={`text-[10px] mt-0.5 ${premDisc > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                                                {premDisc > 0 ? '溢價' : '折價'} {Math.abs(premDisc * 100).toFixed(2)}%
+                                            </span>
+                                        )}
+                                    </div>
+                                ) : <span className="text-xs text-slate-500">查無資料</span>
+                            ) : <span className="text-slate-600">-</span> }
+                        </td>
+
+                        {/* New Yield Column */}
+                        <td className="px-6 py-4 whitespace-nowrap text-left">
+                            { (isBond || isBondETF) ? (
+                                yieldVal !== null ? (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-900/30 text-purple-300 border border-purple-500/30">
+                                        {yieldVal.toFixed(2)}%
+                                    </span>
+                                ) : <span className="text-xs text-slate-500">查無資料</span>
+                            ) : <span className="text-slate-600">-</span> }
                         </td>
                         
                         {/* Strategy Settings - Desktop */}
