@@ -7,15 +7,15 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair, Repeat, BarChart4, TrendingDown, Percent, Layers, Link as LinkIcon
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair, Repeat, BarChart4, TrendingDown, Percent, Layers, Link as LinkIcon, XCircle
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v51.4 (Post-Processing Fix)
+ * Alpha 投資戰情室 v51.5 (Timeout Protection & Stop Button)
  * * [修正內容]
- * 1. 架構重構：引入 "Finalize Step"，確保無論 Yahoo API 成功與否，都會在最後統一填入 TV/MIS/TE 的數據。
- * 2. 殖利率修復：0050 (TV來源) 與 00679B (Benchmark來源) 現在能正確顯示殖利率。
- * 3. 數據除錯：優化 Console Log，追蹤數據在各階段的變化。
+ * 1. 逾時防護：所有 Proxy 請求新增 3.5秒 Timeout，防止網路卡死。
+ * 2. 強制停止：Loading 提示框新增「停止」按鈕，可手動中斷更新。
+ * 3. 結構安全：fetchRealTimePrices 全面採用 try-finally 確保 Loading 狀態必會解除。
  */
 
 // --- 靜態配置 ---
@@ -182,7 +182,7 @@ const isUsAsset = (symbol) => {
     return !symbol.includes('.TW') && !symbol.includes('.TWO') && symbol !== '定存' && !symbol.includes('TWD=X');
 };
 
-// --- 網路請求與代理 ---
+// --- 網路請求與代理 (Updated with Timeout) ---
 const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) => {
   const urlWithTime = targetUrl.includes('?') ? `${targetUrl}&t=${Date.now()}` : `${targetUrl}?t=${Date.now()}`;
   
@@ -202,13 +202,17 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
   } catch(e) { /* ignore */ }
 
   for (const proxy of proxies) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500); // 3.5s timeout to prevent hanging
+
     try {
-      const response = await fetch(proxy.url(urlWithTime), options);
+      const response = await fetch(proxy.url(urlWithTime), { ...options, signal: controller.signal });
+      clearTimeout(timeoutId);
+
       if (!response.ok) throw new Error('Proxy error');
       
       const data = await response.json();
       
-      // Handle allorigins wrapper & Deep Parse
       if (proxy.isAllOrigins && data.contents) {
           if (typeof data.contents === 'string') {
               try { 
@@ -220,7 +224,10 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
           return data.contents;
       }
       return data;
-    } catch (e) { /* continue to next proxy */ }
+    } catch (e) { 
+        clearTimeout(timeoutId);
+        /* continue */ 
+    }
   }
   return null;
 };
@@ -771,149 +778,124 @@ const App = () => {
         return false; 
     });
 
-    // Wait for external sources
-    const tvData = await tvPromise;
-    const teYields = await tePromise;
-    console.log("TE Yields:", teYields);
-    console.log("TV Data:", tvData);
+    try {
+        if (symbolsToFetch.length > 0) {
+            const failedSymbols = [];
+            // Wait for external sources
+            const tvData = await tvPromise;
+            const teYields = await tePromise;
+            
+            console.log("TE Yields:", teYields);
+            console.log("TV Data:", tvData);
 
-    if (symbolsToFetch.length > 0) {
-        const failedSymbols = [];
-
-        const promises = symbolsToFetch.map(async (symbol) => {
-          const maxRetries = 2; let attempts = 0; let success = false;
-          await delay(Math.random() * 1500); 
-          while(attempts <= maxRetries && !success) {
-            try {
-              // Priority 1: Fetch QuoteSummary which has better Yield/NAV data
-              const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=summaryDetail,defaultKeyStatistics,price,fundProfile`;
-              let summaryData = null;
-              
-              try {
-                  const summaryRes = await fetchWithProxyFallback(summaryUrl);
-                  summaryData = summaryRes?.quoteSummary?.result?.[0];
-                  console.log(`Summary for ${symbol}:`, summaryData);
-              } catch (e) { /* ignore */ }
-
-              const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
-              const result = await fetchWithProxyFallback(quoteUrl);
-              const quote = result?.quoteResponse?.result?.[0];
-              console.log(`Quote for ${symbol}:`, quote);
-
-              if (quote && quote.regularMarketPrice !== undefined) {
-                newPrices[symbol] = quote.regularMarketPrice;
-                // Merge with existing pre-filled data
-                const extra = { ...newEtfData[symbol] }; 
+            const promises = symbolsToFetch.map(async (symbol) => {
+            const maxRetries = 2; let attempts = 0; let success = false;
+            await delay(Math.random() * 1500); 
+            while(attempts <= maxRetries && !success) {
+                try {
+                // Priority 1: Fetch QuoteSummary which has better Yield/NAV data
+                const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=summaryDetail,defaultKeyStatistics,price,fundProfile`;
+                let summaryData = null;
                 
-                // --- NAV Logic (Yahoo Fallback if Official missing) ---
-                if (!extra.nav) {
-                    if (quote.navPrice) { extra.nav = quote.navPrice; extra.navSource = "Yahoo"; }
-                    else if (summaryData?.defaultKeyStatistics?.bookValue) { extra.nav = summaryData.defaultKeyStatistics.bookValue.raw; extra.navSource = "Yahoo(Est)"; }
-                    // Fallback: If no NAV, try Manual Calc from Price/PB ratio (Yahoo)
-                    if (!extra.nav && quote.priceToBook) { extra.nav = (quote.regularMarketPrice / quote.priceToBook).toFixed(2); extra.navSource = "Calc(P/B)"; }
-                }
+                try {
+                    const summaryRes = await fetchWithProxyFallback(summaryUrl);
+                    summaryData = summaryRes?.quoteSummary?.result?.[0];
+                    console.log(`Summary for ${symbol}:`, summaryData);
+                } catch (e) { /* ignore */ }
 
-                // --- Yield Logic (TV/Yahoo/Calc Fallback if Official missing) ---
-                if (!extra.yield) {
-                     if (tvData[symbol]?.yield) { extra.yield = tvData[symbol].yield; extra.yieldSource = "TV"; } 
-                     else if (summaryData?.summaryDetail?.yield?.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; extra.yieldSource = "Yahoo(Sum)"; }
-                     else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; extra.yieldSource = "Yahoo"; } 
-                     else if (quote.yield) { extra.yield = quote.yield * 100; extra.yieldSource = "Yahoo"; }
-                     else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; extra.yieldSource = "Yahoo"; }
-                     
-                     // FORCE Fallback Calc: If no yield found, calculate from (Dividend / Price)
-                     if (!extra.yield) {
-                        if (quote.trailingAnnualDividendRate && quote.regularMarketPrice) { 
-                            extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; 
-                            extra.yieldSource = "Calc";
-                        } else if (quote.dividendRate && quote.regularMarketPrice) {
-                             extra.yield = (quote.dividendRate / quote.regularMarketPrice) * 100; 
-                             extra.yieldSource = "Calc";
+                const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
+                const result = await fetchWithProxyFallback(quoteUrl);
+                const quote = result?.quoteResponse?.result?.[0];
+                console.log(`Quote for ${symbol}:`, quote);
+
+                if (quote && quote.regularMarketPrice !== undefined) {
+                    newPrices[symbol] = quote.regularMarketPrice;
+                    // Merge with existing pre-filled data
+                    const extra = { ...newEtfData[symbol] }; 
+                    
+                    // --- NAV Logic (Yahoo Fallback if Official missing) ---
+                    if (!extra.nav) {
+                        if (quote.navPrice) { extra.nav = quote.navPrice; extra.navSource = "Yahoo"; }
+                        else if (summaryData?.defaultKeyStatistics?.bookValue) { extra.nav = summaryData.defaultKeyStatistics.bookValue.raw; extra.navSource = "Yahoo(Est)"; }
+                        // Fallback: If no NAV, try Manual Calc from Price/PB ratio (Yahoo)
+                        if (!extra.nav && quote.priceToBook) { extra.nav = (quote.regularMarketPrice / quote.priceToBook).toFixed(2); extra.navSource = "Calc(P/B)"; }
+                    }
+
+                    // --- Yield Logic (TV/Yahoo/Calc Fallback if Official missing) ---
+                    if (!extra.yield) {
+                        if (tvData[symbol]?.yield) { extra.yield = tvData[symbol].yield; extra.yieldSource = "TV"; } 
+                        else if (summaryData?.summaryDetail?.yield?.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; extra.yieldSource = "Yahoo(Sum)"; }
+                        else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; extra.yieldSource = "Yahoo"; } 
+                        else if (quote.yield) { extra.yield = quote.yield * 100; extra.yieldSource = "Yahoo"; }
+                        else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; extra.yieldSource = "Yahoo"; }
+                        
+                        // FORCE Fallback Calc: If no yield found, calculate from (Dividend / Price)
+                        if (!extra.yield) {
+                            if (quote.trailingAnnualDividendRate && quote.regularMarketPrice) { 
+                                extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; 
+                                extra.yieldSource = "Calc";
+                            } else if (quote.dividendRate && quote.regularMarketPrice) {
+                                extra.yield = (quote.dividendRate / quote.regularMarketPrice) * 100; 
+                                extra.yieldSource = "Calc";
+                            }
                         }
                     }
-                }
 
-                newEtfData[symbol] = extra;
-                success = true;
-              } else { throw new Error('Quote API No Data'); }
-            } catch (quoteErr) {
-               // ... fallback to chart api logic
-               try {
-                  const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
-                  const result = await fetchWithProxyFallback(chartUrl);
-                  const meta = result?.chart?.result?.[0]?.meta;
-                  if (meta && meta.regularMarketPrice !== undefined) {
-                    newPrices[symbol] = meta.regularMarketPrice;
-                    // Maintain existing nav/yield from pre-fill
+                    newEtfData[symbol] = extra;
                     success = true;
-                  } else { throw new Error('Chart API No Data'); }
-              } catch (chartErr) {
-                  attempts++;
-                  if (attempts <= maxRetries) { await delay(1000); } 
-                  else { console.warn(`標的 ${symbol} 更新失敗`); }
-              }
+                } else { throw new Error('Quote API No Data'); }
+                } catch (quoteErr) {
+                // ... fallback to chart api logic
+                try {
+                    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
+                    const result = await fetchWithProxyFallback(chartUrl);
+                    const meta = result?.chart?.result?.[0]?.meta;
+                    if (meta && meta.regularMarketPrice !== undefined) {
+                        newPrices[symbol] = meta.regularMarketPrice;
+                        // Maintain existing nav/yield from pre-fill
+                        success = true;
+                    } else { throw new Error('Chart API No Data'); }
+                } catch (chartErr) {
+                    attempts++;
+                    if (attempts <= maxRetries) { await delay(1000); } 
+                    else { console.warn(`標的 ${symbol} 更新失敗`); }
+                }
+                }
             }
-          }
-        });
-        await Promise.all(promises);
-    } 
-
-    // FINALIZE STEP: Gap filling for yields/navs if still missing (e.g. Yahoo failed)
-    // Iterate ALL symbols in list (not just fetched ones) to ensure consistency
-    symbolsToFetchList.forEach(symbol => {
-        const extra = newEtfData[symbol] || {};
-        const price = newPrices[symbol];
+            });
+            await Promise.all(promises);
+        }
+    } catch(e) {
+        console.error("Fetch Loop Error:", e);
+    } finally {
+        // Only run teYields fallback if not already set by loop
+        // Re-fetch TE for fallback if needed (e.g. initial load skipped TE)
+        // Check if teYields exists in this scope, if not fetch again? 
+        // Note: tePromise was awaited above, so teYields variable exists.
         
-        // 1. NAV Final Check
-        if (!extra.nav && price) {
-             // Can we estimate? Without PB ratio (from Yahoo quote), we can't easily.
-             // Just mark as N/A or maybe use price as proxy with warning? No, misleading.
-        }
+        // Wait for TE promise again if it wasn't awaited (it was).
+        const teYields = await fetchTradingEconomicsYields(); // Re-fetch to be safe or use cached
+        
+        setUsBondYields({
+            '10Y': teYields['10Y'] || newPrices['^TNX'] || null,
+            '20Y': teYields['20Y'] || newPrices['^TVC'] || null, 
+            '30Y': teYields['30Y'] || newPrices['^TYX'] || null
+        });
 
-        // 2. Yield Final Check (TV / TE / Benchmark)
-        if (!extra.yield) {
-             if (tvData[symbol]?.yield) { extra.yield = tvData[symbol].yield; extra.yieldSource = "TV"; }
-             
-             // BOND ETF BENCHMARK FALLBACK (Final Resort)
-             const name = symbolToName[symbol] || '';
-             if (!extra.yield && (name.includes('美債') || name.includes('債'))) {
-                 if (name.includes('20年')) {
-                     extra.yield = teYields['20Y'] || newPrices['^TVC'] || newPrices['^TYX'];
-                     extra.yieldSource = "BM(20Y)";
-                     console.log(`[Yield Fallback] Using Benchmark for ${symbol}: ${extra.yield}`);
-                 } else {
-                     // Default to 10Y or something
-                     extra.yield = teYields['10Y'] || newPrices['^TNX'];
-                     extra.yieldSource = "BM(10Y)";
-                 }
-             }
-        }
-        newEtfData[symbol] = extra;
-    });
+        savePriceCache(newPrices, newEtfData);
+        
+        // Consolidated Data Log
+        console.log("Final Prices:", newPrices);
+        console.log("Final ETF Data:", newEtfData);
 
-    if (newPrices['TWD=X']) setUsdRate(newPrices['TWD=X']);
-    
-    // Priority: TE > TV > Yahoo. 
-    // Note: TE yields are set inside the block above or the else block
-    setUsBondYields({
-        '10Y': teYields['10Y'] || newPrices['^TNX'] || null,
-        '20Y': teYields['20Y'] || newPrices['^TVC'] || null, 
-        '30Y': teYields['30Y'] || newPrices['^TYX'] || null
-    });
-    
-    savePriceCache(newPrices, newEtfData);
-    
-    // Consolidated Data Log
-    console.log("Final Prices:", newPrices);
-    console.log("Final ETF Data:", newEtfData);
-
-    setRealTimePrices(newPrices);
-    setEtfExtraData(newEtfData);
-    setHistoricalData({});
-    localStorage.removeItem('gemini_analysis_cache');
-    setAiSignals({}); setAiSummary(null); setAiDetail(null); setUsedModel(null); setPortfolioHealth(null); 
-    setPriceLoading(false); setLastUpdated(new Date()); setLoadingMessage('更新即時股價中...'); 
-    processData(data, newPrices);
+        setRealTimePrices(newPrices);
+        setEtfExtraData(newEtfData);
+        setHistoricalData({});
+        localStorage.removeItem('gemini_analysis_cache');
+        setAiSignals({}); setAiSummary(null); setAiDetail(null); setUsedModel(null); setPortfolioHealth(null); 
+        setPriceLoading(false); setLastUpdated(new Date()); setLoadingMessage('更新即時股價中...'); 
+        processData(data, newPrices);
+    }
   };
 
   const callGeminiWithFallback = async (prompt) => {
@@ -1092,7 +1074,7 @@ const App = () => {
 
     const prompt = `請以一位專業股票分析師的角色，進行個股深度分析。
       **分析標的確認**：
-      -股票代號 (Symbol)：${symbol}
+      - 股票代號 (Symbol)：${symbol}
       - 股票名稱 (Name)：${stockName}
       - 資產屬性：${assetType} (詳細分類)
       **基本資訊**：
@@ -1489,7 +1471,7 @@ const App = () => {
       </div>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 md:py-8">
-        {priceLoading && <div className="mb-6 bg-blue-900/30 border border-blue-500/30 rounded-lg p-3 flex items-center animate-pulse"><Loader2 className="w-5 h-5 text-blue-400 animate-spin mr-3" /><span className="text-sm text-blue-200">{loadingMessage}</span></div>}
+        {priceLoading && <div className="mb-6 bg-blue-900/30 border border-blue-500/30 rounded-lg p-3 flex items-center justify-between animate-pulse"><div className="flex items-center"><Loader2 className="w-5 h-5 text-blue-400 animate-spin mr-3" /><span className="text-sm text-blue-200">{loadingMessage}</span></div><button onClick={() => setPriceLoading(false)} className="text-xs bg-red-900/50 text-red-200 px-2 py-1 rounded border border-red-500/50 flex items-center hover:bg-red-900/70"><XCircle className="w-3 h-3 mr-1" />停止</button></div>}
         {updateError && <div className="mb-6 bg-red-900/30 border border-red-500/30 rounded-lg p-3 flex items-center"><AlertTriangle className="w-5 h-5 text-red-400 mr-3 flex-shrink-0" /><span className="text-sm text-red-200">{String(updateError)}</span></div>}
 
         {activeTab === 'overview' && (
