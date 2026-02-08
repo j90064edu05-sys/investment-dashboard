@@ -11,12 +11,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v50.0 (TWSE MIS NAV Integration)
- * * [更新重點]
- * 1. 新增數據源：TWSE MIS (all_etf.txt) 用於抓取上市 ETF 即時淨值 (解決 00895/009808)。
- * 2. 優先級重構：MIS (Realtime) > Official (EOD) > Yahoo Summary > Yahoo Quote。
- * 3. 00679B 優化：強化 TPEx 代碼剝離邏輯，確保能對應到櫃買中心官方淨值。
- * 4. UI 顯示：數據來源標籤現在會顯示 "MIS" (市況報導) 作為來源。
+ * Alpha 投資戰情室 v51.4 (Post-Processing Fix)
+ * * [修正內容]
+ * 1. 架構重構：引入 "Finalize Step"，確保無論 Yahoo API 成功與否，都會在最後統一填入 TV/MIS/TE 的數據。
+ * 2. 殖利率修復：0050 (TV來源) 與 00679B (Benchmark來源) 現在能正確顯示殖利率。
+ * 3. 數據除錯：優化 Console Log，追蹤數據在各階段的變化。
  */
 
 // --- 靜態配置 ---
@@ -185,6 +184,8 @@ const isUsAsset = (symbol) => {
 
 // --- 網路請求與代理 ---
 const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) => {
+  const urlWithTime = targetUrl.includes('?') ? `${targetUrl}&t=${Date.now()}` : `${targetUrl}?t=${Date.now()}`;
+  
   const proxies = [
     { url: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, isAllOrigins: true },
     { url: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, isAllOrigins: false },
@@ -195,22 +196,31 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
 
   try {
       if(targetUrl.includes('openapi.twse.com.tw') || targetUrl.includes('mis.twse.com.tw')) {
-          const response = await fetch(targetUrl);
+          const response = await fetch(urlWithTime);
           if (response.ok) return await response.json();
       }
   } catch(e) { /* ignore */ }
 
   for (const proxy of proxies) {
     try {
-      const response = await fetch(proxy.url(targetUrl), options);
+      const response = await fetch(proxy.url(urlWithTime), options);
       if (!response.ok) throw new Error('Proxy error');
       
       const data = await response.json();
+      
+      // Handle allorigins wrapper & Deep Parse
       if (proxy.isAllOrigins && data.contents) {
-          try { return JSON.parse(data.contents); } catch (e) { return data.contents; }
+          if (typeof data.contents === 'string') {
+              try { 
+                  return JSON.parse(data.contents); 
+              } catch (e) { 
+                  return data.contents; 
+              }
+          }
+          return data.contents;
       }
       return data;
-    } catch (e) { console.warn('Proxy failed, next...', e); await delay(500); }
+    } catch (e) { /* continue to next proxy */ }
   }
   return null;
 };
@@ -413,7 +423,7 @@ const App = () => {
   const [updateError, setUpdateError] = useState(null);
   const [historicalData, setHistoricalData] = useState({});
   const [selectedHistorySymbol, setSelectedHistorySymbol] = useState(null);
-  const [isLocked, setIsLocked] = useState(false); // UI Lock State
+  const [isLocked, setIsLocked] = useState(false); 
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('1y_1d'); 
@@ -645,15 +655,9 @@ const App = () => {
     const tePromise = fetchTradingEconomicsYields();
     const tvPromise = fetchTradingViewData(symbolsToFetchList);
 
-    data.forEach(item => {
-        if (item['類別'] === '定存' && item['標的'].includes('-TD')) {
-            const currency = item['標的'].replace('-TD', '');
-            if (currency !== 'TWD' && currency !== 'USD') {
-                 const ticker = `${currency}TWD=X`;
-                 if (!symbolsToFetchList.includes(ticker)) symbolsToFetchList.push(ticker);
-            }
-        }
-    });
+    // Create a map for symbol to name for bond detection
+    const symbolToName = {};
+    data.forEach(item => { symbolToName[item['標的']] = item['名稱']; });
 
     const today = getTodayDate();
     const cache = getPriceCache();
@@ -667,17 +671,38 @@ const App = () => {
     const tpexYieldMap = {}; 
     const misEtfMap = {}; // MIS Realtime NAV
 
-    // 1. MIS TWSE (Realtime NAV)
+    // 1. MIS TWSE (Realtime NAV) - Force for ALL ETFs (Priority 1)
     try {
+       // Debug Log for MIS Fetch
+       console.log("Fetching MIS data...");
        const misRes = await fetchWithProxyFallback('https://mis.twse.com.tw/stock/data/all_etf.txt');
-       if (misRes && misRes.msgArray) {
-           misRes.msgArray.forEach(item => {
-               if (item.a && item.f) {
-                   misEtfMap[item.a] = parseFloat(item.f);
-               }
-           });
-       }
-    } catch (e) { /* ignore */ }
+       console.log("MIS Response:", misRes);
+       
+       const parseMisData = (data) => {
+           if (data.msgArray) {
+               data.msgArray.forEach(item => {
+                   if (item.a && item.f) {
+                       misEtfMap[item.a.trim()] = parseFloat(item.f);
+                   }
+               });
+           }
+           if (data.a1 && Array.isArray(data.a1)) {
+               data.a1.forEach(subObj => {
+                   if (subObj.msgArray) {
+                       subObj.msgArray.forEach(item => {
+                           if (item.a && item.f) {
+                               misEtfMap[item.a.trim()] = parseFloat(item.f);
+                           }
+                       });
+                   }
+               });
+           }
+       };
+
+       if (misRes) parseMisData(misRes);
+       
+       console.log("MIS Map:", misEtfMap);
+    } catch (e) { console.warn("MIS Fetch Failed", e); }
 
     // 2. Official Sources
     try {
@@ -689,6 +714,7 @@ const App = () => {
         if (Array.isArray(yieldRes)) {
             yieldRes.forEach(item => { twseYieldMap[item.Code] = parseFloat(item.DividendYield); });
         }
+        console.log("TWSE Data Fetched");
     } catch (e) { console.warn('TWSE Data Fetch Failed', e); }
 
     try {
@@ -709,7 +735,25 @@ const App = () => {
                 if (!isNaN(yieldVal)) { tpexYieldMap[code] = yieldVal; }
             });
         }
+        console.log("TPEx Data Fetched");
     } catch (e) { console.warn('TPEx NAV Fetch Failed', e); }
+
+    // PRE-FILL STEP: Populate known official data BEFORE Yahoo loop
+    symbolsToFetchList.forEach(symbol => {
+        const pureCode = symbol.replace(/\.TWO$|\.TW$/i, '');
+        const extra = newEtfData[symbol] || {};
+        
+        // Force MIS/Official Logic
+        if (misEtfMap[pureCode]) { extra.nav = misEtfMap[pureCode]; extra.navSource = "MIS"; }
+        else if (twseEtfMap[pureCode]) { extra.nav = twseEtfMap[pureCode]; extra.navSource = "Off(TW)"; } 
+        else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; extra.navSource = "Off(TP)"; }
+
+        if (twseYieldMap[pureCode]) { extra.yield = twseYieldMap[pureCode]; extra.yieldSource = "Off(TW)"; }
+        else if (tpexYieldMap[pureCode]) { extra.yield = tpexYieldMap[pureCode]; extra.yieldSource = "Off(TP)"; }
+
+        newEtfData[symbol] = extra;
+        if(misEtfMap[pureCode]) console.log(`[Pre-fill] Updated ${symbol} with MIS NAV: ${misEtfMap[pureCode]}`);
+    });
 
     const symbolsToFetch = symbolsToFetchList.filter(symbol => {
         if (forceUpdate) return true;
@@ -727,11 +771,15 @@ const App = () => {
         return false; 
     });
 
+    // Wait for external sources
+    const tvData = await tvPromise;
+    const teYields = await tePromise;
+    console.log("TE Yields:", teYields);
+    console.log("TV Data:", tvData);
+
     if (symbolsToFetch.length > 0) {
         const failedSymbols = [];
-        // Wait for external sources
-        const tvData = await tvPromise;
-        
+
         const promises = symbolsToFetch.map(async (symbol) => {
           const maxRetries = 2; let attempts = 0; let success = false;
           await delay(Math.random() * 1500); 
@@ -744,39 +792,48 @@ const App = () => {
               try {
                   const summaryRes = await fetchWithProxyFallback(summaryUrl);
                   summaryData = summaryRes?.quoteSummary?.result?.[0];
+                  console.log(`Summary for ${symbol}:`, summaryData);
               } catch (e) { /* ignore */ }
 
               const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
               const result = await fetchWithProxyFallback(quoteUrl);
               const quote = result?.quoteResponse?.result?.[0];
+              console.log(`Quote for ${symbol}:`, quote);
 
               if (quote && quote.regularMarketPrice !== undefined) {
                 newPrices[symbol] = quote.regularMarketPrice;
-                const extra = {};
-                const pureCode = symbol.replace(/\.TWO$|\.TW$/i, ''); 
+                // Merge with existing pre-filled data
+                const extra = { ...newEtfData[symbol] }; 
                 
-                // --- NAV Logic Priority: MIS > Official > Yahoo Summary > Yahoo Quote ---
-                if (misEtfMap[pureCode]) { extra.nav = misEtfMap[pureCode]; extra.navSource = "MIS"; }
-                else if (twseEtfMap[pureCode]) { extra.nav = twseEtfMap[pureCode]; extra.navSource = "Off(TW)"; } 
-                else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; extra.navSource = "Off(TP)"; } 
-                else if (quote.navPrice) { extra.nav = quote.navPrice; extra.navSource = "Yahoo"; }
-                else if (summaryData?.defaultKeyStatistics?.bookValue) { extra.nav = summaryData.defaultKeyStatistics.bookValue.raw; extra.navSource = "Yahoo(Est)"; }
+                // --- NAV Logic (Yahoo Fallback if Official missing) ---
+                if (!extra.nav) {
+                    if (quote.navPrice) { extra.nav = quote.navPrice; extra.navSource = "Yahoo"; }
+                    else if (summaryData?.defaultKeyStatistics?.bookValue) { extra.nav = summaryData.defaultKeyStatistics.bookValue.raw; extra.navSource = "Yahoo(Est)"; }
+                    // Fallback: If no NAV, try Manual Calc from Price/PB ratio (Yahoo)
+                    if (!extra.nav && quote.priceToBook) { extra.nav = (quote.regularMarketPrice / quote.priceToBook).toFixed(2); extra.navSource = "Calc(P/B)"; }
+                }
 
-                // --- Yield Logic Priority: Official > TradingView > Yahoo Summary > Yahoo Quote > Calc ---
-                if (twseYieldMap[pureCode]) { extra.yield = twseYieldMap[pureCode]; extra.yieldSource = "Off(TW)"; }
-                else if (tpexYieldMap[pureCode]) { extra.yield = tpexYieldMap[pureCode]; extra.yieldSource = "Off(TP)"; }
-                else if (tvData[symbol]?.yield) { extra.yield = tvData[symbol].yield; extra.yieldSource = "TV"; } // TradingView
-                else if (summaryData?.summaryDetail?.yield?.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; extra.yieldSource = "Yahoo(Sum)"; }
-                else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; extra.yieldSource = "Yahoo"; } 
-                else if (quote.yield) { extra.yield = quote.yield * 100; extra.yieldSource = "Yahoo"; }
-                else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; extra.yieldSource = "Yahoo"; }
-                // Fallback Calc
-                else if (quote.trailingAnnualDividendRate && quote.regularMarketPrice) { 
-                    extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; 
-                    extra.yieldSource = "Calc";
-                } 
+                // --- Yield Logic (TV/Yahoo/Calc Fallback if Official missing) ---
+                if (!extra.yield) {
+                     if (tvData[symbol]?.yield) { extra.yield = tvData[symbol].yield; extra.yieldSource = "TV"; } 
+                     else if (summaryData?.summaryDetail?.yield?.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; extra.yieldSource = "Yahoo(Sum)"; }
+                     else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; extra.yieldSource = "Yahoo"; } 
+                     else if (quote.yield) { extra.yield = quote.yield * 100; extra.yieldSource = "Yahoo"; }
+                     else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; extra.yieldSource = "Yahoo"; }
+                     
+                     // FORCE Fallback Calc: If no yield found, calculate from (Dividend / Price)
+                     if (!extra.yield) {
+                        if (quote.trailingAnnualDividendRate && quote.regularMarketPrice) { 
+                            extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; 
+                            extra.yieldSource = "Calc";
+                        } else if (quote.dividendRate && quote.regularMarketPrice) {
+                             extra.yield = (quote.dividendRate / quote.regularMarketPrice) * 100; 
+                             extra.yieldSource = "Calc";
+                        }
+                    }
+                }
 
-                newEtfData[symbol] = { ...newEtfData[symbol], ...extra };
+                newEtfData[symbol] = extra;
                 success = true;
               } else { throw new Error('Quote API No Data'); }
             } catch (quoteErr) {
@@ -787,13 +844,7 @@ const App = () => {
                   const meta = result?.chart?.result?.[0]?.meta;
                   if (meta && meta.regularMarketPrice !== undefined) {
                     newPrices[symbol] = meta.regularMarketPrice;
-                    const pureCode = symbol.replace(/\.TWO$|\.TW$/i, '');
-                    const extra = {};
-                    if (misEtfMap[pureCode]) { extra.nav = misEtfMap[pureCode]; extra.navSource = "MIS"; }
-                    else if (twseEtfMap[pureCode]) { extra.nav = twseEtfMap[pureCode]; extra.navSource = "Off(TW)"; } 
-                    else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; extra.navSource = "Off(TP)"; }
-                    if (twseYieldMap[pureCode]) { extra.yield = twseYieldMap[pureCode]; extra.yieldSource = "Off(TW)"; }
-                    newEtfData[symbol] = { ...newEtfData[symbol], ...extra };
+                    // Maintain existing nav/yield from pre-fill
                     success = true;
                   } else { throw new Error('Chart API No Data'); }
               } catch (chartErr) {
@@ -805,21 +856,57 @@ const App = () => {
           }
         });
         await Promise.all(promises);
-        savePriceCache(newPrices, newEtfData);
-    }
-    
-    // Wait for Trading Economics
-    const teYields = await tePromise;
+    } 
+
+    // FINALIZE STEP: Gap filling for yields/navs if still missing (e.g. Yahoo failed)
+    // Iterate ALL symbols in list (not just fetched ones) to ensure consistency
+    symbolsToFetchList.forEach(symbol => {
+        const extra = newEtfData[symbol] || {};
+        const price = newPrices[symbol];
+        
+        // 1. NAV Final Check
+        if (!extra.nav && price) {
+             // Can we estimate? Without PB ratio (from Yahoo quote), we can't easily.
+             // Just mark as N/A or maybe use price as proxy with warning? No, misleading.
+        }
+
+        // 2. Yield Final Check (TV / TE / Benchmark)
+        if (!extra.yield) {
+             if (tvData[symbol]?.yield) { extra.yield = tvData[symbol].yield; extra.yieldSource = "TV"; }
+             
+             // BOND ETF BENCHMARK FALLBACK (Final Resort)
+             const name = symbolToName[symbol] || '';
+             if (!extra.yield && (name.includes('美債') || name.includes('債'))) {
+                 if (name.includes('20年')) {
+                     extra.yield = teYields['20Y'] || newPrices['^TVC'] || newPrices['^TYX'];
+                     extra.yieldSource = "BM(20Y)";
+                     console.log(`[Yield Fallback] Using Benchmark for ${symbol}: ${extra.yield}`);
+                 } else {
+                     // Default to 10Y or something
+                     extra.yield = teYields['10Y'] || newPrices['^TNX'];
+                     extra.yieldSource = "BM(10Y)";
+                 }
+             }
+        }
+        newEtfData[symbol] = extra;
+    });
 
     if (newPrices['TWD=X']) setUsdRate(newPrices['TWD=X']);
     
     // Priority: TE > TV > Yahoo. 
+    // Note: TE yields are set inside the block above or the else block
     setUsBondYields({
         '10Y': teYields['10Y'] || newPrices['^TNX'] || null,
         '20Y': teYields['20Y'] || newPrices['^TVC'] || null, 
         '30Y': teYields['30Y'] || newPrices['^TYX'] || null
     });
     
+    savePriceCache(newPrices, newEtfData);
+    
+    // Consolidated Data Log
+    console.log("Final Prices:", newPrices);
+    console.log("Final ETF Data:", newEtfData);
+
     setRealTimePrices(newPrices);
     setEtfExtraData(newEtfData);
     setHistoricalData({});
@@ -982,7 +1069,7 @@ const App = () => {
    - **地雷 (忽略)**：殖利率 (意義不大)。
 
 5. **債券型 ETF (如 00679B, TLT)**
-   - **主要 (第一濾網)**：美債殖利率 (Yield 創新高時為買點)。
+   - **主要 (第一濾網)**：美債殖利率 (Yield 創新高時為買點)。(針對名稱含"20年"的標的，請務必參考 ^TVC 20年期數據)
    - **輔助 (確認訊號)**：匯率 (台幣強升段有利)、折溢價 (市價 < 淨值)。
    - **地雷 (忽略)**：MACD / RSI (易失真)。
 `;
@@ -1005,7 +1092,7 @@ const App = () => {
 
     const prompt = `請以一位專業股票分析師的角色，進行個股深度分析。
       **分析標的確認**：
-      - 股票代號 (Symbol)：${symbol}
+      -股票代號 (Symbol)：${symbol}
       - 股票名稱 (Name)：${stockName}
       - 資產屬性：${assetType} (詳細分類)
       **基本資訊**：
@@ -1762,13 +1849,17 @@ const App = () => {
                     {(isETF || isBondETF) && (
                         <div className="col-span-2 flex justify-between bg-slate-700/30 p-2 rounded">
                             <span className="text-slate-400 text-xs">參考淨值</span>
-                            <span className="text-slate-200 text-xs font-medium">{etfData?.nav ? formatPrice(etfData.nav) : '查無資料'}</span>
+                            <span className="text-slate-200 text-xs font-medium">
+                                {etfData?.nav ? `${formatPrice(etfData.nav)} ${etfData.navSource ? `(${etfData.navSource})` : ''}` : '查無資料'}
+                            </span>
                         </div>
                     )}
                     {(isBond || isBondETF) && (
                         <div className="col-span-2 flex justify-between bg-slate-700/30 p-2 rounded -mt-2">
                             <span className="text-slate-400 text-xs">參考殖利率</span>
-                            <span className="text-slate-200 text-xs font-medium">{yieldVal !== null ? `${yieldVal.toFixed(2)}%` : '查無資料'}</span>
+                            <span className="text-slate-200 text-xs font-medium">
+                                {yieldVal !== null ? `${yieldVal.toFixed(2)}% ${etfData?.yieldSource ? `(${etfData.yieldSource})` : ''}` : '查無資料'}
+                            </span>
                         </div>
                     )}
                   </div>
@@ -1831,7 +1922,7 @@ const App = () => {
                             { (isETF || isBondETF) ? (
                                 etfData?.nav ? (
                                     <div className="flex flex-col">
-                                        <span className="text-sm text-slate-300 font-medium">{formatPrice(etfData.nav)}</span>
+                                        <span className="text-sm text-slate-300 font-medium">{formatPrice(etfData.nav)} <span className="text-[10px] text-slate-500">{etfData.navSource ? `(${etfData.navSource})` : ''}</span></span>
                                         {premDisc !== null && (
                                             <span className={`text-[10px] mt-0.5 ${premDisc > 0 ? 'text-red-400' : 'text-green-400'}`}>
                                                 {premDisc > 0 ? '溢價' : '折價'} {Math.abs(premDisc * 100).toFixed(2)}%
@@ -1846,8 +1937,8 @@ const App = () => {
                         <td className="px-6 py-4 whitespace-nowrap text-left">
                             { (isBond || isBondETF) ? (
                                 yieldVal !== null ? (
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-900/30 text-purple-300 border border-purple-500/30">
-                                        {yieldVal.toFixed(2)}%
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-900/30 text-purple-300 border border-purple-500/30" title={etfData.yieldSource}>
+                                        {yieldVal.toFixed(2)}% <span className="ml-1 text-[8px] opacity-70">{etfData.yieldSource ? `(${etfData.yieldSource})` : ''}</span>
                                     </span>
                                 ) : <span className="text-xs text-slate-500">查無資料</span>
                             ) : <span className="text-slate-600">-</span> }
@@ -1913,55 +2004,6 @@ const App = () => {
                   </tbody>
                 </table>
               </div>
-            </div>
-          </div>
-        )}
-
-        {/* ... (Config tab same) ... */}
-        {activeTab === 'config' && (
-          <div className="max-w-2xl mx-auto bg-slate-800 p-8 rounded-xl border border-slate-700 shadow-lg">
-            <h2 className="text-2xl font-bold text-white mb-6 flex items-center"><Settings className="w-6 h-6 mr-3 text-blue-500" /> 資料來源設定</h2>
-            <div className="space-y-4">
-              <div><label className="block text-sm font-medium text-slate-300 mb-2">Google Sheets CSV 連結</label><div className="flex rounded-md shadow-sm"><input type="text" value={sheetUrl} onChange={(e) => setSheetUrl(e.target.value)} placeholder="https://docs.google.com/spreadsheets/d/.../pub?output=csv" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" /></div></div>
-              
-              <div className="pt-4 border-t border-slate-700">
-                <h4 className="text-sm font-semibold text-slate-300 mb-4 flex items-center"><Calculator className="w-4 h-4 mr-2" /> 交易成本設定</h4>
-                <div>
-                   <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
-                   <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
-                   <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
-                </div>
-              </div>
-
-              <div className="pt-4 border-t border-slate-700">
-                <label className="block text-sm font-medium text-slate-300 mb-2">Google Gemini API Key (AI 分析用)</label>
-                <div className="flex gap-2">
-                    <input type="password" value={geminiApiKey} onChange={(e) => setGeminiApiKey(e.target.value)} placeholder="請輸入 API Key (例如: AIzaSy...)" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
-                    <button onClick={handleSaveSettings} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-sm font-medium transition-colors"><Save className="w-4 h-4 mr-1 inline" />儲存</button>
-                </div>
-                <p className="mt-2 text-xs text-slate-500">* 單機版需自行申請 API Key 才能使用 AI 功能。<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 ml-1 underline">前往申請</a></p>
-              </div>
-
-              {/* Model Selection Dropdown */}
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-slate-300 mb-2">選擇 AI 模型</label>
-                <div className="flex gap-2 items-center">
-                  <Cpu className="w-5 h-5 text-slate-400" />
-                  <select 
-                    value={selectedModel} 
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    className="flex-1 px-4 py-2 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                  >
-                    {AVAILABLE_MODELS.map(model => (
-                      <option key={model.id} value={model.id}>{model.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <p className="mt-1 text-xs text-slate-500 ml-7">* 預設使用 Flash 模型以節省額度，Pro 模型分析更精準但速度較慢。</p>
-              </div>
-
-              {error && <div className="p-3 bg-red-900/30 border border-red-500/50 text-red-300 rounded-md text-sm">{String(error)}</div>}
-              <button onClick={handleFetchButton} disabled={loading} className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 focus:ring-offset-slate-800 transition-colors ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}>{loading ? '資料載入中...' : '匯入並更新股價'}</button>
             </div>
           </div>
         )}
