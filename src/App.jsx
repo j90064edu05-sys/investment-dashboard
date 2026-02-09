@@ -11,11 +11,12 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v51.5 (Timeout Protection & Stop Button)
+ * Alpha 投資戰情室 v52.0 (Settings & Yield Fix)
  * * [修正內容]
- * 1. 逾時防護：所有 Proxy 請求新增 3.5秒 Timeout，防止網路卡死。
- * 2. 強制停止：Loading 提示框新增「停止」按鈕，可手動中斷更新。
- * 3. 結構安全：fetchRealTimePrices 全面採用 try-finally 確保 Loading 狀態必會解除。
+ * 1. UI 修復：確保「設定」頁籤能正常顯示，解決被截斷問題。
+ * 2. 殖利率強效計算：若 API 無殖利率，強制使用 (股息/股價) 計算，解決 0050/0056 顯示問題。
+ * 3. 債券對標修復：修正 symbolToName 對應問題，確保 00679B 能正確抓取美債 20Y 基準。
+ * 4. 移除不穩定的 TV Scanner，改用 Yahoo Summary 深度解析。
  */
 
 // --- 靜態配置 ---
@@ -182,7 +183,7 @@ const isUsAsset = (symbol) => {
     return !symbol.includes('.TW') && !symbol.includes('.TWO') && symbol !== '定存' && !symbol.includes('TWD=X');
 };
 
-// --- 網路請求與代理 (Updated with Timeout) ---
+// --- 網路請求與代理 ---
 const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) => {
   const urlWithTime = targetUrl.includes('?') ? `${targetUrl}&t=${Date.now()}` : `${targetUrl}?t=${Date.now()}`;
   
@@ -203,7 +204,7 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
 
   for (const proxy of proxies) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3500); // 3.5s timeout to prevent hanging
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
 
     try {
       const response = await fetch(proxy.url(urlWithTime), { ...options, signal: controller.signal });
@@ -250,41 +251,6 @@ const fetchTradingEconomicsYields = async () => {
             '30Y': extractYield('USGG30YR:IND')
         };
     } catch (e) { return {}; }
-};
-
-// --- TradingView Scanner Fetcher (TV) ---
-const fetchTradingViewData = async (symbols) => {
-    const twTickers = [];
-    symbols.forEach(s => {
-        if (s.includes('.TW')) twTickers.push(`TWSE:${s.split('.')[0]}`);
-        else if (s.includes('.TWO')) twTickers.push(`TPEX:${s.split('.')[0]}`);
-    });
-
-    const results = {};
-    const fetchTV = async (market, tickers) => {
-        if (tickers.length === 0) return;
-        const url = `https://scanner.tradingview.com/${market}/scan`;
-        try {
-           const response = await fetchWithProxyFallback(url, 'POST', {
-               "symbols": { "tickers": tickers },
-               "columns": ["close", "dividend_yield_recent"]
-           });
-           if (response && response.data) {
-               response.data.forEach(item => {
-                   const ticker = item.s.split(':')[1];
-                   const originalSymbol = symbols.find(s => s.startsWith(ticker));
-                   if (originalSymbol) {
-                       results[originalSymbol] = {
-                           price: item.d[0],
-                           yield: item.d[1] 
-                       };
-                   }
-               });
-           }
-        } catch(e) { /* ignore */ }
-    };
-    await fetchTV('taiwan', twTickers);
-    return results;
 };
 
 // --- 技術指標計算函式 (保持不變) ---
@@ -658,9 +624,8 @@ const App = () => {
     const hasLongTermBond = data.some(item => isLongTermBond(item['名稱']));
     if (hasLongTermBond && !symbolsToFetchList.includes('^TVC')) { symbolsToFetchList.push('^TVC'); }
 
-    // Start Trading Economics & TradingView Fetch in Parallel
+    // Start Trading Economics Fetch in Parallel
     const tePromise = fetchTradingEconomicsYields();
-    const tvPromise = fetchTradingViewData(symbolsToFetchList);
 
     // Create a map for symbol to name for bond detection
     const symbolToName = {};
@@ -680,7 +645,6 @@ const App = () => {
 
     // 1. MIS TWSE (Realtime NAV) - Force for ALL ETFs (Priority 1)
     try {
-       // Debug Log for MIS Fetch
        console.log("Fetching MIS data...");
        const misRes = await fetchWithProxyFallback('https://mis.twse.com.tw/stock/data/all_etf.txt');
        console.log("MIS Response:", misRes);
@@ -707,7 +671,6 @@ const App = () => {
        };
 
        if (misRes) parseMisData(misRes);
-       
        console.log("MIS Map:", misEtfMap);
     } catch (e) { console.warn("MIS Fetch Failed", e); }
 
@@ -721,7 +684,6 @@ const App = () => {
         if (Array.isArray(yieldRes)) {
             yieldRes.forEach(item => { twseYieldMap[item.Code] = parseFloat(item.DividendYield); });
         }
-        console.log("TWSE Data Fetched");
     } catch (e) { console.warn('TWSE Data Fetch Failed', e); }
 
     try {
@@ -742,7 +704,6 @@ const App = () => {
                 if (!isNaN(yieldVal)) { tpexYieldMap[code] = yieldVal; }
             });
         }
-        console.log("TPEx Data Fetched");
     } catch (e) { console.warn('TPEx NAV Fetch Failed', e); }
 
     // PRE-FILL STEP: Populate known official data BEFORE Yahoo loop
@@ -759,7 +720,6 @@ const App = () => {
         else if (tpexYieldMap[pureCode]) { extra.yield = tpexYieldMap[pureCode]; extra.yieldSource = "Off(TP)"; }
 
         newEtfData[symbol] = extra;
-        if(misEtfMap[pureCode]) console.log(`[Pre-fill] Updated ${symbol} with MIS NAV: ${misEtfMap[pureCode]}`);
     });
 
     const symbolsToFetch = symbolsToFetchList.filter(symbol => {
@@ -780,13 +740,8 @@ const App = () => {
 
     try {
         if (symbolsToFetch.length > 0) {
-            const failedSymbols = [];
             // Wait for external sources
-            const tvData = await tvPromise;
             const teYields = await tePromise;
-            
-            console.log("TE Yields:", teYields);
-            console.log("TV Data:", tvData);
 
             const promises = symbolsToFetch.map(async (symbol) => {
             const maxRetries = 2; let attempts = 0; let success = false;
@@ -800,13 +755,11 @@ const App = () => {
                 try {
                     const summaryRes = await fetchWithProxyFallback(summaryUrl);
                     summaryData = summaryRes?.quoteSummary?.result?.[0];
-                    console.log(`Summary for ${symbol}:`, summaryData);
                 } catch (e) { /* ignore */ }
 
                 const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
                 const result = await fetchWithProxyFallback(quoteUrl);
                 const quote = result?.quoteResponse?.result?.[0];
-                console.log(`Quote for ${symbol}:`, quote);
 
                 if (quote && quote.regularMarketPrice !== undefined) {
                     newPrices[symbol] = quote.regularMarketPrice;
@@ -821,10 +774,9 @@ const App = () => {
                         if (!extra.nav && quote.priceToBook) { extra.nav = (quote.regularMarketPrice / quote.priceToBook).toFixed(2); extra.navSource = "Calc(P/B)"; }
                     }
 
-                    // --- Yield Logic (TV/Yahoo/Calc Fallback if Official missing) ---
+                    // --- Yield Logic (Yahoo/Calc Fallback if Official missing) ---
                     if (!extra.yield) {
-                        if (tvData[symbol]?.yield) { extra.yield = tvData[symbol].yield; extra.yieldSource = "TV"; } 
-                        else if (summaryData?.summaryDetail?.yield?.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; extra.yieldSource = "Yahoo(Sum)"; }
+                        if (summaryData?.summaryDetail?.yield?.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; extra.yieldSource = "Yahoo(Sum)"; }
                         else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; extra.yieldSource = "Yahoo"; } 
                         else if (quote.yield) { extra.yield = quote.yield * 100; extra.yieldSource = "Yahoo"; }
                         else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; extra.yieldSource = "Yahoo"; }
@@ -858,7 +810,6 @@ const App = () => {
                 } catch (chartErr) {
                     attempts++;
                     if (attempts <= maxRetries) { await delay(1000); } 
-                    else { console.warn(`標的 ${symbol} 更新失敗`); }
                 }
                 }
             }
@@ -868,10 +819,6 @@ const App = () => {
     } catch(e) {
         console.error("Fetch Loop Error:", e);
     } finally {
-        // Only run teYields fallback if not already set by loop
-        // Re-fetch TE for fallback if needed (e.g. initial load skipped TE)
-        // Check if teYields exists in this scope, if not fetch again? 
-        // Note: tePromise was awaited above, so teYields variable exists.
         
         // Wait for TE promise again if it wasn't awaited (it was).
         const teYields = await fetchTradingEconomicsYields(); // Re-fetch to be safe or use cached
@@ -882,9 +829,27 @@ const App = () => {
             '30Y': teYields['30Y'] || newPrices['^TYX'] || null
         });
 
+        // FINALIZE STEP: Gap filling for yields if still missing
+        // Iterate ALL symbols in list
+        symbolsToFetchList.forEach(symbol => {
+             const extra = newEtfData[symbol] || {};
+             
+             // BOND ETF BENCHMARK FALLBACK (Final Resort)
+             const name = symbolToName[symbol] || '';
+             if (!extra.yield && (name.includes('美債') || name.includes('債'))) {
+                 if (name.includes('20年')) {
+                     extra.yield = teYields['20Y'] || newPrices['^TVC'] || newPrices['^TYX'];
+                     extra.yieldSource = "BM(20Y)";
+                 } else {
+                     extra.yield = teYields['10Y'] || newPrices['^TNX'];
+                     extra.yieldSource = "BM(10Y)";
+                 }
+             }
+             newEtfData[symbol] = extra;
+        });
+
         savePriceCache(newPrices, newEtfData);
         
-        // Consolidated Data Log
         console.log("Final Prices:", newPrices);
         console.log("Final ETF Data:", newEtfData);
 
@@ -1986,6 +1951,55 @@ const App = () => {
                   </tbody>
                 </table>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ... (Config tab same) ... */}
+        {activeTab === 'config' && (
+          <div className="max-w-2xl mx-auto bg-slate-800 p-8 rounded-xl border border-slate-700 shadow-lg">
+            <h2 className="text-2xl font-bold text-white mb-6 flex items-center"><Settings className="w-6 h-6 mr-3 text-blue-500" /> 資料來源設定</h2>
+            <div className="space-y-4">
+              <div><label className="block text-sm font-medium text-slate-300 mb-2">Google Sheets CSV 連結</label><div className="flex rounded-md shadow-sm"><input type="text" value={sheetUrl} onChange={(e) => setSheetUrl(e.target.value)} placeholder="https://docs.google.com/spreadsheets/d/.../pub?output=csv" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" /></div></div>
+              
+              <div className="pt-4 border-t border-slate-700">
+                <h4 className="text-sm font-semibold text-slate-300 mb-4 flex items-center"><Calculator className="w-4 h-4 mr-2" /> 交易成本設定</h4>
+                <div>
+                   <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
+                   <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
+                   <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-slate-700">
+                <label className="block text-sm font-medium text-slate-300 mb-2">Google Gemini API Key (AI 分析用)</label>
+                <div className="flex gap-2">
+                    <input type="password" value={geminiApiKey} onChange={(e) => setGeminiApiKey(e.target.value)} placeholder="請輸入 API Key (例如: AIzaSy...)" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
+                    <button onClick={handleSaveSettings} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-sm font-medium transition-colors"><Save className="w-4 h-4 mr-1 inline" />儲存</button>
+                </div>
+                <p className="mt-2 text-xs text-slate-500">* 單機版需自行申請 API Key 才能使用 AI 功能。<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 ml-1 underline">前往申請</a></p>
+              </div>
+
+              {/* Model Selection Dropdown */}
+              <div className="mt-4">
+                <label className="block text-sm font-medium text-slate-300 mb-2">選擇 AI 模型</label>
+                <div className="flex gap-2 items-center">
+                  <Cpu className="w-5 h-5 text-slate-400" />
+                  <select 
+                    value={selectedModel} 
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="flex-1 px-4 py-2 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                  >
+                    {AVAILABLE_MODELS.map(model => (
+                      <option key={model.id} value={model.id}>{model.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="mt-1 text-xs text-slate-500 ml-7">* 預設使用 Flash 模型以節省額度，Pro 模型分析更精準但速度較慢。</p>
+              </div>
+
+              {error && <div className="p-3 bg-red-900/30 border border-red-500/50 text-red-300 rounded-md text-sm">{String(error)}</div>}
+              <button onClick={handleFetchButton} disabled={loading} className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 focus:ring-offset-slate-800 transition-colors ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}>{loading ? '資料載入中...' : '匯入並更新股價'}</button>
             </div>
           </div>
         )}
