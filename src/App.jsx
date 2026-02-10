@@ -11,12 +11,10 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v52.0 (Settings & Yield Fix)
+ * Alpha 投資戰情室 v52.2 (Clean Pie Chart)
  * * [修正內容]
- * 1. UI 修復：確保「設定」頁籤能正常顯示，解決被截斷問題。
- * 2. 殖利率強效計算：若 API 無殖利率，強制使用 (股息/股價) 計算，解決 0050/0056 顯示問題。
- * 3. 債券對標修復：修正 symbolToName 對應問題，確保 00679B 能正確抓取美債 20Y 基準。
- * 4. 移除不穩定的 TV Scanner，改用 Yahoo Summary 深度解析。
+ * 1. 介面優化：移除圓餅圖上的直接標籤 (Labels)，解決文字重疊與閱讀困難問題。
+ * 2. 資訊保留：僅在下方圖例 (Legend) 中顯示各類別百分比，保持畫面整潔。
  */
 
 // --- 靜態配置 ---
@@ -129,7 +127,8 @@ const savePriceCache = (newPrices, extraData) => {
             nav: extraData[symbol]?.nav || existing.nav,
             navSource: extraData[symbol]?.navSource || existing.navSource,
             yield: extraData[symbol]?.yield || existing.yield,
-            yieldSource: extraData[symbol]?.yieldSource || existing.yieldSource
+            yieldSource: extraData[symbol]?.yieldSource || existing.yieldSource,
+            dateStr: extraData[symbol]?.dateStr || existing.dateStr // Save date string
         }; 
     });
     localStorage.setItem('investment_price_cache', JSON.stringify(updatedCache));
@@ -547,7 +546,7 @@ const App = () => {
   };
 
   // 4. Data Processing Functions
-  const processData = (data, pricesMap) => {
+  const processData = (data, pricesMap, extraMap = {}) => {
     const currentUsdRate = pricesMap['TWD=X'] || 30; 
     const enrichedData = data.map((item, index) => {
       const shares = parseFloat(item['股數']) || 0;
@@ -581,12 +580,14 @@ const App = () => {
       const netProfit = grossProfit - feeFinal - estimateTax;
       const calculatedBuyPriceTwd = shares > 0 ? costBasisTwd / shares : 0;
       const roi = costBasisTwd > 0 ? netProfit / costBasisTwd : 0;
+      
       return { 
         ...item, id: index, shares, isUS, isTD,
         buyPrice: calculatedBuyPriceTwd, currentPrice: currentPriceTwd, currentPriceRaw,
         buyPriceRaw, costBasis: costBasisTwd, marketValue: marketValueTwd, 
         profitLoss: netProfit, grossProfit, estimateFee: feeFinal, estimateTax, roi, 
-        isRealData: !!(pricesMap?.[symbol] || (isTD && pricesMap?.[isTD ? (symbol.replace('-TD','')==='USD'?'TWD=X':`${symbol.replace('-TD','')}TWD=X`) : '']))
+        isRealData: !!(pricesMap?.[symbol] || (isTD && pricesMap?.[isTD ? (symbol.replace('-TD','')==='USD'?'TWD=X':`${symbol.replace('-TD','')}TWD=X`) : ''])),
+        priceDate: extraMap[symbol]?.dateStr // Pass date info
       };
     });
     setPortfolioData(enrichedData);
@@ -645,6 +646,7 @@ const App = () => {
 
     // 1. MIS TWSE (Realtime NAV) - Force for ALL ETFs (Priority 1)
     try {
+       // Debug Log for MIS Fetch
        console.log("Fetching MIS data...");
        const misRes = await fetchWithProxyFallback('https://mis.twse.com.tw/stock/data/all_etf.txt');
        console.log("MIS Response:", misRes);
@@ -684,6 +686,7 @@ const App = () => {
         if (Array.isArray(yieldRes)) {
             yieldRes.forEach(item => { twseYieldMap[item.Code] = parseFloat(item.DividendYield); });
         }
+        console.log("TWSE Data Fetched");
     } catch (e) { console.warn('TWSE Data Fetch Failed', e); }
 
     try {
@@ -704,6 +707,7 @@ const App = () => {
                 if (!isNaN(yieldVal)) { tpexYieldMap[code] = yieldVal; }
             });
         }
+        console.log("TPEx Data Fetched");
     } catch (e) { console.warn('TPEx NAV Fetch Failed', e); }
 
     // PRE-FILL STEP: Populate known official data BEFORE Yahoo loop
@@ -720,6 +724,7 @@ const App = () => {
         else if (tpexYieldMap[pureCode]) { extra.yield = tpexYieldMap[pureCode]; extra.yieldSource = "Off(TP)"; }
 
         newEtfData[symbol] = extra;
+        if(misEtfMap[pureCode]) console.log(`[Pre-fill] Updated ${symbol} with MIS NAV: ${misEtfMap[pureCode]}`);
     });
 
     const symbolsToFetch = symbolsToFetchList.filter(symbol => {
@@ -742,6 +747,7 @@ const App = () => {
         if (symbolsToFetch.length > 0) {
             // Wait for external sources
             const teYields = await tePromise;
+            console.log("TE Yields:", teYields);
 
             const promises = symbolsToFetch.map(async (symbol) => {
             const maxRetries = 2; let attempts = 0; let success = false;
@@ -755,17 +761,24 @@ const App = () => {
                 try {
                     const summaryRes = await fetchWithProxyFallback(summaryUrl);
                     summaryData = summaryRes?.quoteSummary?.result?.[0];
+                    console.log(`Summary for ${symbol}:`, summaryData);
                 } catch (e) { /* ignore */ }
 
                 const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
                 const result = await fetchWithProxyFallback(quoteUrl);
                 const quote = result?.quoteResponse?.result?.[0];
+                console.log(`Quote for ${symbol}:`, quote);
 
                 if (quote && quote.regularMarketPrice !== undefined) {
                     newPrices[symbol] = quote.regularMarketPrice;
                     // Merge with existing pre-filled data
                     const extra = { ...newEtfData[symbol] }; 
                     
+                    // Capture Date
+                    if(quote.regularMarketTime) {
+                        extra.dateStr = new Date(quote.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+                    }
+
                     // --- NAV Logic (Yahoo Fallback if Official missing) ---
                     if (!extra.nav) {
                         if (quote.navPrice) { extra.nav = quote.navPrice; extra.navSource = "Yahoo"; }
@@ -805,11 +818,18 @@ const App = () => {
                     if (meta && meta.regularMarketPrice !== undefined) {
                         newPrices[symbol] = meta.regularMarketPrice;
                         // Maintain existing nav/yield from pre-fill
+                        
+                        const extra = { ...newEtfData[symbol] };
+                         if(meta.regularMarketTime) {
+                            extra.dateStr = new Date(meta.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+                        }
+                        newEtfData[symbol] = extra;
                         success = true;
                     } else { throw new Error('Chart API No Data'); }
                 } catch (chartErr) {
                     attempts++;
                     if (attempts <= maxRetries) { await delay(1000); } 
+                    else { console.warn(`標的 ${symbol} 更新失敗`); }
                 }
                 }
             }
@@ -859,7 +879,7 @@ const App = () => {
         localStorage.removeItem('gemini_analysis_cache');
         setAiSignals({}); setAiSummary(null); setAiDetail(null); setUsedModel(null); setPortfolioHealth(null); 
         setPriceLoading(false); setLastUpdated(new Date()); setLoadingMessage('更新即時股價中...'); 
-        processData(data, newPrices);
+        processData(data, newPrices, newEtfData);
     }
   };
 
@@ -1039,7 +1059,7 @@ const App = () => {
 
     const prompt = `請以一位專業股票分析師的角色，進行個股深度分析。
       **分析標的確認**：
-      - 股票代號 (Symbol)：${symbol}
+      -股票代號 (Symbol)：${symbol}
       - 股票名稱 (Name)：${stockName}
       - 資產屬性：${assetType} (詳細分類)
       **基本資訊**：
@@ -1209,7 +1229,7 @@ const App = () => {
             });
             setEtfExtraData(cachedEtfData);
             
-            processData(validData, flatPrices); 
+            processData(validData, flatPrices, cachedEtfData); 
             setLoading(false); 
             fetchRealTimePrices(validData, false); 
             
@@ -1460,7 +1480,7 @@ const App = () => {
                   <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><PieIcon className="w-5 h-5 mr-2 text-blue-400" /> 資產類別配置</h3>
                   <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
                     {allocationData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">{allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}</Pie><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} /><Legend /></PieChart></ResponsiveContainer>
+                      <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">{allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}</Pie><RechartsTooltip itemStyle={{ color: '#f1f5f9' }} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} /><Legend formatter={(value, entry) => { const { payload } = entry; return `${value} (${(payload.percent * 100).toFixed(1)}%)`; }} /></PieChart></ResponsiveContainer>
                     ) : <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>}
                   </div>
                 </div>
@@ -1787,7 +1807,7 @@ const App = () => {
                   </div>
                   
                   <div className="grid grid-cols-2 gap-4 text-sm mb-3 border-t border-slate-700/50 pt-3">
-                    <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{row.isUS ? '$' : ''}{formatPrice(row.currentPriceRaw || row.currentPrice)}</span></div>
+                    <div><span className="text-slate-500 block text-xs">現價</span><span className="text-white font-medium">{row.isUS ? '$' : ''}{formatPrice(row.currentPriceRaw || row.currentPrice)} <span className="text-[10px] text-slate-500 ml-1">{row.priceDate || ''}</span></span></div>
                     <div><span className="text-slate-500 block text-xs">成本</span><span className="text-slate-300">{row.isUS ? '$' : ''}{formatPrice(row.buyPriceRaw || row.buyPrice)}</span></div>
                     <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
                     <div><span className="text-slate-500 block text-xs">股數</span><span className="text-slate-300">{row.shares.toLocaleString()}</span></div>
@@ -1929,7 +1949,7 @@ const App = () => {
                         </td>
 
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{formatPrice(row.buyPriceRaw || row.buyPrice)}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{formatPrice(row.currentPriceRaw || row.currentPrice)}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold text-yellow-400">{formatPrice(row.currentPriceRaw || row.currentPrice)} <span className="text-[10px] text-slate-500 ml-1">{row.priceDate || ''}</span></td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-slate-300">{row.shares.toLocaleString()}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-bold relative group">
                           <span className={`cursor-help border-b border-dotted ${(row.profitLoss || 0) >= 0 ? 'text-red-500 border-red-500' : 'text-green-500 border-green-500'}`}>{(row.profitLoss || 0) > 0 ? '+' : ''}{formatCurrency(row.profitLoss)}</span>
@@ -1957,7 +1977,7 @@ const App = () => {
 
         {/* ... (Config tab same) ... */}
         {activeTab === 'config' && (
-          <div className="max-w-2xl mx-auto bg-slate-800 p-8 rounded-xl border border-slate-700 shadow-lg">
+          <div className="max-w-2xl mx-auto bg-slate-800 p-8 rounded-xl border border-slate-700 shadow-lg mb-20">
             <h2 className="text-2xl font-bold text-white mb-6 flex items-center"><Settings className="w-6 h-6 mr-3 text-blue-500" /> 資料來源設定</h2>
             <div className="space-y-4">
               <div><label className="block text-sm font-medium text-slate-300 mb-2">Google Sheets CSV 連結</label><div className="flex rounded-md shadow-sm"><input type="text" value={sheetUrl} onChange={(e) => setSheetUrl(e.target.value)} placeholder="https://docs.google.com/spreadsheets/d/.../pub?output=csv" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" /></div></div>
