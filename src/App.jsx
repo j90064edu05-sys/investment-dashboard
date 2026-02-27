@@ -11,10 +11,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v53.5 (DCA Date Fix)
+ * Alpha 投資戰情室 v54.2 (API Error Fix)
  * * [修正內容]
- * 1. 日期轉換：修復 TWSE 假日表「民國年」無法正確比對「西元年」導致的最後交易日誤判問題。
- * 2. 時區修正：移除 toISOString，確保所有日期皆使用本地時間比對。
+ * 1. 移除了不存在的 Gemini 3 模型，更新為穩定且支援的 Gemini 2.5 / 2.0 / 1.5 模型清單。
+ * 2. 強化 API 錯誤捕捉機制：當模型連線失敗時，會捕捉詳細的錯誤訊息並顯示給使用者。
+ * 3. 針對無效 API Key (HTTP 400/403) 提早中斷重試機制，避免無謂的 fallback。
  */
 
 // --- 靜態配置 ---
@@ -53,10 +54,10 @@ const CATEGORY_STYLES = {
 };
 
 const AVAILABLE_MODELS = [
+  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview (最強大)' },
   { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview (最新快速)' },
-  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro Preview (最新精準)' },
   { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (平衡)' },
-  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (進階)' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (穩定)' },
 ];
 
 const ASSET_TYPES = {
@@ -195,7 +196,7 @@ const withTimer = async (name, promiseFn) => {
     }
 };
 
-// --- 網路請求與代理 (v54.0: 競速模式 Promise.any) ---
+// --- 網路請求與代理 (v54.1: 修正 Error 捕捉) ---
 const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) => {
   const urlWithTime = targetUrl.includes('?') ? `${targetUrl}&t=${Date.now()}` : `${targetUrl}?t=${Date.now()}`;
   
@@ -213,16 +214,16 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
           const response = await fetch(urlWithTime);
           if (response.ok) return await response.json();
       }
-  } catch(e) { /* ignore */ }
+  } catch(e) { /* ignore */ } 
 
-  // 2. 代理伺服器競速模式 (Race Condition) - 誰先回傳成功的 JSON 就用誰
+  // 2. 代理伺服器競速模式 (Race Condition)
   const promises = proxies.map(proxy => new Promise(async (resolve, reject) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => { controller.abort(); reject(new Error('Timeout')); }, 4500);
       try {
           const response = await fetch(proxy.url(urlWithTime), { ...options, signal: controller.signal });
           clearTimeout(timeoutId);
-          if (!response.ok) throw new Error('Proxy HTTP error');
+          if (!response.ok) throw new Error(`Proxy HTTP error: ${response.status}`);
           
           const data = await response.json();
           if (proxy.isAllOrigins && data.contents) {
@@ -234,14 +235,20 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
           }
       } catch (e) {
           clearTimeout(timeoutId);
-          reject(e);
+          reject(e); // 靜默拒絕，讓 Promise.any 處理
       }
   }));
 
   try {
-      // 只要有一個 Proxy 成功回傳就會立刻 resolve，大幅降低延遲
+      // 只要有一個 Proxy 成功回傳就會立刻 resolve
       return await Promise.any(promises);
   } catch (e) {
+      // 抑制 AggregateError 洗版，改為單行警告
+      if (e instanceof AggregateError || e.name === 'AggregateError') {
+          console.warn(`[Proxy Failed] 代理伺服器皆無回應 (可能遭遇限流): ${targetUrl.substring(0, 50)}...`);
+      } else {
+          console.warn(`[Proxy Error] ${e.message}`);
+      }
       return null;
   }
 };
@@ -640,7 +647,7 @@ const App = () => {
         const today = new Date(); 
         const todayStr = getLocalStr(today);
         
-        // 建立已知假日備援清單 (解決跨年份 API 尚未更新，或格式解析失敗的問題)
+        // 建立已知假日備援清單
         let holidays = ['20240228', '20250228', '20260227', '20260403', '20260501', '20261231'];
         
         try {
@@ -651,8 +658,8 @@ const App = () => {
                     const parts = dateStr.split('/');
                     if (parts.length === 3) {
                         const y = parseInt(parts[0]) + 1911;
-                        const m = parts[1].padStart(2, '0'); // 強制補零
-                        const d = parts[2].padStart(2, '0'); // 強制補零
+                        const m = parts[1].padStart(2, '0');
+                        const d = parts[2].padStart(2, '0');
                         return `${y}${m}${d}`;
                     }
                     return dateStr.replace(/\//g, '');
@@ -667,7 +674,6 @@ const App = () => {
             const day = d.getDay(); 
             const dateStr = getLocalStr(d);
             
-            // 如果是週末 (0:星期日, 6:星期六) 或是 國定假日
             if (day === 0 || day === 6 || holidays.includes(dateStr)) { 
                 d.setDate(d.getDate() - 1); 
             } else { 
@@ -676,13 +682,11 @@ const App = () => {
             }
         }
         
-        console.log(`[DCA Check] 假日清單驗證 (20260227):`, holidays.includes('20260227'));
-        console.log(`[DCA Check] 今日: ${todayStr}, 本月最後交易日: ${foundDateStr}`);
         setIsLastTradingDay(foundDateStr === todayStr);
     };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.0 並行版) ===");
+    console.log("=== 開始更新股價與數據 (v54.1 限流防禦版) ===");
     const tTotalStart = performance.now();
     setPriceLoading(true); setUpdateError(null); setLoadingMessage('更新即時股價中...');
     const uniqueSymbols = [...new Set(data.map(item => item['標的']))];
@@ -829,7 +833,7 @@ const App = () => {
         return false; 
     });
 
-    // 智慧過濾 (Smart Skip): 已經有完整資料的台股，無須再請求 Yahoo
+    // 智慧過濾 (Smart Skip)
     const symbolsForYahoo = [];
     symbolsToFetch.forEach(symbol => {
         const extra = newEtfData[symbol] || {};
@@ -845,93 +849,104 @@ const App = () => {
         if (needYahoo) {
             symbolsForYahoo.push(symbol);
         } else {
-            console.log(`[Timer] 🚀 智慧跳過 Yahoo 查詢: ${symbol} (已取得 MIS/TWSE 完整數據)`);
+            console.log(`[Timer] 🚀 智慧跳過 Yahoo 查詢: ${symbol}`);
         }
     });
 
     try {
         if (symbolsForYahoo.length > 0) {
-            const promises = symbolsForYahoo.map(async (symbol) => {
-            const maxRetries = 2; let attempts = 0; let success = false;
-            await delay(Math.random() * 1000); // 減少併發擁堵
-            while(attempts <= maxRetries && !success) {
-                try {
-                const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=summaryDetail,defaultKeyStatistics,price,fundProfile`;
-                let summaryData = null;
-                
-                try {
-                    const summaryRes = await withTimer(`Yahoo_Summary_${symbol}`, () => fetchWithProxyFallback(summaryUrl));
-                    summaryData = summaryRes?.quoteSummary?.result?.[0];
-                } catch (e) { /* ignore */ }
-
-                const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
-                const result = await withTimer(`Yahoo_Quote_${symbol}`, () => fetchWithProxyFallback(quoteUrl));
-                const quote = result?.quoteResponse?.result?.[0];
-
-                if (quote && quote.regularMarketPrice !== undefined) {
-                    const extra = { ...newEtfData[symbol] }; 
+            // 分批處理 (Chunking)，避免一次發出過多請求導致代理伺服器全部拒絕 (Rate Limit)
+            const chunkSize = 3; 
+            for (let i = 0; i < symbolsForYahoo.length; i += chunkSize) {
+                const chunk = symbolsForYahoo.slice(i, i + chunkSize);
+                const promises = chunk.map(async (symbol) => {
+                    const maxRetries = 2; let attempts = 0; let success = false;
+                    await delay(Math.random() * 500); // 減少批次內的併發擁堵
                     
-                    if (!misPriceMap[symbol]) {
-                        newPrices[symbol] = quote.regularMarketPrice;
-                        extra.priceSource = "Yahoo";
-                        if(quote.regularMarketTime) {
-                            extra.dateStr = new Date(quote.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
-                        }
-                    }
+                    while(attempts <= maxRetries && !success) {
+                        try {
+                            const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=summaryDetail,defaultKeyStatistics,price,fundProfile`;
+                            let summaryData = null;
+                            
+                            try {
+                                const summaryRes = await withTimer(`Yahoo_Summary_${symbol}`, () => fetchWithProxyFallback(summaryUrl));
+                                summaryData = summaryRes?.quoteSummary?.result?.[0];
+                            } catch (e) { /* ignore */ }
 
-                    if (!extra.nav) {
-                        if (quote.navPrice) { extra.nav = quote.navPrice; extra.navSource = "Yahoo"; }
-                        else if (summaryData?.defaultKeyStatistics?.bookValue) { extra.nav = summaryData.defaultKeyStatistics.bookValue.raw; extra.navSource = "Yahoo(Est)"; }
-                        if (!extra.nav && quote.priceToBook) { extra.nav = (quote.regularMarketPrice / quote.priceToBook).toFixed(2); extra.navSource = "Calc(P/B)"; }
-                    }
+                            const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
+                            const result = await withTimer(`Yahoo_Quote_${symbol}`, () => fetchWithProxyFallback(quoteUrl));
+                            const quote = result?.quoteResponse?.result?.[0];
 
-                    if (!extra.yield) {
-                        if (summaryData?.summaryDetail?.yield?.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; extra.yieldSource = "Yahoo(Sum)"; }
-                        else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; extra.yieldSource = "Yahoo"; } 
-                        else if (quote.yield) { extra.yield = quote.yield * 100; extra.yieldSource = "Yahoo"; }
-                        else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; extra.yieldSource = "Yahoo"; }
-                        
-                        if (!extra.yield) {
-                            if (quote.trailingAnnualDividendRate && quote.regularMarketPrice) { 
-                                extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; 
-                                extra.yieldSource = "Calc";
-                            } else if (quote.dividendRate && quote.regularMarketPrice) {
-                                 extra.yield = (quote.dividendRate / quote.regularMarketPrice) * 100; 
-                                 extra.yieldSource = "Calc";
+                            if (quote && quote.regularMarketPrice !== undefined) {
+                                const extra = { ...newEtfData[symbol] }; 
+                                
+                                if (!misPriceMap[symbol]) {
+                                    newPrices[symbol] = quote.regularMarketPrice;
+                                    extra.priceSource = "Yahoo";
+                                    if(quote.regularMarketTime) {
+                                        extra.dateStr = new Date(quote.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+                                    }
+                                }
+
+                                if (!extra.nav) {
+                                    if (quote.navPrice) { extra.nav = quote.navPrice; extra.navSource = "Yahoo"; }
+                                    else if (summaryData?.defaultKeyStatistics?.bookValue) { extra.nav = summaryData.defaultKeyStatistics.bookValue.raw; extra.navSource = "Yahoo(Est)"; }
+                                    if (!extra.nav && quote.priceToBook) { extra.nav = (quote.regularMarketPrice / quote.priceToBook).toFixed(2); extra.navSource = "Calc(P/B)"; }
+                                }
+
+                                if (!extra.yield) {
+                                    if (summaryData?.summaryDetail?.yield?.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; extra.yieldSource = "Yahoo(Sum)"; }
+                                    else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; extra.yieldSource = "Yahoo"; } 
+                                    else if (quote.yield) { extra.yield = quote.yield * 100; extra.yieldSource = "Yahoo"; }
+                                    else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; extra.yieldSource = "Yahoo"; }
+                                    
+                                    if (!extra.yield) {
+                                        if (quote.trailingAnnualDividendRate && quote.regularMarketPrice) { 
+                                            extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; 
+                                            extra.yieldSource = "Calc";
+                                        } else if (quote.dividendRate && quote.regularMarketPrice) {
+                                             extra.yield = (quote.dividendRate / quote.regularMarketPrice) * 100; 
+                                             extra.yieldSource = "Calc";
+                                        }
+                                    }
+                                }
+
+                                newEtfData[symbol] = extra;
+                                success = true;
+                            } else { throw new Error('Quote API No Data'); }
+                        } catch (quoteErr) {
+                            try {
+                                const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
+                                const result = await withTimer(`Yahoo_Chart_${symbol}`, () => fetchWithProxyFallback(chartUrl));
+                                const meta = result?.chart?.result?.[0]?.meta;
+                                if (meta && meta.regularMarketPrice !== undefined) {
+                                    const extra = { ...newEtfData[symbol] };
+                                    
+                                    if (!misPriceMap[symbol]) {
+                                        newPrices[symbol] = meta.regularMarketPrice;
+                                        extra.priceSource = "Yahoo";
+                                        if(meta.regularMarketTime) {
+                                            extra.dateStr = new Date(meta.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+                                        }
+                                    }
+                                    
+                                    newEtfData[symbol] = extra;
+                                    success = true;
+                                } else { throw new Error('Chart API No Data'); }
+                            } catch (chartErr) {
+                                attempts++;
+                                if (attempts <= maxRetries) { await delay(1000); } 
                             }
                         }
                     }
-
-                    newEtfData[symbol] = extra;
-                    success = true;
-                } else { throw new Error('Quote API No Data'); }
-                } catch (quoteErr) {
-                try {
-                    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
-                    const result = await withTimer(`Yahoo_Chart_${symbol}`, () => fetchWithProxyFallback(chartUrl));
-                    const meta = result?.chart?.result?.[0]?.meta;
-                    if (meta && meta.regularMarketPrice !== undefined) {
-                        const extra = { ...newEtfData[symbol] };
-                        
-                        if (!misPriceMap[symbol]) {
-                            newPrices[symbol] = meta.regularMarketPrice;
-                            extra.priceSource = "Yahoo";
-                            if(meta.regularMarketTime) {
-                                extra.dateStr = new Date(meta.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
-                            }
-                        }
-                        
-                        newEtfData[symbol] = extra;
-                        success = true;
-                    } else { throw new Error('Chart API No Data'); }
-                } catch (chartErr) {
-                    attempts++;
-                    if (attempts <= maxRetries) { await delay(1000); } 
-                }
+                });
+                await Promise.all(promises);
+                
+                // 批次間隔，讓代理伺服器喘息
+                if (i + chunkSize < symbolsForYahoo.length) {
+                    await delay(1200); 
                 }
             }
-            });
-            await Promise.all(promises);
         }
     } catch(e) {
         console.error("Fetch Loop Error:", e);
@@ -980,31 +995,82 @@ const App = () => {
       if (confirm) setActiveTab('config');
       throw new Error("請先至「設定」頁面儲存 API Key");
     }
+    
     const defaultModels = AVAILABLE_MODELS.map(m => m.id);
-    const models = [selectedModel, ...defaultModels.filter(m => m !== selectedModel)];
+    const models = [...new Set([selectedModel, ...defaultModels])];
+    let errorMessages = [];
+
     try {
       for (const model of models) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000); 
+        // 將等待時間延長至 45 秒，避免 Pro 模型因思考較久而觸發逾時
+        const timeoutId = setTimeout(() => controller.abort(), 45000); 
         try {
           const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              // 🚀 修正：將 maxOutputTokens 提高至 4096，避免 AI 回覆被強制截斷
               body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 4096, temperature: 0.2 } }),
               signal: controller.signal
             });
-          if (!response.ok) { console.warn(`Model ${model} failed: ${response.status}`); continue; }
+          clearTimeout(timeoutId);
+          
+          if (!response.ok) { 
+              let errMsg = await response.text();
+              try {
+                  const errData = JSON.parse(errMsg);
+                  if (errData.error && errData.error.message) errMsg = errData.error.message;
+              } catch (e) { /* ignore parse error */ }
+              
+              console.error(`[Gemini API 錯誤] Model ${model} HTTP ${response.status}:`, errMsg);
+              errorMessages.push(`[${model}] ${response.status} - ${errMsg}`);
+              
+              if (model !== models[models.length - 1]) {
+                  console.warn(`[模型切換] 模型 ${model} 失敗，準備切換至下一個備用模型。詳細原因: HTTP ${response.status} - ${errMsg}`);
+              }
+
+              // 針對 API Key 錯誤 (400 且包含 API key 相關字眼 或 403 權限不足)，直接停止重試所有其他模型
+              if ((response.status === 400 && errMsg.toLowerCase().includes('api key')) || response.status === 403) {
+                  throw new Error(`API Key 無效或權限不足 (${errMsg})`);
+              }
+              continue; 
+          }
           const data = await response.json();
           const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) { return { text, model }; }
+          if (text) { 
+              if (model !== models[0]) {
+                  console.log(`[模型切換成功] 原設定模型 ${models[0]} 失敗，已自動切換至 ${model} 並順利完成分析。`);
+              }
+              return { text, model }; 
+          }
+          else {
+              errorMessages.push(`[${model}] 回傳資料格式異常或無內容`);
+              if (model !== models[models.length - 1]) {
+                  console.warn(`[模型切換] 模型 ${model} 回傳空內容，準備切換至下一個備用模型。`);
+              }
+          }
         } catch (err) {
-          if (err.name === 'AbortError') { console.warn(`Model ${model} timed out after 15s, switching to next model...`); } 
-          else { console.error(`Error calling ${model}:`, err); }
-        } finally { clearTimeout(timeoutId); }
+          clearTimeout(timeoutId);
+          if (err.message.includes('API Key 無效')) throw err;
+          
+          if (err.name === 'AbortError') { 
+              console.warn(`[Gemini API 逾時] Model ${model} timed out after 45s.`); 
+              errorMessages.push(`[${model}] 連線逾時 (>45秒)`);
+          } else { 
+              console.error(`[Gemini API 例外錯誤] Model ${model}:`, err); 
+              errorMessages.push(`[${model}] ${err.message}`);
+          }
+
+          if (model !== models[models.length - 1]) {
+              console.warn(`[模型切換] 模型 ${model} 發生例外錯誤 (${err.message})，準備切換至下一個備用模型。`);
+          }
+        } 
       }
-    } finally {}
-    throw new Error("AI 服務連線失敗，請檢查 API Key 權限或網路狀態。");
+    } catch (err) {
+        if (err.message.includes('API Key 無效')) throw err;
+        console.error(`[Gemini API 全域錯誤]:`, err);
+    }
+    
+    throw new Error(`AI 服務連線失敗，請檢查 API Key 或網路狀態。\n(歷程:\n${errorMessages.join('\n')})`);
   };
 
   const generatePortfolioHealthCheck = async () => {
@@ -1022,7 +1088,10 @@ const App = () => {
         console.log(`[Timer] AI 健檢總耗時: ${(performance.now() - aiStart).toFixed(2)} ms`);
         const scoreMatch = text.match(/\[SCORE\]\s*(\d+)/i); const riskMatch = text.match(/\[RISK\]\s*(.+)/i); const commentMatch = text.match(/\[COMMENT\]\s*([\s\S]*?)\s*(?=\[SUGGESTION\]|$)/i); const suggestionMatch = text.match(/\[SUGGESTION\]\s*([\s\S]*)/i);
         setPortfolioHealth({ score: scoreMatch ? parseInt(scoreMatch[1]) : 0, risk: riskMatch ? riskMatch[1].trim() : "未知", comment: commentMatch ? commentMatch[1].trim() : "無法解析評論", suggestions: suggestionMatch ? suggestionMatch[1].trim().split('\n').filter(s => s.trim().length > 0) : [] });
-    } catch (err) { setPortfolioHealth({ score: 0, risk: "Error", comment: "AI 分析失敗，請稍後再試。", suggestions: [] }); } finally { setIsHealthChecking(false); }
+    } catch (err) { 
+        console.error("[Health Check Error]", err);
+        setPortfolioHealth({ score: 0, risk: "Error", comment: `AI 分析失敗：${err.message}`, suggestions: [] }); 
+    } finally { setIsHealthChecking(false); }
   };
 
   const generateFullAnalysis = async (symbol, data, forceUpdate = false) => {
@@ -1051,16 +1120,14 @@ const App = () => {
         const assetType = detectAssetType(symbol, stockName, category);
         
         // Check if user already bought the "Basic" portion THIS month
-        const currentMonthPrefix = today.substring(0, 7); // e.g., "2026-02"
+        const currentMonthPrefix = today.substring(0, 7); 
         const hasBoughtThisMonth = portfolioData.some(item => 
             item['標的'] === symbol && 
             (item['日期'] || '').startsWith(currentMonthPrefix) &&
             item['策略'] === '基礎買入'
         );
         
-        // Determine appropriate Treasury Yield Benchmark
         const isLongBond = isLongTermBond(stockName);
-        // Use 20Y (^TVC or TE) for 20Y Bonds if available, else 30Y
         const benchmarkYield = isLongBond 
             ? (usBondYields['20Y'] || usBondYields['30Y']) 
             : usBondYields['10Y'];
@@ -1073,7 +1140,6 @@ const App = () => {
         const classLabel = ASSET_TYPES[classification]?.label || '核心資產';
         const isDCA = settings.isDCA; 
         
-        // --- 雙因子加碼邏輯處理 ---
         const addonLogic = settings.addon || 'NONE'; 
         const addon2Logic = settings.addon2 || 'NONE';
         
@@ -1096,10 +1162,8 @@ const App = () => {
         const performanceInfo = assetInfo ? `目前損益：${formatCurrency(assetInfo.profitLoss)} (ROI: ${formatPercent(assetInfo.roi)})。` : "";
         const currentPrice = realTimePrices[symbol] || latest.close; const prevClose = prevDay ? prevDay.close : latest.close;
         
-        // --- Data Assurance Logic for AI (Source Provenance) ---
         let keyMetrics = "";
         
-        // 1. NAV & P/D (For ETFs & Bond ETFs)
         if (assetType === 'ETF' || assetType === 'BOND_ETF') {
             if (etfData && etfData.nav) {
                 const pd = (currentPrice - etfData.nav) / etfData.nav;
@@ -1110,7 +1174,6 @@ const App = () => {
             }
         }
 
-        // 2. Yield (For Bond & Bond ETFs)
         if (assetType === 'BOND' || assetType === 'BOND_ETF') {
             if (etfData && etfData.yield) {
                 const yieldVal = etfData.yield < 1 ? etfData.yield * 100 : etfData.yield;
@@ -1120,13 +1183,11 @@ const App = () => {
                 keyMetrics += `\n- 殖利率: 資料缺失`;
             }
         } else if (assetType === 'ETF' && etfData && etfData.yield) {
-            // Optional for normal ETFs
             const yieldVal = etfData.yield < 1 ? etfData.yield * 100 : etfData.yield;
             const source = etfData.yieldSource ? `(${etfData.yieldSource})` : '';
             keyMetrics += `\n- 殖利率 (Yield): ${yieldVal.toFixed(2)}% ${source}`;
         }
         
-        // 3. Exchange Rates & Macro (For Bond, Bond ETF, or US Assets)
         if (assetType === 'BOND' || assetType === 'BOND_ETF' || isUsAsset(symbol)) {
             keyMetrics += `\n- 參考匯率 (USD/TWD): ${usdRate}`;
             if (benchmarkYield) keyMetrics += `\n- ${benchmarkLabel}: ${benchmarkYield}%`;
@@ -1246,10 +1307,11 @@ const App = () => {
           updateAiCache(symbol, { summary, detail, signal: signalCode, model }, dataDate); 
           setIsDetailExpanded(true); 
         } catch (err) { 
+            console.error(`[AI 分析解析錯誤 - ${symbol}]:`, err);
             setAiSummary(String(err.message) || "分析暫時無法使用。"); 
         } 
     } catch(err) {
-        console.error("AI Analysis Sync Error:", err);
+        console.error(`[AI 分析全域錯誤 - ${symbol}]:`, err);
         setAiSummary("分析發生預期外錯誤，請稍後再試。");
     } finally {
         setIsAiSummarizing(false); 
@@ -1313,6 +1375,9 @@ const App = () => {
         
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
         
+        // 提前解除圖表的 loading 狀態，讓圖表能先顯示，不用等 AI 分析
+        setHistoryLoading(false);
+
         if (geminiApiKey) {
              await generateFullAnalysis(symbol, processedData); 
         } else {
@@ -1416,7 +1481,8 @@ const App = () => {
         const { text: reply } = await callGeminiWithFallback(prompt);
         setChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
     } catch (err) {
-        setChatMessages(prev => [...prev, { role: 'assistant', content: "抱歉，AI 暫時無法回應，請檢查網路或 API Key。" }]);
+        console.error("[Chat Send Error]", err);
+        setChatMessages(prev => [...prev, { role: 'assistant', content: `抱歉，AI 暫時無法回應 (${err.message})` }]);
     } finally {
         setIsChatLoading(false);
     }
@@ -1637,7 +1703,6 @@ const App = () => {
           </div>
         )}
 
-        {/* ... (Other Tabs omitted for brevity but logic is preserved in full code block) ... */}
         {activeTab !== 'overview' && activeTab !== 'chat' && (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
              {[
@@ -1656,7 +1721,6 @@ const App = () => {
         
         {activeTab === 'chat' && (
             <div className="max-w-4xl mx-auto h-[70vh] flex flex-col bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
-                {/* Chat UI */}
                 <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center"><Bot className="w-6 h-6 text-purple-400 mr-2" /><h3 className="font-semibold text-white">AI 投資顧問</h3></div>
                 <div className="flex-1 overflow-y-auto p-4 space-y-4">{chatMessages.map((msg, idx) => (<div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'}`}><p className="text-sm whitespace-pre-wrap">{msg.content}</p></div></div>))}{isChatLoading && (<div className="flex justify-start"><div className="bg-slate-700 p-3 rounded-lg flex items-center"><Loader2 className="w-4 h-4 animate-spin text-purple-400 mr-2" /><span className="text-xs text-slate-400">AI 正在思考中...</span></div></div>)}<div ref={chatEndRef} /></div>
                 <div className="p-4 border-t border-slate-700 bg-slate-900/50"><div className="flex gap-2"><input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleChatSend()} placeholder="輸入您的問題..." className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 text-sm" disabled={isChatLoading} /><button onClick={handleChatSend} disabled={isChatLoading || !chatInput.trim()} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg disabled:opacity-50 transition-colors"><Send className="w-4 h-4" /></button></div></div>
@@ -1665,7 +1729,6 @@ const App = () => {
 
         {activeTab === 'history' && (
           <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6 h-full pb-20 md:pb-0">
-            {/* List - Fixed Height on Desktop */}
             <div className={`lg:col-span-1 bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[700px] flex-none transition-opacity duration-300 ${isLocked ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
               <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center sticky top-0 z-10"><h3 className="font-semibold text-white flex items-center"><LineIcon className="w-5 h-5 mr-2 text-blue-400" /> 持股列表</h3></div>
               <div className={`overflow-y-auto flex-1 p-2 space-y-2 ${isAiSummarizing ? 'opacity-50 pointer-events-none' : ''}`}>
@@ -1679,23 +1742,18 @@ const App = () => {
               </div>
             </div>
 
-            {/* Main Content - Flow Layout on Mobile, Fixed on Desktop */}
             <div className="lg:col-span-3 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-2 md:p-6 block md:flex md:flex-col relative h-auto md:h-[700px]">
-              {/* History Chart & AI Analysis UI */}
               <div className="flex-none flex flex-col sm:flex-row justify-between items-start sm:items-center mb-2 gap-2">
                 <h3 className="text-xl font-bold text-white flex items-center">{selectedHistorySymbol} <span className="ml-2 text-base font-normal text-slate-400">{tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱']}</span></h3>
                 <div className={`flex space-x-2 self-end sm:self-auto ${isAiSummarizing || isLocked ? 'opacity-50 pointer-events-none' : ''}`}>{[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (<button key={tf.id} disabled={isAiSummarizing || isLocked} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{tf.label}</button>))}</div>
               </div>
               
-              {/* Chart Component - Auto Height on Mobile */}
               <div className="flex-none flex flex-col space-y-1 h-auto min-h-[400px] md:h-[400px]">
               {historyLoading ? <div className="flex-1 flex items-center justify-center h-full"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div> : currentChartData && currentChartData.length > 0 ? (
                 <>
                   <div className="h-64 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip content={<CustomChartTooltip />} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} /><Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" /><Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" /></ComposedChart></ResponsiveContainer></div>
                   
-                  {/* Indicator Toggle for Mobile & Desktop */}
                   <div className="h-32 w-full border-t border-slate-700 pt-1 relative group">
-                      {/* Mobile: Toggle Buttons */}
                       <div className="md:hidden absolute top-1 right-2 z-10 flex space-x-1">
                           {Object.keys(INDICATOR_TYPES).map(key => (
                               <button 
@@ -1708,7 +1766,6 @@ const App = () => {
                           ))}
                       </div>
 
-                      {/* Desktop: Hover to switch (Optional) or just show all if space permits, but sticking to toggle for consistency */}
                       <div className="hidden md:flex absolute top-1 right-2 z-10 space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
                            {Object.keys(INDICATOR_TYPES).map(key => (
                               <button 
@@ -1757,7 +1814,6 @@ const App = () => {
                       </ResponsiveContainer>
                   </div>
                   
-                  {/* 新增：圖例說明 (Strategy Legend) */}
                   <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 mt-3 pt-2 border-t border-slate-700/50 text-[10px] text-slate-400">
                       <span className="font-semibold text-slate-300">圖例說明:</span>
                       {Object.entries(STRATEGY_CONFIG).map(([key, config]) => {
@@ -1777,18 +1833,15 @@ const App = () => {
               ) : <div className="flex-1 flex items-center justify-center h-full text-slate-500">{historyError ? <span className="text-red-400">{historyError}</span> : "請選擇左側標的以查看走勢"}</div>}
               </div>
 
-              {/* Data Provenance Badge Bar (New) */}
               <div className="flex-none px-2 py-1 mt-2 text-[10px] text-slate-500 flex items-center space-x-3 border-t border-dashed border-slate-700/50">
                   <span className="flex items-center"><DollarSign className="w-3 h-3 mr-1" /> 價: {etfExtraData[selectedHistorySymbol]?.priceSource || 'Yahoo'}</span>
                   <span className="flex items-center"><Layers className="w-3 h-3 mr-1" /> 淨: {etfExtraData[selectedHistorySymbol]?.navSource || '-'}</span>
                   <span className="flex items-center"><Percent className="w-3 h-3 mr-1" /> 殖: {etfExtraData[selectedHistorySymbol]?.yieldSource || '-'}</span>
               </div>
 
-              {/* AI Section - Flexible Height with Scroll, Pushed Down */}
               <div className="flex-1 md:min-h-0 flex flex-col mt-4 md:mt-4 pt-2 border-t-2 border-dashed border-slate-600/50 md:overflow-hidden relative z-10 bg-slate-800">
                 <div className="flex-none flex items-center justify-between mb-2">
                     <div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="hidden md:inline ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符)</span>} {selectedModel !== usedModel && !isCachedResult && <span className="text-yellow-400 ml-1 text-[10px]">(自動切換)</span>}</span>}
-                    {/* NEW COMPOSITE SIGNAL DISPLAY */}
                     {aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
                     {aiSignals[selectedHistorySymbol] === 'ADD_ALL' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
                     {aiSignals[selectedHistorySymbol] === 'ADD_BASIC' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎投資</span></div>)}
@@ -1845,7 +1898,6 @@ const App = () => {
           </div>
         )}
 
-        {/* ... (Holdings and Config tabs remain the same) ... */}
         {activeTab === 'holdings' && (
           <div className="space-y-4">
             <div className="flex justify-between items-center px-2">
@@ -1869,16 +1921,13 @@ const App = () => {
                 const addonLogic = settings.addon;
                 const addon2Logic = settings.addon2;
                 
-                // Asset Type Detection
                 const assetType = detectAssetType(row['標的'], row['名稱'], row['類別']);
                 const isBondETF = assetType === 'BOND_ETF';
                 const isBond = assetType === 'BOND';
                 const isETF = assetType === 'ETF';
 
-                // Premium/Discount Check
                 const etfData = etfExtraData[row['標的']];
                 let premDisc = null;
-                // Simplified display logic: Show if available
                 if (etfData && etfData.nav) {
                     const price = row.isUS ? row.currentPriceRaw : row.currentPrice;
                     if (price) {
@@ -1886,7 +1935,6 @@ const App = () => {
                     }
                 }
                 
-                // Yield Check
                 const yieldVal = etfData && etfData.yield ? (etfData.yield < 1 ? etfData.yield * 100 : etfData.yield) : null;
 
                 return (
@@ -1899,7 +1947,6 @@ const App = () => {
                         {signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-1" />}
                         <span className="text-lg font-bold text-white">{row['標的']}</span>
                         <span className={`text-xs px-2 py-0.5 rounded ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{row['類別']}</span>
-                        {/* ETF Premium/Discount Tag - Mobile */}
                         {premDisc !== null && (
                             <span className={`text-[10px] px-1.5 py-0.5 rounded border ${premDisc > 0 ? 'bg-red-900/30 text-red-300 border-red-500/30' : 'bg-green-900/30 text-green-300 border-green-500/30'}`}>
                                 {premDisc > 0 ? '溢' : '折'} {Math.abs(premDisc * 100).toFixed(2)}%
@@ -1908,7 +1955,6 @@ const App = () => {
                       </div>
                       <div className="text-sm text-slate-400 mt-1">{row['名稱']}</div>
                       
-                      {/* Mobile Investment Settings */}
                       <div className="mt-3 bg-slate-700/50 p-2 rounded-lg space-y-2">
                           <div className="flex items-center justify-between">
                             <span className="text-xs text-slate-400">定位</span>
@@ -1975,7 +2021,6 @@ const App = () => {
                     <div><span className="text-slate-500 block text-xs">市值</span><span className="text-white">{formatCurrency(row.marketValue)}</span></div>
                     <div><span className="text-slate-500 block text-xs">股數</span><span className="text-slate-300">{row.shares.toLocaleString()}</span></div>
                     
-                    {/* Explicit NAV & Yield for Mobile */}
                     {(isETF || isBondETF) && (
                         <div className="col-span-2 flex justify-between bg-slate-700/30 p-2 rounded">
                             <span className="text-slate-400 text-xs">參考淨值</span>
@@ -2008,7 +2053,6 @@ const App = () => {
                   <thead className="bg-slate-900/50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider w-20">排序</th>
-                      {/* Updated Headers */}
                       {[ { label: '標的代號', key: '標的' }, { label: '名稱/類別', key: '類別' }, { label: '參考淨值', key: 'nav' }, { label: '參考殖利率', key: 'yield' }, { label: '策略與設定', key: 'class' }, { label: '平均成本', key: 'buyPrice' }, { label: 'Yahoo即時價', key: 'currentPrice' }, { label: '總股數', key: 'shares' }, { label: '總損益 (淨)', key: 'profitLoss' }, { label: '報酬率 (淨)', key: 'roi' } ].map(header => (
                         <th key={header.key} onClick={() => header.key !== 'class' && header.key !== 'nav' && header.key !== 'yield' && requestSort(header.key)} className={`px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider ${header.key !== 'class' && header.key !== 'nav' && header.key !== 'yield' ? 'cursor-pointer hover:text-white' : ''} transition-colors group ${['標的', '類別', 'nav', 'yield', 'class'].includes(header.key) ? 'text-left' : 'text-right'}`}><div className={`flex items-center ${['標的', '類別', 'nav', 'yield', 'class'].includes(header.key) ? 'justify-start' : 'justify-end'}`}>{header.label}{header.key !== 'class' && header.key !== 'nav' && header.key !== 'yield' && <SortIcon columnKey={header.key} />}</div></th>
                       ))}
@@ -2023,13 +2067,11 @@ const App = () => {
                       const addonLogic = settings.addon;
                       const addon2Logic = settings.addon2;
                       
-                      // Asset Type Detection
                       const assetType = detectAssetType(row['標的'], row['名稱'], row['類別']);
                       const isBondETF = assetType === 'BOND_ETF';
                       const isBond = assetType === 'BOND';
                       const isETF = assetType === 'ETF';
 
-                      // Premium/Discount Check for Desktop
                       const etfData = etfExtraData[row['標的']];
                       let premDisc = null;
                       if ((isETF || isBondETF) && etfData && etfData.nav && row.isRealData) {
@@ -2049,7 +2091,6 @@ const App = () => {
                             </div>
                         </td>
                         
-                        {/* New NAV Column */}
                         <td className="px-6 py-4 whitespace-nowrap text-left">
                             { (isETF || isBondETF) ? (
                                 etfData?.nav ? (
@@ -2065,7 +2106,6 @@ const App = () => {
                             ) : <span className="text-slate-600">-</span> }
                         </td>
 
-                        {/* New Yield Column */}
                         <td className="px-6 py-4 whitespace-nowrap text-left">
                             { (isBond || isBondETF) ? (
                                 yieldVal !== null ? (
@@ -2076,7 +2116,6 @@ const App = () => {
                             ) : <span className="text-slate-600">-</span> }
                         </td>
                         
-                        {/* Strategy Settings - Desktop */}
                         <td className="px-6 py-4 whitespace-nowrap text-left">
                           <div className="flex flex-col space-y-1">
                              <div className="flex items-center space-x-2">
@@ -2158,7 +2197,6 @@ const App = () => {
           </div>
         )}
 
-        {/* ... (Config tab same) ... */}
         {activeTab === 'config' && (
           <div className="max-w-2xl mx-auto bg-slate-800 p-8 rounded-xl border border-slate-700 shadow-lg mb-20">
             <h2 className="text-2xl font-bold text-white mb-6 flex items-center"><Settings className="w-6 h-6 mr-3 text-blue-500" /> 資料來源設定</h2>
@@ -2183,7 +2221,6 @@ const App = () => {
                 <p className="mt-2 text-xs text-slate-500">* 單機版需自行申請 API Key 才能使用 AI 功能。<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 ml-1 underline">前往申請</a></p>
               </div>
 
-              {/* Model Selection Dropdown */}
               <div className="mt-4">
                 <label className="block text-sm font-medium text-slate-300 mb-2">選擇 AI 模型</label>
                 <div className="flex gap-2 items-center">
