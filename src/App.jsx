@@ -11,11 +11,10 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v53.0 (Dual-Factor Addon Strategy)
+ * Alpha 投資戰情室 v53.5 (DCA Date Fix)
  * * [修正內容]
- * 1. 策略升級：持股明細新增「次要加碼」選項，支援雙因子評估。
- * 2. 預設值防護：第二加碼條件預設為「無 (None)」，向下相容舊有設定。
- * 3. AI Prompt 強化：當設定雙重條件時，AI 會收到綜合評估的嚴格指令。
+ * 1. 日期轉換：修復 TWSE 假日表「民國年」無法正確比對「西元年」導致的最後交易日誤判問題。
+ * 2. 時區修正：移除 toISOString，確保所有日期皆使用本地時間比對。
  */
 
 // --- 靜態配置 ---
@@ -131,7 +130,8 @@ const savePriceCache = (newPrices, extraData) => {
             navSource: extraData[symbol]?.navSource || existing.navSource,
             yield: extraData[symbol]?.yield || existing.yield,
             yieldSource: extraData[symbol]?.yieldSource || existing.yieldSource,
-            dateStr: extraData[symbol]?.dateStr || existing.dateStr // Save date string
+            dateStr: extraData[symbol]?.dateStr || existing.dateStr,
+            priceSource: extraData[symbol]?.priceSource || existing.priceSource
         }; 
     });
     localStorage.setItem('investment_price_cache', JSON.stringify(updatedCache));
@@ -185,7 +185,17 @@ const isUsAsset = (symbol) => {
     return !symbol.includes('.TW') && !symbol.includes('.TWO') && symbol !== '定存' && !symbol.includes('TWD=X');
 };
 
-// --- 網路請求與代理 ---
+// --- 效能追蹤包裝器 ---
+const withTimer = async (name, promiseFn) => {
+    const start = performance.now();
+    try {
+        return await promiseFn();
+    } finally {
+        console.log(`[Timer] ${name} 耗時: ${(performance.now() - start).toFixed(2)} ms`);
+    }
+};
+
+// --- 網路請求與代理 (v54.0: 競速模式 Promise.any) ---
 const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) => {
   const urlWithTime = targetUrl.includes('?') ? `${targetUrl}&t=${Date.now()}` : `${targetUrl}?t=${Date.now()}`;
   
@@ -197,6 +207,7 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
   
   const options = { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined };
 
+  // 1. 優先嘗試直連 (若允許跨域)
   try {
       if(targetUrl.includes('openapi.twse.com.tw') || targetUrl.includes('mis.twse.com.tw')) {
           const response = await fetch(urlWithTime);
@@ -204,35 +215,35 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
       }
   } catch(e) { /* ignore */ }
 
-  for (const proxy of proxies) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3500);
-
-    try {
-      const response = await fetch(proxy.url(urlWithTime), { ...options, signal: controller.signal });
-      clearTimeout(timeoutId);
-
-      if (!response.ok) throw new Error('Proxy error');
-      
-      const data = await response.json();
-      
-      if (proxy.isAllOrigins && data.contents) {
-          if (typeof data.contents === 'string') {
-              try { 
-                  return JSON.parse(data.contents); 
-              } catch (e) { 
-                  return data.contents; 
-              }
+  // 2. 代理伺服器競速模式 (Race Condition) - 誰先回傳成功的 JSON 就用誰
+  const promises = proxies.map(proxy => new Promise(async (resolve, reject) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => { controller.abort(); reject(new Error('Timeout')); }, 4500);
+      try {
+          const response = await fetch(proxy.url(urlWithTime), { ...options, signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (!response.ok) throw new Error('Proxy HTTP error');
+          
+          const data = await response.json();
+          if (proxy.isAllOrigins && data.contents) {
+              if (typeof data.contents === 'string') {
+                  try { resolve(JSON.parse(data.contents)); } catch (e) { resolve(data.contents); }
+              } else { resolve(data.contents); }
+          } else { 
+              resolve(data); 
           }
-          return data.contents;
+      } catch (e) {
+          clearTimeout(timeoutId);
+          reject(e);
       }
-      return data;
-    } catch (e) { 
-        clearTimeout(timeoutId);
-        /* continue */ 
-    }
+  }));
+
+  try {
+      // 只要有一個 Proxy 成功回傳就會立刻 resolve，大幅降低延遲
+      return await Promise.any(promises);
+  } catch (e) {
+      return null;
   }
-  return null;
 };
 
 // --- Trading Economics Scraper (TE) ---
@@ -511,6 +522,27 @@ const App = () => {
   }, [aggregatedHoldings, sortConfig, customOrder]);
 
   const tradableSymbols = useMemo(() => sortedHoldings.filter(h => h['類別'] !== '定存'), [sortedHoldings]);
+
+  // Sync selected symbol whenever tradable symbols change order or contents
+  const prevSortRef = useRef(sortConfig);
+  const prevOrderRef = useRef(customOrder);
+  const prevDataHashRef = useRef('');
+  
+  useEffect(() => {
+    const currentDataHash = tradableSymbols.map(t => t['標的']).join(',');
+    if (prevSortRef.current !== sortConfig || prevOrderRef.current !== customOrder) {
+      if (tradableSymbols.length > 0) {
+        setSelectedHistorySymbol(tradableSymbols[0]['標的']);
+      }
+      prevSortRef.current = sortConfig;
+      prevOrderRef.current = customOrder;
+    } else if (currentDataHash !== '' && prevDataHashRef.current !== currentDataHash) {
+      if (tradableSymbols.length > 0) {
+        setSelectedHistorySymbol(tradableSymbols[0]['標的']);
+      }
+    }
+    prevDataHashRef.current = currentDataHash;
+  }, [sortConfig, customOrder, tradableSymbols]);
    
   const currentChartData = useMemo(() => {
     const baseData = historicalData[`${selectedHistorySymbol}_${timeframe}`];
@@ -590,7 +622,7 @@ const App = () => {
         buyPriceRaw, costBasis: costBasisTwd, marketValue: marketValueTwd, 
         profitLoss: netProfit, grossProfit, estimateFee: feeFinal, estimateTax, roi, 
         isRealData: !!(pricesMap?.[symbol] || (isTD && pricesMap?.[isTD ? (symbol.replace('-TD','')==='USD'?'TWD=X':`${symbol.replace('-TD','')}TWD=X`) : ''])),
-        priceDate: extraMap[symbol]?.dateStr // Pass date info
+        priceDate: extraMap[symbol]?.dateStr 
       };
     });
     setPortfolioData(enrichedData);
@@ -598,23 +630,60 @@ const App = () => {
   };
 
   const checkLastTradingDay = async () => {
-      const today = new Date(); const year = today.getFullYear(); const month = today.getMonth(); 
-      const todayStr = today.toISOString().split('T')[0].replace(/-/g, '');
-      let holidays = [];
-      try {
-        const response = await fetchWithProxyFallback('https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule');
-        if (response && Array.isArray(response)) { holidays = response.map(item => item.Date.replace(/\//g, '')); }
-      } catch (e) { console.warn('Failed to fetch holidays, defaulting to basic check', e); }
-      let d = new Date(year, month + 1, 0); 
-      let foundDateStr = '';
-      while (d.getDate() > 0) {
-        const day = d.getDay(); const y = d.getFullYear(); const m = String(d.getMonth() + 1).padStart(2, '0'); const dayDate = String(d.getDate()).padStart(2, '0'); const dateStr = `${y}${m}${dayDate}`; 
-        if (day === 0 || day === 6 || holidays.includes(dateStr)) { d.setDate(d.getDate() - 1); } else { foundDateStr = dateStr; break; }
-      }
-      setIsLastTradingDay(foundDateStr === todayStr);
-  };
+        const getLocalStr = (dt) => {
+            const y = dt.getFullYear();
+            const m = String(dt.getMonth() + 1).padStart(2, '0');
+            const d = String(dt.getDate()).padStart(2, '0');
+            return `${y}${m}${d}`;
+        };
+
+        const today = new Date(); 
+        const todayStr = getLocalStr(today);
+        
+        // 建立已知假日備援清單 (解決跨年份 API 尚未更新，或格式解析失敗的問題)
+        let holidays = ['20240228', '20250228', '20260227', '20260403', '20260501', '20261231'];
+        
+        try {
+            const response = await fetchWithProxyFallback('https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule');
+            if (response && Array.isArray(response)) { 
+                const apiHolidays = response.map(item => {
+                    const dateStr = item.Date || item.date || '';
+                    const parts = dateStr.split('/');
+                    if (parts.length === 3) {
+                        const y = parseInt(parts[0]) + 1911;
+                        const m = parts[1].padStart(2, '0'); // 強制補零
+                        const d = parts[2].padStart(2, '0'); // 強制補零
+                        return `${y}${m}${d}`;
+                    }
+                    return dateStr.replace(/\//g, '');
+                }); 
+                holidays = [...new Set([...holidays, ...apiHolidays])];
+            }
+        } catch (e) { console.warn('Failed to fetch holidays, using fallback', e); }
+        
+        let d = new Date(today.getFullYear(), today.getMonth() + 1, 0); 
+        let foundDateStr = '';
+        while (d.getDate() > 0) {
+            const day = d.getDay(); 
+            const dateStr = getLocalStr(d);
+            
+            // 如果是週末 (0:星期日, 6:星期六) 或是 國定假日
+            if (day === 0 || day === 6 || holidays.includes(dateStr)) { 
+                d.setDate(d.getDate() - 1); 
+            } else { 
+                foundDateStr = dateStr; 
+                break; 
+            }
+        }
+        
+        console.log(`[DCA Check] 假日清單驗證 (20260227):`, holidays.includes('20260227'));
+        console.log(`[DCA Check] 今日: ${todayStr}, 本月最後交易日: ${foundDateStr}`);
+        setIsLastTradingDay(foundDateStr === todayStr);
+    };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
+    console.log("=== 開始更新股價與數據 (v54.0 並行版) ===");
+    const tTotalStart = performance.now();
     setPriceLoading(true); setUpdateError(null); setLoadingMessage('更新即時股價中...');
     const uniqueSymbols = [...new Set(data.map(item => item['標的']))];
     const symbolsToFetchList = uniqueSymbols.filter(s => s !== '定存' && !s.includes('-TD'));
@@ -628,10 +697,14 @@ const App = () => {
     const hasLongTermBond = data.some(item => isLongTermBond(item['名稱']));
     if (hasLongTermBond && !symbolsToFetchList.includes('^TVC')) { symbolsToFetchList.push('^TVC'); }
 
-    // Start Trading Economics Fetch in Parallel
-    const tePromise = fetchTradingEconomicsYields();
+    const fetchTEWithTimer = async () => {
+        const start = performance.now();
+        const res = await fetchTradingEconomicsYields();
+        console.log(`[Timer] TradingEconomics 總耗時: ${(performance.now() - start).toFixed(2)} ms`);
+        return res;
+    };
+    const tePromise = fetchTEWithTimer();
 
-    // Create a map for symbol to name for bond detection
     const symbolToName = {};
     data.forEach(item => { symbolToName[item['標的']] = item['名稱']; });
 
@@ -646,68 +719,89 @@ const App = () => {
     const twseYieldMap = {}; 
     const tpexYieldMap = {}; 
     const misEtfMap = {}; 
+    const misPriceMap = {}; 
+    const misTimeMap = {};
 
-    // 1. MIS TWSE (Realtime NAV)
-    try {
-       console.log("Fetching MIS data...");
-       const misRes = await fetchWithProxyFallback('https://mis.twse.com.tw/stock/data/all_etf.txt');
-       
-       const parseMisData = (data) => {
-           if (data.msgArray) {
-               data.msgArray.forEach(item => {
-                   if (item.a && item.f) misEtfMap[item.a.trim()] = parseFloat(item.f);
-               });
-           }
-           if (data.a1 && Array.isArray(data.a1)) {
-               data.a1.forEach(subObj => {
-                   if (subObj.msgArray) {
-                       subObj.msgArray.forEach(item => {
-                           if (item.a && item.f) misEtfMap[item.a.trim()] = parseFloat(item.f);
-                       });
-                   }
-               });
-           }
-       };
+    // 1. 官方資料源全面併發抓取 (Parallel Fetch)
+    console.log("Fetching Official Data in Parallel...");
+    const [misRes, navRes, yieldRes, tpexNavRes, tpexYieldRes] = await Promise.all([
+        withTimer("MIS_NAV", () => fetchWithProxyFallback('https://mis.twse.com.tw/stock/data/all_etf.txt').catch(()=>null)),
+        withTimer("TWSE_NAV", () => fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/a1271825').catch(()=>null)),
+        withTimer("TWSE_Yield", () => fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL').catch(()=>null)),
+        withTimer("TPEx_NAV", () => fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/etf/net_value/net_value_result.php?l=zh-tw&o=json').catch(()=>null)),
+        withTimer("TPEx_Yield", () => fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json').catch(()=>null))
+    ]);
 
-       if (misRes) parseMisData(misRes);
-    } catch (e) { console.warn("MIS Fetch Failed", e); }
-
-    // 2. Official Sources
-    try {
-        const navRes = await fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/a1271825'); 
-        if (Array.isArray(navRes)) {
-            navRes.forEach(item => { twseEtfMap[item.Code] = parseFloat(item.NetAssetValue); });
+    // 解析 MIS NAV
+    if (misRes) {
+        if (misRes.msgArray) {
+            misRes.msgArray.forEach(item => { if (item.a && item.f) misEtfMap[item.a.trim()] = parseFloat(item.f); });
         }
-        const yieldRes = await fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL');
-        if (Array.isArray(yieldRes)) {
-            yieldRes.forEach(item => { twseYieldMap[item.Code] = parseFloat(item.DividendYield); });
-        }
-    } catch (e) { console.warn('TWSE Data Fetch Failed', e); }
-
-    try {
-        const tpexNavRes = await fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/etf/net_value/net_value_result.php?l=zh-tw&o=json');
-        if (tpexNavRes && tpexNavRes.aaData) {
-            tpexNavRes.aaData.forEach(item => {
-                const code = item[0];
-                const nav = parseFloat(item[3]);
-                if (!isNaN(nav)) { tpexEtfMap[code] = nav; }
+        if (misRes.a1 && Array.isArray(misRes.a1)) {
+            misRes.a1.forEach(subObj => {
+                if (subObj.msgArray) {
+                    subObj.msgArray.forEach(item => { if (item.a && item.f) misEtfMap[item.a.trim()] = parseFloat(item.f); });
+                }
             });
         }
-        const tpexYieldRes = await fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json');
-        if(tpexYieldRes && tpexYieldRes.aaData) {
-             tpexYieldRes.aaData.forEach(item => {
-                const code = item[0];
-                const yieldVal = parseFloat(item[5]);
-                if (!isNaN(yieldVal)) { tpexYieldMap[code] = yieldVal; }
-            });
-        }
-    } catch (e) { console.warn('TPEx NAV Fetch Failed', e); }
+    }
 
-    // PRE-FILL STEP
+    // 解析 TWSE
+    if (Array.isArray(navRes)) navRes.forEach(item => { twseEtfMap[item.Code] = parseFloat(item.NetAssetValue); });
+    if (Array.isArray(yieldRes)) yieldRes.forEach(item => { twseYieldMap[item.Code] = parseFloat(item.DividendYield); });
+
+    // 解析 TPEx
+    if (tpexNavRes && tpexNavRes.aaData) tpexNavRes.aaData.forEach(item => { const nav = parseFloat(item[3]); if (!isNaN(nav)) tpexEtfMap[item[0]] = nav; });
+    if (tpexYieldRes && tpexYieldRes.aaData) tpexYieldRes.aaData.forEach(item => { const y = parseFloat(item[5]); if (!isNaN(y)) tpexYieldMap[item[0]] = y; });
+
+    // 1.5 MIS TWSE (Realtime Price) for .TW and .TWO
+    try {
+       const twSymbols = symbolsToFetchList.filter(s => s.includes('.TW') || s.includes('.TWO'));
+       if (twSymbols.length > 0) {
+           const pricePromises = [];
+           for (let i = 0; i < twSymbols.length; i += 50) {
+               const chunk = twSymbols.slice(i, i + 50);
+               const queryList = chunk.map(s => {
+                   const code = s.split('.')[0];
+                   const prefix = s.includes('.TWO') ? 'otc' : 'tse';
+                   return `${prefix}_${code}.tw`;
+               }).join('|');
+               
+               pricePromises.push(withTimer(`MIS_Price_Chunk_${i}`, () => fetchWithProxyFallback(`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${queryList}`)));
+           }
+           
+           const priceResponses = await Promise.all(pricePromises);
+           priceResponses.forEach((priceRes, idx) => {
+               if (priceRes && priceRes.msgArray) {
+                   const chunk = twSymbols.slice(idx * 50, (idx + 1) * 50);
+                   priceRes.msgArray.forEach(item => {
+                       const originalSymbol = chunk.find(s => s.startsWith(item.c + '.'));
+                       if (originalSymbol) {
+                           const price = parseFloat(item.z !== '-' ? item.z : item.y);
+                           if (!isNaN(price)) {
+                               misPriceMap[originalSymbol] = price;
+                               if (item.d && item.t) {
+                                   misTimeMap[originalSymbol] = `${item.d.substring(4,6)}/${item.d.substring(6,8)} ${item.t}`;
+                               }
+                           }
+                       }
+                   });
+               }
+           });
+       }
+    } catch (e) { console.warn("MIS Price Fetch Failed", e); }
+
+    // PRE-FILL STEP: 填入官方資料
     symbolsToFetchList.forEach(symbol => {
         const pureCode = symbol.replace(/\.TWO$|\.TW$/i, '');
         const extra = newEtfData[symbol] || {};
         
+        if (misPriceMap[symbol]) {
+            newPrices[symbol] = misPriceMap[symbol];
+            extra.dateStr = misTimeMap[symbol];
+            extra.priceSource = "MIS";
+        }
+
         if (misEtfMap[pureCode]) { extra.nav = misEtfMap[pureCode]; extra.navSource = "MIS"; }
         else if (twseEtfMap[pureCode]) { extra.nav = twseEtfMap[pureCode]; extra.navSource = "Off(TW)"; } 
         else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; extra.navSource = "Off(TP)"; }
@@ -731,35 +825,58 @@ const App = () => {
         if (cachedItem.nav) newEtfData[symbol] = { ...newEtfData[symbol], nav: cachedItem.nav, navSource: cachedItem.navSource };
         if (cachedItem.yield) newEtfData[symbol] = { ...newEtfData[symbol], yield: cachedItem.yield, yieldSource: cachedItem.yieldSource };
         if (cachedItem.dateStr) newEtfData[symbol] = { ...newEtfData[symbol], dateStr: cachedItem.dateStr };
+        if (cachedItem.priceSource) newEtfData[symbol] = { ...newEtfData[symbol], priceSource: cachedItem.priceSource };
         return false; 
     });
 
-    try {
-        if (symbolsToFetch.length > 0) {
-            const teYields = await tePromise;
+    // 智慧過濾 (Smart Skip): 已經有完整資料的台股，無須再請求 Yahoo
+    const symbolsForYahoo = [];
+    symbolsToFetch.forEach(symbol => {
+        const extra = newEtfData[symbol] || {};
+        const name = symbolToName[symbol] || '';
+        const isEtf = name.includes('ETF') || symbol.startsWith('00');
+        const isUs = isUsAsset(symbol);
+        
+        let needYahoo = false;
+        if (!misPriceMap[symbol]) needYahoo = true; // 沒有股價，必須查
+        if (isEtf && !extra.nav) needYahoo = true;  // ETF 缺淨值，去 Yahoo 補
+        if (isUs || symbol === 'TWD=X' || symbol.startsWith('^')) needYahoo = true; // 美股/匯率/指數必查
+        
+        if (needYahoo) {
+            symbolsForYahoo.push(symbol);
+        } else {
+            console.log(`[Timer] 🚀 智慧跳過 Yahoo 查詢: ${symbol} (已取得 MIS/TWSE 完整數據)`);
+        }
+    });
 
-            const promises = symbolsToFetch.map(async (symbol) => {
+    try {
+        if (symbolsForYahoo.length > 0) {
+            const promises = symbolsForYahoo.map(async (symbol) => {
             const maxRetries = 2; let attempts = 0; let success = false;
-            await delay(Math.random() * 1500); 
+            await delay(Math.random() * 1000); // 減少併發擁堵
             while(attempts <= maxRetries && !success) {
                 try {
                 const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=summaryDetail,defaultKeyStatistics,price,fundProfile`;
                 let summaryData = null;
+                
                 try {
-                    const summaryRes = await fetchWithProxyFallback(summaryUrl);
+                    const summaryRes = await withTimer(`Yahoo_Summary_${symbol}`, () => fetchWithProxyFallback(summaryUrl));
                     summaryData = summaryRes?.quoteSummary?.result?.[0];
                 } catch (e) { /* ignore */ }
 
                 const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
-                const result = await fetchWithProxyFallback(quoteUrl);
+                const result = await withTimer(`Yahoo_Quote_${symbol}`, () => fetchWithProxyFallback(quoteUrl));
                 const quote = result?.quoteResponse?.result?.[0];
 
                 if (quote && quote.regularMarketPrice !== undefined) {
-                    newPrices[symbol] = quote.regularMarketPrice;
                     const extra = { ...newEtfData[symbol] }; 
                     
-                    if(quote.regularMarketTime) {
-                        extra.dateStr = new Date(quote.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+                    if (!misPriceMap[symbol]) {
+                        newPrices[symbol] = quote.regularMarketPrice;
+                        extra.priceSource = "Yahoo";
+                        if(quote.regularMarketTime) {
+                            extra.dateStr = new Date(quote.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+                        }
                     }
 
                     if (!extra.nav) {
@@ -779,8 +896,8 @@ const App = () => {
                                 extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; 
                                 extra.yieldSource = "Calc";
                             } else if (quote.dividendRate && quote.regularMarketPrice) {
-                                extra.yield = (quote.dividendRate / quote.regularMarketPrice) * 100; 
-                                extra.yieldSource = "Calc";
+                                 extra.yield = (quote.dividendRate / quote.regularMarketPrice) * 100; 
+                                 extra.yieldSource = "Calc";
                             }
                         }
                     }
@@ -791,14 +908,19 @@ const App = () => {
                 } catch (quoteErr) {
                 try {
                     const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
-                    const result = await fetchWithProxyFallback(chartUrl);
+                    const result = await withTimer(`Yahoo_Chart_${symbol}`, () => fetchWithProxyFallback(chartUrl));
                     const meta = result?.chart?.result?.[0]?.meta;
                     if (meta && meta.regularMarketPrice !== undefined) {
-                        newPrices[symbol] = meta.regularMarketPrice;
                         const extra = { ...newEtfData[symbol] };
-                         if(meta.regularMarketTime) {
-                            extra.dateStr = new Date(meta.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+                        
+                        if (!misPriceMap[symbol]) {
+                            newPrices[symbol] = meta.regularMarketPrice;
+                            extra.priceSource = "Yahoo";
+                            if(meta.regularMarketTime) {
+                                extra.dateStr = new Date(meta.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+                            }
                         }
+                        
                         newEtfData[symbol] = extra;
                         success = true;
                     } else { throw new Error('Chart API No Data'); }
@@ -814,7 +936,7 @@ const App = () => {
     } catch(e) {
         console.error("Fetch Loop Error:", e);
     } finally {
-        const teYields = await fetchTradingEconomicsYields(); 
+        const teYields = await tePromise;
         
         setUsBondYields({
             '10Y': teYields['10Y'] || newPrices['^TNX'] || null,
@@ -822,7 +944,6 @@ const App = () => {
             '30Y': teYields['30Y'] || newPrices['^TYX'] || null
         });
 
-        // FINALIZE STEP
         symbolsToFetchList.forEach(symbol => {
              const extra = newEtfData[symbol] || {};
              const name = symbolToName[symbol] || '';
@@ -841,6 +962,8 @@ const App = () => {
 
         savePriceCache(newPrices, newEtfData);
         
+        console.log(`=== 股價更新完成，總耗時: ${(performance.now() - tTotalStart).toFixed(2)} ms ===`);
+
         setRealTimePrices(newPrices);
         setEtfExtraData(newEtfData);
         setHistoricalData({});
@@ -862,12 +985,13 @@ const App = () => {
     try {
       for (const model of models) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000); 
+        const timeoutId = setTimeout(() => controller.abort(), 15000); 
         try {
           const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 8192 } }),
+              // 🚀 修正：將 maxOutputTokens 提高至 4096，避免 AI 回覆被強制截斷
+              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 4096, temperature: 0.2 } }),
               signal: controller.signal
             });
           if (!response.ok) { console.warn(`Model ${model} failed: ${response.status}`); continue; }
@@ -875,7 +999,7 @@ const App = () => {
           const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
           if (text) { return { text, model }; }
         } catch (err) {
-          if (err.name === 'AbortError') { console.warn(`Model ${model} timed out after 60s, switching to next model...`); } 
+          if (err.name === 'AbortError') { console.warn(`Model ${model} timed out after 15s, switching to next model...`); } 
           else { console.error(`Error calling ${model}:`, err); }
         } finally { clearTimeout(timeoutId); }
       }
@@ -892,118 +1016,180 @@ const App = () => {
     const allocationStr = allocationData.map(d => `${d.name} ${formatPercent(d.percentage)}`).join(', ');
     const prompt = `角色：首席投資長 (CIO) 與風險控管經理。任務：對目前的投資組合進行總體風險與健康度健檢。【資產數據】- 總資產：${formatCurrency(summary.totalValue)}- 總損益：${formatCurrency(summary.totalPL)} (ROI: ${formatPercent(summary.totalROI)})- 資產配置：${allocationStr}- 前五大持股 (集中度風險)：${topHoldings.join(', ')} 請分析並輸出以下格式 (請嚴格遵守 TAG 格式，不要使用 Markdown 代碼區塊)：[SCORE] (請給出 0-100 的分數，根據風險分散性與配置合理性評分) [RISK] (低風險 / 中低風險 / 中風險 / 中高風險 / 高風險 - 請選一個) [COMMENT] (200字以內的總評，包含風險提示與資產配置建議。語氣專業、客觀) [SUGGESTION] (請列出 3 點具體調整方向，每點一行)`;
     try {
+        console.log(`[AI 健檢發送字句 (Prompt)]:\n`, prompt);
+        const aiStart = performance.now();
         const { text } = await callGeminiWithFallback(prompt);
+        console.log(`[Timer] AI 健檢總耗時: ${(performance.now() - aiStart).toFixed(2)} ms`);
         const scoreMatch = text.match(/\[SCORE\]\s*(\d+)/i); const riskMatch = text.match(/\[RISK\]\s*(.+)/i); const commentMatch = text.match(/\[COMMENT\]\s*([\s\S]*?)\s*(?=\[SUGGESTION\]|$)/i); const suggestionMatch = text.match(/\[SUGGESTION\]\s*([\s\S]*)/i);
         setPortfolioHealth({ score: scoreMatch ? parseInt(scoreMatch[1]) : 0, risk: riskMatch ? riskMatch[1].trim() : "未知", comment: commentMatch ? commentMatch[1].trim() : "無法解析評論", suggestions: suggestionMatch ? suggestionMatch[1].trim().split('\n').filter(s => s.trim().length > 0) : [] });
     } catch (err) { setPortfolioHealth({ score: 0, risk: "Error", comment: "AI 分析失敗，請稍後再試。", suggestions: [] }); } finally { setIsHealthChecking(false); }
   };
 
   const generateFullAnalysis = async (symbol, data, forceUpdate = false) => {
-    if (!data || data.length === 0) return;
-    if (analysisInProgressRef.current[symbol]) return;
+    if (!data || data.length === 0) { console.warn("AI Analysis Aborted: No Chart Data"); return; }
+    if (analysisInProgressRef.current[symbol]) { console.warn("AI Analysis Aborted: Already in progress"); return; }
+    
+    console.log("=== Triggering AI Analysis ===", symbol, "Force:", forceUpdate);
     analysisInProgressRef.current[symbol] = true;
 
-    const latest = data[data.length - 1]; const prevDay = data.length > 1 ? data[data.length - 2] : null; const dataDate = latest.date;
-    const today = getTodayDate(); const cache = getAiCache();
+    try {
+        const latest = data[data.length - 1]; const prevDay = data.length > 1 ? data[data.length - 2] : null; const dataDate = latest.date;
+        const today = getTodayDate(); const cache = getAiCache();
 
-    if (!forceUpdate && cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
-      setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
-      if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
-      setUsedModel(cache[symbol].model); setIsCachedResult(true); setAnalysisSymbol(symbol); setIsDetailExpanded(true); setIsAiSummarizing(false); 
-      delete analysisInProgressRef.current[symbol]; return;
-    }
+        if (!forceUpdate && cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
+          setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
+          if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
+          setUsedModel(cache[symbol].model); setIsCachedResult(true); setAnalysisSymbol(symbol); setIsDetailExpanded(true); setIsAiSummarizing(false); 
+          return;
+        }
 
-    setIsAiSummarizing(true); setAiSummary(null); setAiDetail(null); setUsedModel(null); setIsCachedResult(false); setAnalysisSymbol(symbol); 
-    setAiSignals(prev => { const next = { ...prev }; delete next[symbol]; return next; });
+        setIsAiSummarizing(true); setAiSummary(null); setAiDetail(null); setUsedModel(null); setIsCachedResult(false); setAnalysisSymbol(symbol); 
+        setAiSignals(prev => { const next = { ...prev }; delete next[symbol]; return next; });
 
-    const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
-    const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票';
-    const assetType = detectAssetType(symbol, stockName, category);
-    
-    // Determine appropriate Treasury Yield Benchmark
-    const isLongBond = isLongTermBond(stockName);
-    const benchmarkYield = isLongBond ? (usBondYields['20Y'] || usBondYields['30Y']) : usBondYields['10Y'];
-    const benchmarkLabel = isLongBond ? '美國長天期公債殖利率 (20yr+ Benchmark)' : '美國10年期公債殖利率 (市場基準)';
+        const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
+        const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票';
+        const assetType = detectAssetType(symbol, stockName, category);
+        
+        // Check if user already bought the "Basic" portion THIS month
+        const currentMonthPrefix = today.substring(0, 7); // e.g., "2026-02"
+        const hasBoughtThisMonth = portfolioData.some(item => 
+            item['標的'] === symbol && 
+            (item['日期'] || '').startsWith(currentMonthPrefix) &&
+            item['策略'] === '基礎買入'
+        );
+        
+        // Determine appropriate Treasury Yield Benchmark
+        const isLongBond = isLongTermBond(stockName);
+        // Use 20Y (^TVC or TE) for 20Y Bonds if available, else 30Y
+        const benchmarkYield = isLongBond 
+            ? (usBondYields['20Y'] || usBondYields['30Y']) 
+            : usBondYields['10Y'];
+        const benchmarkLabel = isLongBond ? '美國長天期公債殖利率 (20yr+ Benchmark)' : '美國10年期公債殖利率 (市場基準)';
 
-    const etfData = etfExtraData[symbol];
-    const hasNav = etfData && etfData.nav;
-    
-    const settings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE' };
-    const classification = settings.type; const classLabel = ASSET_TYPES[classification].label;
-    const isDCA = settings.isDCA; 
-    
-    // --- 雙因子加碼邏輯處理 ---
-    const addonLogic = settings.addon; 
-    const addon2Logic = settings.addon2 || 'NONE';
-    
-    const getAddonText = (logic) => {
-        if (logic === 'PYRAMID') return "「跌幅金字塔 (Pyramid)」：分析回檔幅度與乖離率。若股價較近期高點回檔>5%~10%或觸及長期均線支撐，視為加碼訊號。";
-        if (logic === 'TECHNICAL') return "「技術指標 (Technical)」：分析動能訊號。若 KD 低檔黃金交叉(K<20金叉)、MACD 柱狀體翻紅或 RSI 突破 50，視為加碼訊號。";
-        if (logic === 'YIELD_MACRO') return "「殖利率/總經 (Yield/Macro)」：分析殖利率吸引力。若殖利率高於歷史平均(>4%~5%)，或債券價格位於歷史低檔區(殖利率倒數)，視為加碼訊號。";
-        return "";
-    };
+        const etfData = etfExtraData[symbol];
+        
+        const settings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE' };
+        const classification = settings.type || 'CORE'; 
+        const classLabel = ASSET_TYPES[classification]?.label || '核心資產';
+        const isDCA = settings.isDCA; 
+        
+        // --- 雙因子加碼邏輯處理 ---
+        const addonLogic = settings.addon || 'NONE'; 
+        const addon2Logic = settings.addon2 || 'NONE';
+        
+        const getAddonText = (logic) => {
+            if (logic === 'PYRAMID') return "「跌幅金字塔 (Pyramid)」：分析回檔幅度與乖離率。若股價較近期高點回檔>5%~10%或觸及長期均線支撐，視為加碼訊號。";
+            if (logic === 'TECHNICAL') return "「技術指標 (Technical)」：分析動能訊號。若 KD 低檔黃金交叉(K<20金叉)、MACD 柱狀體翻紅或 RSI 突破 50，視為加碼訊號。";
+            if (logic === 'YIELD_MACRO') return "「殖利率/總經 (Yield/Macro)」：分析殖利率吸引力。若殖利率高於歷史平均(>4%~5%)，或債券價格位於歷史低檔區(殖利率倒數)，視為加碼訊號。";
+            return "";
+        };
 
-    let addonStrategy = "【加碼邏輯 (雙重驗證)】：";
-    if (addonLogic !== 'NONE') addonStrategy += `\n - 條件一 (主要)：${getAddonText(addonLogic)}`;
-    if (addon2Logic !== 'NONE') addonStrategy += `\n - 條件二 (次要)：${getAddonText(addon2Logic)}`;
-    if (addonLogic !== 'NONE' && addon2Logic !== 'NONE') {
-        addonStrategy += `\n * 判定標準：必須綜合參考「條件一」與「條件二」，若兩者皆出現正向訊號，加碼訊號最強；若僅單一條件成立，請依據市況判斷是否視為「加碼邏輯成立」。`;
-    } else if (addonLogic === 'NONE' && addon2Logic === 'NONE') {
-        addonStrategy += "\n - 無設定特別加碼條件，依據基礎定位操作。";
-    }
+        let addonStrategy = "【加碼邏輯 (雙重驗證)】：";
+        if (addonLogic !== 'NONE') addonStrategy += `\n - 條件一 (主要)：${getAddonText(addonLogic)}`;
+        if (addon2Logic !== 'NONE') addonStrategy += `\n - 條件二 (次要)：${getAddonText(addon2Logic)}`;
+        if (addonLogic !== 'NONE' && addon2Logic !== 'NONE') {
+            addonStrategy += `\n * 判定標準：必須綜合參考「條件一」與「條件二」，若兩者皆出現正向訊號，加碼訊號最強；若僅單一條件成立，請依據市況判斷是否視為「加碼邏輯成立」。`;
+        } else if (addonLogic === 'NONE' && addon2Logic === 'NONE') {
+            addonStrategy += "\n - 無設定特別加碼條件，依據基礎定位操作。";
+        }
 
-    const performanceInfo = assetInfo ? `目前損益：${formatCurrency(assetInfo.profitLoss)} (ROI: ${formatPercent(assetInfo.roi)})。` : "";
-    const currentPrice = realTimePrices[symbol] || latest.close; const prevClose = prevDay ? prevDay.close : latest.close;
-    
-    // --- Data Assurance Logic for AI (Source Provenance) ---
-    let keyMetrics = "";
-    if (assetType === 'ETF' || assetType === 'BOND_ETF') {
-        if (etfData && etfData.nav) {
-            const pd = (currentPrice - etfData.nav) / etfData.nav;
-            const source = etfData.navSource ? `(${etfData.navSource})` : '';
-            keyMetrics += `\n- 折溢價 (P/D): ${(pd*100).toFixed(2)}% (淨值: ${etfData.nav} ${source})`;
-        } else { keyMetrics += `\n- 折溢價: 資料缺失`; }
-    }
-    if (assetType === 'BOND' || assetType === 'BOND_ETF') {
-        if (etfData && etfData.yield) {
+        const performanceInfo = assetInfo ? `目前損益：${formatCurrency(assetInfo.profitLoss)} (ROI: ${formatPercent(assetInfo.roi)})。` : "";
+        const currentPrice = realTimePrices[symbol] || latest.close; const prevClose = prevDay ? prevDay.close : latest.close;
+        
+        // --- Data Assurance Logic for AI (Source Provenance) ---
+        let keyMetrics = "";
+        
+        // 1. NAV & P/D (For ETFs & Bond ETFs)
+        if (assetType === 'ETF' || assetType === 'BOND_ETF') {
+            if (etfData && etfData.nav) {
+                const pd = (currentPrice - etfData.nav) / etfData.nav;
+                const source = etfData.navSource ? `(${etfData.navSource})` : '';
+                keyMetrics += `\n- 折溢價 (P/D): ${(pd*100).toFixed(2)}% (淨值: ${etfData.nav} ${source})`;
+            } else { 
+                keyMetrics += `\n- 折溢價: 資料缺失 (無法取得淨值)`; 
+            }
+        }
+
+        // 2. Yield (For Bond & Bond ETFs)
+        if (assetType === 'BOND' || assetType === 'BOND_ETF') {
+            if (etfData && etfData.yield) {
+                const yieldVal = etfData.yield < 1 ? etfData.yield * 100 : etfData.yield;
+                const source = etfData.yieldSource ? `(${etfData.yieldSource})` : '';
+                keyMetrics += `\n- 殖利率 (Yield): ${yieldVal.toFixed(2)}% ${source}`;
+            } else {
+                keyMetrics += `\n- 殖利率: 資料缺失`;
+            }
+        } else if (assetType === 'ETF' && etfData && etfData.yield) {
+            // Optional for normal ETFs
             const yieldVal = etfData.yield < 1 ? etfData.yield * 100 : etfData.yield;
-            keyMetrics += `\n- 殖利率 (Yield): ${yieldVal.toFixed(2)}% ${etfData.yieldSource ? `(${etfData.yieldSource})` : ''}`;
-        } else { keyMetrics += `\n- 殖利率: 資料缺失`; }
-    } else if (assetType === 'ETF' && etfData && etfData.yield) {
-        const yieldVal = etfData.yield < 1 ? etfData.yield * 100 : etfData.yield;
-        keyMetrics += `\n- 殖利率 (Yield): ${yieldVal.toFixed(2)}% ${etfData.yieldSource ? `(${etfData.yieldSource})` : ''}`;
-    }
-    if (assetType === 'BOND' || assetType === 'BOND_ETF' || isUsAsset(symbol)) {
-        keyMetrics += `\n- 參考匯率 (USD/TWD): ${usdRate}`;
-        if (benchmarkYield) keyMetrics += `\n- ${benchmarkLabel}: ${benchmarkYield}%`;
-    }
+            const source = etfData.yieldSource ? `(${etfData.yieldSource})` : '';
+            keyMetrics += `\n- 殖利率 (Yield): ${yieldVal.toFixed(2)}% ${source}`;
+        }
+        
+        // 3. Exchange Rates & Macro (For Bond, Bond ETF, or US Assets)
+        if (assetType === 'BOND' || assetType === 'BOND_ETF' || isUsAsset(symbol)) {
+            keyMetrics += `\n- 參考匯率 (USD/TWD): ${usdRate}`;
+            if (benchmarkYield) keyMetrics += `\n- ${benchmarkLabel}: ${benchmarkYield}%`;
+        }
 
-    // **【資產屬性分類與分析邏輯 (第一優先遵守)】**
-    const specializedRules = `
-**【資產屬性分類與分析邏輯 (第一優先遵守)】**
-請先判斷標的屬於以下哪一類，並**只使用**該類別的指標進行判斷：
-1. **波動大股票 (科技股、飆股)**: 主要: MACD (綠柱收斂、DIF 黃金交叉) / 輔助: RSI (底背離) / 忽略: KD。
-2. **波動小股票 (金融股、傳產股)**: 主要: 布林通道 (觸碰下緣) / 輔助: KD (低檔金叉)、殖利率 / 忽略: MACD。
-3. **大盤型 ETF (如 0050, 006208)**: 主要: KD 指標 (日/週 KD < 20) / 輔助: 均線 (回測季線/年線) / 忽略: 個股財報。
-4. **科技型/成長型 ETF (如 00895, QQQ)**: 主要: 折溢價 (確認折價) / 輔助: RSI (跌破 30) / 忽略: 殖利率。
-5. **債券型 ETF (如 00679B, TLT)**: 主要: 美債殖利率 (針對"20年"標的，務必參考 ^TVC 20年期數據) / 輔助: 匯率、折溢價 / 忽略: MACD, RSI。
+        let strategyContext = classification === 'CORE' ? "【核心資產 (CORE)】策略屬性：左側交易、價值投資。目標：長期持有，跌破季線(MA60)或半年線(MA120)視為價值浮現。" : "【衛星資產 (SATELLITE)】策略屬性：右側交易、波段操作。目標：抓取波段價差，站上月線(MA20)且動能強視為買進，跌破月線應停利停損。"; 
+
+        const goldenRule = `
+**【最高交易鐵律 (大原則絕對遵守)】**
+1. **追高禁令 (漲時不買)**：若「目前即時價」大於「昨日收盤價」(今日上漲)，**絕對不可**產生任何買進或加碼訊號！(強制作為觀望 HOLD 或減碼 REDUCE)。
+2. **殺低禁令 (跌時不賣)**：若「目前即時價」小於「昨日收盤價」(今日下跌)，**絕對不可**產生任何賣出或減碼訊號！(強制作為觀望 HOLD 或加碼 ADD)。
 `;
 
-    let strategyContext = classification === 'CORE' ? "【核心資產 (CORE)】策略屬性：左側交易、價值投資。目標：長期持有，跌破季線(MA60)或半年線(MA120)視為價值浮現。" : "【衛星資產 (SATELLITE)】策略屬性：右側交易、波段操作。目標：抓取波段價差，站上月線(MA20)且動能強視為買進，跌破月線應停利停損。"; 
-    
-    let dcaStrategy = "";
-    if (isDCA) {
-       if (assetType === 'BOND' || assetType === 'BOND_ETF') { dcaStrategy = `【定期定額 (債券型)】邏輯：(1) 布林通道觸及下軌(BBL)。 (2) 折價優先。 (3) TWD=X匯率優勢。 (4) 今日 ${isLastTradingDay ? '是' : '不是'} 月底扣款日。${isLastTradingDay ? '符合DCA條件(SIGNAL:ADD)。' : ''}`; } 
-       else if (classification === 'SATELLITE') { dcaStrategy = `【定期定額 (衛星)】邏輯：(1) RSI出現底背離，或 MACD 綠柱縮短/翻紅。 (2) 今日 ${isLastTradingDay ? '是' : '不是'} 月底扣款日。${isLastTradingDay ? '符合DCA條件(SIGNAL:ADD)。' : ''}`; } 
-       else { dcaStrategy = `【定期定額 (核心)】邏輯：(1) KD低檔(<20)金叉，或回測 MA60/MA120 有撐。 (2) 今日 ${isLastTradingDay ? '是' : '不是'} 月底扣款日。${isLastTradingDay ? '符合DCA條件(SIGNAL:ADD)。' : ''}`; }
-    }
+        const specializedRules = `
+**【資產屬性分類與分析邏輯 (第一優先遵守)】**
+請先判斷標的屬於以下哪一類，並**只使用**該類別的指標進行判斷：
 
-    const prompt = `請以一位專業股票分析師的角色，進行個股深度分析。
+1. **波動大股票 (科技股、飆股)**
+   - **主要 (第一濾網)**：MACD (綠柱收斂、DIF 黃金交叉)。
+   - **輔助 (確認訊號)**：RSI (底背離)。
+   - **地雷 (忽略)**：KD (易鈍化)。
+
+2. **波動小股票 (金融股、傳產股)**
+   - **主要 (第一濾網)**：布林通道 (觸碰下緣)。
+   - **輔助 (確認訊號)**：KD (低檔金叉)、殖利率 (>歷史平均)。
+   - **地雷 (忽略)**：MACD (反應太慢)。
+
+3. **大盤型 ETF (如 0050, 006208)**
+   - **主要 (第一濾網)**：KD 指標 (日/週 KD < 20)。
+   - **輔助 (確認訊號)**：均線 (回測季線/年線)。
+   - **地雷 (忽略)**：個股財報。
+
+4. **科技型/成長型 ETF (如 00895, QQQ)**
+   - **主要 (第一濾網)**：折溢價 (確認市價 < 淨值，即折價)。
+   - **輔助 (確認訊號)**：RSI (跌破 30)。
+   - **地雷 (忽略)**：殖利率 (意義不大)。
+
+5. **債券型 ETF (如 00679B, TLT)**
+   - **主要 (第一濾網)**：美債殖利率 (Yield 創新高時為買點)。(針對名稱含"20年"的標的，請務必參考 ^TVC 20年期數據)
+   - **輔助 (確認訊號)**：匯率 (台幣強升段有利)、折溢價 (市價 < 淨值)。
+   - **地雷 (忽略)**：MACD / RSI (易失真)。
+`;
+
+        let dcaStrategy = "";
+        let dcaBasicInfo = "";
+        if (isDCA) {
+           dcaBasicInfo = `\n      - 今日是否為本月最後一個交易日 (月底扣款日)：${isLastTradingDay ? '【是】' : '【否】'}\n      - 本月是否已完成基礎買入：${hasBoughtThisMonth ? '【是】(僅評估加碼)' : '【否】(需尋找買點)'}`;
+           if (hasBoughtThisMonth) {
+               dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。目前**僅**需評估是否觸發加碼條件，不再產生基礎扣款訊號。`;
+           } else {
+               dcaStrategy = `3. 【定期定額 (尋找買點)】：目標為在當月尋找相對低點買入(如布林下軌、技術低檔)。\n**時間保底防線**：若「今日是否為月底扣款日」為【是】，則無論技術指標為何，強制符合基礎扣款條件！`;
+           }
+        } else {
+           dcaStrategy = `3. 【單筆投入】：此標的非定期定額，純粹依據【策略疊加】的加碼條件與【最高交易鐵律】來尋找買點，無須考慮月底扣款日。`;
+        }
+
+        const prompt = `請以一位專業股票分析師的角色，進行個股深度分析。
       **分析標的確認**：
       - 股票代號 (Symbol)：${symbol}
       - 股票名稱 (Name)：${stockName}
       - 資產屬性：${assetType} (詳細分類)
       **基本資訊**：
+      - 今日日期：${today}${dcaBasicInfo}
       - 投資定位：${classLabel}
       - 投資模式：${isDCA ? '定期定額 (DCA)' : '單筆投入'}
       - ${performanceInfo}
@@ -1018,43 +1204,57 @@ const App = () => {
       - RSI指標：RSI6=${latest.RSI6?formatPrice(latest.RSI6):'-'}, RSI12=${latest.RSI12?formatPrice(latest.RSI12):'-'}
       - 布林通道：上軌=${latest.BBU?formatPrice(latest.BBU):'-'}, 中軌=${latest.BBM?formatPrice(latest.BBM):'-'}, 下軌=${latest.BBL?formatPrice(latest.BBL):'-'}
       
+      ${goldenRule}
+      
       ${specializedRules}
 
       **使用者策略模組 (需疊加分析)**：
       1. ${strategyContext}
       2. ${addonStrategy}
-      3. ${dcaStrategy}
+      ${dcaStrategy}
       **目標價與操作區間分析 (Mandatory)**：
       請在 [DETAIL] 的最後一段，根據上述分析提供明確的價格指引：
-      - 若建議為 **ADD (加碼) / REDUCE (減碼)**：提供一個【預估目標價 (Target Price)】或【合理操作區間】。
-      - 若建議為 **ADD_BASIC (定期定額基礎扣款)**：分析目前的【安全扣款價格上限】或【建議扣款區間】。
+      - 若建議為 **ADD (加碼) / REDUCE (減碼)**：請根據技術支撐/壓力位(如布林通道、均線)，提供一個【預估目標價 (Target Price)】或【合理操作區間】。
+      - 若建議為 **ADD_BASIC (定期定額基礎扣款)**：請分析目前的【安全扣款價格上限】或【建議扣款區間】，避免在乖離過大時盲目扣款。
       **最終燈號判定規則 (複合燈號 - 極重要)**：
       請確保您的 [SIGNAL] 輸出與您的文字分析**完全一致**。
-      - **SIGNAL: REDUCE**：(紅燈) 若趨勢轉空、跌破關鍵支撐或基本面轉差 (優先級最高)。
-      - **SIGNAL: ADD_ALL**：(綠燈) 若「定期定額條件成立」 且 「加碼邏輯成立」。(建議基礎及加碼投資)
-      - **SIGNAL: ADD_BASIC**：(綠燈) 若「定期定額條件成立」 但 「加碼邏輯不成立」。(建議基礎投資)
-      - **SIGNAL: ADD_BONUS**：(綠燈) 若「定期定額條件不成立」 但 「加碼邏輯成立」。(建議加碼投資)
-      - **SIGNAL: HOLD**：(黃燈) 若上述皆不成立 (建議觀望)。
+      - **必須優先套用【最高交易鐵律】**：因今日上漲被阻擋的買入，或因今日下跌被阻擋的賣出，均視為觀望。
+      - **SIGNAL: REDUCE**：(紅燈) 趨勢轉空且今日未下跌。
+      - **SIGNAL: ADD_ALL**：(綠燈) 「基礎扣款成立」且「加碼邏輯成立」且今日未上漲。
+      - **SIGNAL: ADD_BASIC**：(綠燈) 「基礎扣款成立」但「加碼邏輯不成立」且今日未上漲。
+      - **SIGNAL: ADD_BONUS**：(綠燈) 「基礎扣款不成立(或本月已扣或非定期定額)」但「加碼邏輯成立」且今日未上漲。
+      - **SIGNAL: HOLD**：(黃燈) 若上述皆不成立，或因【最高交易鐵律】被阻擋 (建議觀望)。
       請依序輸出 (請勿使用 Markdown 代碼區塊)：
       [SUMMARY] (50字內簡評，結合投資定位與目前損益狀況)
-      [DETAIL] (完整分析報告。請分點說明：1. 資產歸類確認 2. 第一濾網分析 3. 輔助訊號分析 4. 策略疊加分析 5. 目標價與操作建議。請使用 Markdown 排版)
+      [DETAIL] (完整分析報告，請詳細且重點明確地說明。請分點：1. 資產歸類確認 2. 第一濾網分析 3. 輔助訊號分析 4. 策略疊加與鐵律檢驗 5. 目標價與操作建議。)
       [SIGNAL] (請輸出單一詞彙，例如：ADD_ALL)`;
 
-    try {
-      const { text, model } = await callGeminiWithFallback(prompt);
-      setUsedModel(model);
-      const summaryMatch = text.match(/\[SUMMARY\]\s*([\s\S]*?)\s*(?=\[DETAIL\]|$)/i);
-      const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
-      const signalMatch = text.match(/\[SIGNAL\]\s*[:：\-]?\s*(ADD_ALL|ADD_BASIC|ADD_BONUS|REDUCE|HOLD)/i);
-      
-      let summary = summaryMatch ? summaryMatch[1].trim() : "分析完成"; summary = summary.replace(/[`*#]/g, '').replace(/\n/g, ' ').trim();
-      const detail = detailMatch ? detailMatch[1].trim() : text;
-      const signalCode = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
-      setAiSummary(String(summary)); setAiDetail(String(detail)); setAiSignals(prev => ({ ...prev, [symbol]: signalCode }));
-      updateAiCache(symbol, { summary, detail, signal: signalCode, model }, dataDate); 
-      setIsDetailExpanded(true); 
-    } catch (err) { setAiSummary(String(err.message) || "分析暫時無法使用。"); } 
-    finally { setIsAiSummarizing(false); delete analysisInProgressRef.current[symbol]; }
+        try {
+          console.log(`[AI 個股分析發送字句 (Prompt) - ${symbol}]:\n`, prompt);
+          const aiStart = performance.now();
+          const { text, model } = await callGeminiWithFallback(prompt);
+          console.log(`[Timer] AI 分析 (${symbol}) 耗時: ${(performance.now() - aiStart).toFixed(2)} ms`);
+          setUsedModel(model);
+          const summaryMatch = text.match(/\[SUMMARY\]\s*([\s\S]*?)\s*(?=\[DETAIL\]|$)/i);
+          const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
+          const signalMatch = text.match(/\[SIGNAL\]\s*[:：\-]?\s*(ADD_ALL|ADD_BASIC|ADD_BONUS|REDUCE|HOLD)/i);
+          
+          let summary = summaryMatch ? summaryMatch[1].trim() : "分析完成"; summary = summary.replace(/[`*#]/g, '').replace(/\n/g, ' ').trim();
+          const detail = detailMatch ? detailMatch[1].trim() : text;
+          const signalCode = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
+          setAiSummary(String(summary)); setAiDetail(String(detail)); setAiSignals(prev => ({ ...prev, [symbol]: signalCode }));
+          updateAiCache(symbol, { summary, detail, signal: signalCode, model }, dataDate); 
+          setIsDetailExpanded(true); 
+        } catch (err) { 
+            setAiSummary(String(err.message) || "分析暫時無法使用。"); 
+        } 
+    } catch(err) {
+        console.error("AI Analysis Sync Error:", err);
+        setAiSummary("分析發生預期外錯誤，請稍後再試。");
+    } finally {
+        setIsAiSummarizing(false); 
+        delete analysisInProgressRef.current[symbol];
+    }
   };
 
   const fetchHistoricalData = async (symbol, tf) => {
@@ -1106,7 +1306,11 @@ const App = () => {
         const timestamps = chartData.timestamp;
         const quote = chartData.indicators.quote[0];
         const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
+        
+        const techStart = performance.now();
         const processedData = processTechnicalData(rawPoints);
+        console.log(`[Timer] 計算技術指標 (${symbol}) 耗時: ${(performance.now() - techStart).toFixed(2)} ms`);
+        
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
         
         if (geminiApiKey) {
@@ -1165,10 +1369,6 @@ const App = () => {
             setLoading(false); 
             fetchRealTimePrices(validData, false); 
             
-            if (!selectedHistorySymbol) {
-                const first = validData.find(d => d['類別'] !== '定存');
-                if (first) setSelectedHistorySymbol(first['標的']);
-            }
             localStorage.setItem('investment_sheet_url', url);
           } else { setError('讀取到的資料為空'); setLoading(false); }
         },
@@ -1222,7 +1422,6 @@ const App = () => {
     }
   };
 
-  // Enhanced handleSettingChange to process addon2
   const handleSettingChange = (symbol, key, value) => {
     const currentSettings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE' };
     const newSettings = { ...investmentSettings, [symbol]: { ...currentSettings, [key]: value } };
@@ -1282,7 +1481,6 @@ const App = () => {
     let initialSettings = {};
     if (savedSettings) {
         initialSettings = JSON.parse(savedSettings);
-        // Guarantee addon2 exists for older saves
         Object.keys(initialSettings).forEach(key => {
             if(!initialSettings[key].addon2) initialSettings[key].addon2 = 'NONE';
         });
@@ -1313,7 +1511,7 @@ const App = () => {
     if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } 
-    else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); const firstStock = DEMO_DATA.find(d => d['類別'] === '股票' || d['類別'] === '債券'); if (firstStock) { setSelectedHistorySymbol(firstStock['標的']); } }
+    else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
 
   useEffect(() => {
@@ -1394,7 +1592,15 @@ const App = () => {
                   <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><PieIcon className="w-5 h-5 mr-2 text-blue-400" /> 資產類別配置</h3>
                   <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
                     {allocationData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">{allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}</Pie><RechartsTooltip itemStyle={{ color: '#f1f5f9' }} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} /><Legend formatter={(value, entry) => { const { payload } = entry; return `${value} (${(payload.percent * 100).toFixed(1)}%)`; }} /></PieChart></ResponsiveContainer>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">
+                            {allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}
+                          </Pie>
+                          <RechartsTooltip itemStyle={{ color: '#f1f5f9' }} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} />
+                          <Legend formatter={(value, entry) => { const { payload } = entry; return `${value} (${(payload?.percent * 100).toFixed(1)}%)`; }} />
+                        </PieChart>
+                      </ResponsiveContainer>
                     ) : <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>}
                   </div>
                 </div>
@@ -1550,13 +1756,30 @@ const App = () => {
                         </ComposedChart>
                       </ResponsiveContainer>
                   </div>
+                  
+                  {/* 新增：圖例說明 (Strategy Legend) */}
+                  <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 mt-3 pt-2 border-t border-slate-700/50 text-[10px] text-slate-400">
+                      <span className="font-semibold text-slate-300">圖例說明:</span>
+                      {Object.entries(STRATEGY_CONFIG).map(([key, config]) => {
+                          if (key === 'default') return null;
+                          return (
+                              <div key={key} className="flex items-center">
+                                  <svg width="14" height="14" className="mr-1 overflow-visible">
+                                      {renderShape(config.shape, 7, 7, config.color, 4)}
+                                  </svg>
+                                  {config.label}
+                              </div>
+                          );
+                      })}
+                  </div>
+                  
                 </>
               ) : <div className="flex-1 flex items-center justify-center h-full text-slate-500">{historyError ? <span className="text-red-400">{historyError}</span> : "請選擇左側標的以查看走勢"}</div>}
               </div>
 
               {/* Data Provenance Badge Bar (New) */}
               <div className="flex-none px-2 py-1 mt-2 text-[10px] text-slate-500 flex items-center space-x-3 border-t border-dashed border-slate-700/50">
-                  <span className="flex items-center"><DollarSign className="w-3 h-3 mr-1" /> 價: Yahoo</span>
+                  <span className="flex items-center"><DollarSign className="w-3 h-3 mr-1" /> 價: {etfExtraData[selectedHistorySymbol]?.priceSource || 'Yahoo'}</span>
                   <span className="flex items-center"><Layers className="w-3 h-3 mr-1" /> 淨: {etfExtraData[selectedHistorySymbol]?.navSource || '-'}</span>
                   <span className="flex items-center"><Percent className="w-3 h-3 mr-1" /> 殖: {etfExtraData[selectedHistorySymbol]?.yieldSource || '-'}</span>
               </div>
@@ -1583,13 +1806,20 @@ const App = () => {
                             {isDetailExpanded ? "收合" : "展開"}
                         </button>
                     )}
-                    {geminiApiKey && !isAiSummarizing && (
+                    {geminiApiKey && (
                         <button 
-                            onClick={() => generateFullAnalysis(selectedHistorySymbol, historicalData[`${selectedHistorySymbol}_${timeframe}`], true)}
-                            className={`text-xs flex items-center transition-colors text-red-400 hover:text-red-300 ${isLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            disabled={isLocked}
+                            onClick={() => {
+                                const data = historicalData[`${selectedHistorySymbol}_${timeframe}`];
+                                if (data && data.length > 0) {
+                                    generateFullAnalysis(selectedHistorySymbol, data, true);
+                                } else {
+                                    fetchHistoricalData(selectedHistorySymbol, timeframe);
+                                }
+                            }}
+                            className={`text-xs flex items-center transition-colors text-red-400 hover:text-red-300 ${isLocked || isAiSummarizing ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            disabled={isLocked || isAiSummarizing}
                         >
-                            <RefreshCw className={`w-3 h-3 mr-1 ${isLocked ? 'animate-spin' : ''}`} /> 
+                            <RefreshCw className={`w-3 h-3 mr-1 ${isAiSummarizing ? 'animate-spin' : ''}`} /> 
                             重新分析
                         </button>
                     )}
