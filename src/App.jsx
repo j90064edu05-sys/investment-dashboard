@@ -196,22 +196,40 @@ const withTimer = async (name, promiseFn) => {
     }
 };
 
-// --- 網路請求與代理 (v54.1: 修正 Error 捕捉) ---
+// --- 網路請求與代理 (v54.3: 強制防快取) ---
 const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) => {
-  const urlWithTime = targetUrl.includes('?') ? `${targetUrl}&t=${Date.now()}` : `${targetUrl}?t=${Date.now()}`;
+  // 檢查是否已自帶防快取參數 (如 _=)
+  const hasCacheBuster = targetUrl.includes('_=');
+  // 加入雙重亂數，改用標準 _= 徹底避免瀏覽器、CDN或中繼伺服器快取
+  const urlWithTime = hasCacheBuster ? targetUrl : (targetUrl.includes('?') 
+      ? `${targetUrl}&_=${Date.now()}&r=${Math.random()}` 
+      : `${targetUrl}?_=${Date.now()}&r=${Math.random()}`);
+  
+  console.log(`[Network] 🌐 準備請求完整網址: ${urlWithTime}`);
   
   const proxies = [
-    { url: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, isAllOrigins: true },
+    // allorigins 加上 disableCache=true 強制不快取
+    { url: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true`, isAllOrigins: true },
     { url: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, isAllOrigins: false },
     { url: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, isAllOrigins: false },
   ];
   
-  const options = { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined };
+  const options = { 
+      method, 
+      headers: {
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
+      }, 
+      body: body ? JSON.stringify(body) : undefined,
+      cache: 'no-store' // Fetch API 強制不快取
+  };
 
   // 1. 優先嘗試直連 (若允許跨域)
   try {
       if(targetUrl.includes('openapi.twse.com.tw') || targetUrl.includes('mis.twse.com.tw')) {
-          const response = await fetch(urlWithTime);
+          const response = await fetch(urlWithTime, options);
           if (response.ok) return await response.json();
       }
   } catch(e) { /* ignore */ } 
@@ -723,29 +741,39 @@ const App = () => {
     const twseYieldMap = {}; 
     const tpexYieldMap = {}; 
     const misEtfMap = {}; 
+    const misEtfPriceMap = {}; // 新增：用於存放 e 欄位市價
     const misPriceMap = {}; 
     const misTimeMap = {};
+
+    // 依據是否為交易時間決定 all_etf.txt 的快取策略：
+    // 交易時間：使用當下毫秒數 (Date.now()) 強制抓最新
+    // 非交易時間：使用當日日期字串，避免過度頻繁抓取相同靜態檔案
+    const misCacheBuster = isTrading ? Date.now() : getTodayDate().replace(/-/g, '');
+    const misEtfUrl = `https://mis.twse.com.tw/stock/data/all_etf.txt?_=${misCacheBuster}`;
 
     // 1. 官方資料源全面併發抓取 (Parallel Fetch)
     console.log("Fetching Official Data in Parallel...");
     const [misRes, navRes, yieldRes, tpexNavRes, tpexYieldRes] = await Promise.all([
-        withTimer("MIS_NAV", () => fetchWithProxyFallback('https://mis.twse.com.tw/stock/data/all_etf.txt').catch(()=>null)),
+        withTimer("MIS_NAV", () => fetchWithProxyFallback(misEtfUrl).catch(()=>null)),
         withTimer("TWSE_NAV", () => fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/a1271825').catch(()=>null)),
         withTimer("TWSE_Yield", () => fetchWithProxyFallback('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL').catch(()=>null)),
         withTimer("TPEx_NAV", () => fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/etf/net_value/net_value_result.php?l=zh-tw&o=json').catch(()=>null)),
         withTimer("TPEx_Yield", () => fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json').catch(()=>null))
     ]);
 
-    // 解析 MIS NAV
+    // 解析 MIS NAV & ETF市價 (e欄位)
     if (misRes) {
-        if (misRes.msgArray) {
-            misRes.msgArray.forEach(item => { if (item.a && item.f) misEtfMap[item.a.trim()] = parseFloat(item.f); });
-        }
+        const processMisItem = (item) => {
+            if (item.a) {
+                const code = String(item.a).trim();
+                if (item.f && item.f !== '-') misEtfMap[code] = parseFloat(String(item.f).replace(/,/g, ''));
+                if (item.e && item.e !== '-') misEtfPriceMap[code] = parseFloat(String(item.e).replace(/,/g, ''));
+            }
+        };
+        if (misRes.msgArray) misRes.msgArray.forEach(processMisItem);
         if (misRes.a1 && Array.isArray(misRes.a1)) {
             misRes.a1.forEach(subObj => {
-                if (subObj.msgArray) {
-                    subObj.msgArray.forEach(item => { if (item.a && item.f) misEtfMap[item.a.trim()] = parseFloat(item.f); });
-                }
+                if (subObj.msgArray) subObj.msgArray.forEach(processMisItem);
             });
         }
     }
@@ -760,7 +788,12 @@ const App = () => {
 
     // 1.5 MIS TWSE (Realtime Price) for .TW and .TWO
     try {
-       const twSymbols = symbolsToFetchList.filter(s => s.includes('.TW') || s.includes('.TWO'));
+       const twSymbols = symbolsToFetchList.filter(s => {
+           if (!(s.includes('.TW') || s.includes('.TWO'))) return false;
+           const pureCode = s.replace(/\.TWO$|\.TW$/i, '');
+           if (misEtfPriceMap[pureCode]) return false; // 已在 all_etf.txt 取得 e 欄位市價的 ETF 則自動跳過，節省請求
+           return true;
+       });
        if (twSymbols.length > 0) {
            const pricePromises = [];
            for (let i = 0; i < twSymbols.length; i += 50) {
@@ -800,7 +833,13 @@ const App = () => {
         const pureCode = symbol.replace(/\.TWO$|\.TW$/i, '');
         const extra = newEtfData[symbol] || {};
         
-        if (misPriceMap[symbol]) {
+        // 優先套用 ETF 的 e 欄位市價
+        if (misEtfPriceMap[pureCode]) {
+            newPrices[symbol] = misEtfPriceMap[pureCode];
+            extra.priceSource = "MIS(e)";
+            const d = new Date();
+            extra.dateStr = `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        } else if (misPriceMap[symbol]) {
             newPrices[symbol] = misPriceMap[symbol];
             extra.dateStr = misTimeMap[symbol];
             extra.priceSource = "MIS";
@@ -1006,7 +1045,10 @@ const App = () => {
         // 將等待時間延長至 45 秒，避免 Pro 模型因思考較久而觸發逾時
         const timeoutId = setTimeout(() => controller.abort(), 45000); 
         try {
-          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
+          const aiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+          console.log(`[Network] 🧠 呼叫 AI 模型網址: ${aiUrl} (隱藏金鑰)`);
+          
+          const response = await fetch(`${aiUrl}?key=${geminiApiKey}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 4096, temperature: 0.2 } }),
@@ -1394,6 +1436,8 @@ const App = () => {
 
   const performFetch = async (url) => {
     setLoading(true); setError(null); setUpdateError(null); setRealTimePrices({}); setHistoricalData({}); setPortfolioHealth(null);
+    console.log(`[Network] 📊 讀取使用者 CSV 試算表網址: ${url}`);
+    
     try {
       const Papa = await loadPapaParse();
       Papa.parse(url, {
