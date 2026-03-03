@@ -11,11 +11,9 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.2 (API Error Fix)
+ * Alpha 投資戰情室 v54.4 (ETF Price Overwrite Fix)
  * * [修正內容]
- * 1. 移除了不存在的 Gemini 3 模型，更新為穩定且支援的 Gemini 2.5 / 2.0 / 1.5 模型清單。
- * 2. 強化 API 錯誤捕捉機制：當模型連線失敗時，會捕捉詳細的錯誤訊息並顯示給使用者。
- * 3. 針對無效 API Key (HTTP 400/403) 提早中斷重試機制，避免無謂的 fallback。
+ * 1. 修正了 ETF 市價被 Yahoo 覆蓋的問題：現在智慧跳過檢查會同時驗證 misPriceMap 與 misEtfPriceMap。
  */
 
 // --- 靜態配置 ---
@@ -876,12 +874,16 @@ const App = () => {
     const symbolsForYahoo = [];
     symbolsToFetch.forEach(symbol => {
         const extra = newEtfData[symbol] || {};
+        const pureCode = symbol.replace(/\.TWO$|\.TW$/i, '');
         const name = symbolToName[symbol] || '';
         const isEtf = name.includes('ETF') || symbol.startsWith('00');
         const isUs = isUsAsset(symbol);
         
         let needYahoo = false;
-        if (!misPriceMap[symbol]) needYahoo = true; // 沒有股價，必須查
+        // 修正：同時檢查一般市價與 ETF專屬(e欄位)市價，只要有任一個存在就代表已經抓到了
+        const hasMisPrice = misPriceMap[symbol] || misEtfPriceMap[pureCode];
+        
+        if (!hasMisPrice) needYahoo = true; // 沒有股價，必須查
         if (isEtf && !extra.nav) needYahoo = true;  // ETF 缺淨值，去 Yahoo 補
         if (isUs || symbol === 'TWD=X' || symbol.startsWith('^')) needYahoo = true; // 美股/匯率/指數必查
         
@@ -918,8 +920,11 @@ const App = () => {
 
                             if (quote && quote.regularMarketPrice !== undefined) {
                                 const extra = { ...newEtfData[symbol] }; 
+                                const pureCodeInner = symbol.replace(/\.TWO$|\.TW$/i, '');
+                                const hasMisPriceInner = misPriceMap[symbol] || misEtfPriceMap[pureCodeInner];
                                 
-                                if (!misPriceMap[symbol]) {
+                                // 修正：確保我們不會用 Yahoo 的市價去覆蓋辛苦抓來的 MIS(e) 或 MIS 市價
+                                if (!hasMisPriceInner) {
                                     newPrices[symbol] = quote.regularMarketPrice;
                                     extra.priceSource = "Yahoo";
                                     if(quote.regularMarketTime) {
@@ -960,8 +965,11 @@ const App = () => {
                                 const meta = result?.chart?.result?.[0]?.meta;
                                 if (meta && meta.regularMarketPrice !== undefined) {
                                     const extra = { ...newEtfData[symbol] };
+                                    const pureCodeInner = symbol.replace(/\.TWO$|\.TW$/i, '');
+                                    const hasMisPriceInner = misPriceMap[symbol] || misEtfPriceMap[pureCodeInner];
                                     
-                                    if (!misPriceMap[symbol]) {
+                                    // 修正：同樣的保護機制
+                                    if (!hasMisPriceInner) {
                                         newPrices[symbol] = meta.regularMarketPrice;
                                         extra.priceSource = "Yahoo";
                                         if(meta.regularMarketTime) {
