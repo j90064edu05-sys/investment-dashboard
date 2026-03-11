@@ -11,11 +11,10 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.8 (Smart Yahoo Date Patch)
+ * Alpha 投資戰情室 v54.9 (Fix Mobile CSV Fetch 404)
  * * [修正內容]
- * 1. 修正 Yahoo Finance 歷史資料遺失最新一日與前一日(昨日)的問題。
- * 2. 導入 Intl.DateTimeFormat 強制轉換為台灣時區 (Asia/Taipei) 以防止跨日時區誤差。
- * 3. 透過 meta.previousClose 智慧重建並補齊前一交易日的歷史 K 線。
+ * 1. 修正 Google Sheets CSV 在手機版讀取時可能發生 HTTP 404 的問題。
+ * 移除 URL 後方附加的時間戳參數，改用 HTTP Headers 強制清除快取。
  */
 
 // --- 靜態配置 ---
@@ -1507,9 +1506,16 @@ const App = () => {
     try {
       const Papa = await loadPapaParse();
       
-      // [修正] 改用原生 fetch 取代 PapaParse 內建的 XHR 下載，解決手機版瀏覽器對重導向/跨域的嚴格限制
-      const fetchUrl = cleanUrl + (cleanUrl.includes('?') ? '&' : '?') + '_=' + Date.now();
-      const response = await fetch(fetchUrl, { cache: 'no-store' });
+      // [修正] 改用單純的 fetch，並使用 Headers 控制快取，不修改 URL 避免 Google Sheets 回傳 404
+      const response = await fetch(cleanUrl, {
+          method: 'GET',
+          headers: {
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+              'Pragma': 'no-cache',
+              'Expires': '0'
+          },
+          cache: 'no-store'
+      });
       
       if (!response.ok) {
           throw new Error(`讀取失敗 (HTTP ${response.status})`);
