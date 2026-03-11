@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { 
   ComposedChart, Line, Area, Bar, BarChart, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, 
-  Tooltip as RechartsTooltip, Legend, ResponsiveContainer, ReferenceLine, Scatter
+  Tooltip as RechartsTooltip, Legend, ResponsiveContainer, ReferenceLine, Scatter, Brush
 } from 'recharts';
 import { 
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
@@ -11,9 +11,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.5 (Smart DCA Timing)
+ * Alpha 投資戰情室 v54.8 (Smart Yahoo Date Patch)
  * * [修正內容]
- * 1. 更新 AI Prompt，讓定期定額 (DCA) 在非最後一個交易日時，能主動尋找當月相對低點作為基礎扣款時機。
+ * 1. 修正 Yahoo Finance 歷史資料遺失最新一日與前一日(昨日)的問題。
+ * 2. 導入 Intl.DateTimeFormat 強制轉換為台灣時區 (Asia/Taipei) 以防止跨日時區誤差。
+ * 3. 透過 meta.previousClose 智慧重建並補齊前一交易日的歷史 K 線。
  */
 
 // --- 靜態配置 ---
@@ -83,11 +85,10 @@ const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'curre
 const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
 const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : (value || '0.00');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// 改良版 getTodayDate，考慮台灣時區 (UTC+8)
 const getTodayDate = () => {
-    const d = new Date();
-    const offset = d.getTimezoneOffset() * 60000;
-    const localDate = new Date(d.getTime() - offset);
-    return localDate.toISOString().split('T')[0];
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
 };
 
 const isTaiwanTradingHours = () => {
@@ -1422,7 +1423,58 @@ const App = () => {
       if (chartData && chartData.timestamp) {
         const timestamps = chartData.timestamp;
         const quote = chartData.indicators.quote[0];
-        const rawPoints = timestamps.map((ts, i) => ({ date: new Date(ts * 1000).toISOString().slice(0, 10), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
+        const meta = chartData.meta;
+        
+        let rawPoints = timestamps.map((ts, i) => ({ 
+            date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date(ts * 1000)), 
+            close: quote.close[i], 
+            high: quote.high[i], 
+            low: quote.low[i], 
+            open: quote.open[i] 
+        })).filter(d => d.close != null && d.high != null);
+        
+        // --- [NEW] 智慧補齊 Yahoo 遺失的資料 (歷史延遲與跨日時區修正) ---
+        if (rawPoints.length > 0 && interval === '1d') {
+            const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
+            
+            // 尋找表定的前一個交易日 (扣除六日)
+            let tempPrev = new Date();
+            tempPrev.setDate(tempPrev.getDate() - 1);
+            while (tempPrev.getDay() === 0 || tempPrev.getDay() === 6) {
+                tempPrev.setDate(tempPrev.getDate() - 1);
+            }
+            const prevTradingDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(tempPrev);
+
+            const lastPoint = rawPoints[rawPoints.length - 1];
+            
+            // 1. 補齊前一日 (昨日)：若 Yahoo 未及時提供昨日 K 線，但 API meta 裡有前日收盤價 (previousClose)
+            // 當歷史資料最後一筆既不是今天、也不是昨天，代表昨天遺失了
+            if (meta && meta.previousClose && lastPoint.date !== prevTradingDateStr && lastPoint.date !== todayStr) {
+                console.log(`[Data Patch] 補齊遺失的昨日資料: ${prevTradingDateStr}, 價格: ${meta.previousClose}`);
+                rawPoints.push({
+                    date: prevTradingDateStr,
+                    close: meta.previousClose,
+                    high: meta.previousClose,
+                    low: meta.previousClose,
+                    open: meta.previousClose
+                });
+            }
+
+            // 2. 補齊最新一日 (今日)：若 Yahoo 歷史陣列中尚未出現今天的 K 線，用即時股價補齊
+            const currentLastPoint = rawPoints[rawPoints.length - 1];
+            const rtPrice = realTimePrices[symbol] || meta?.regularMarketPrice;
+            
+            if (rtPrice && currentLastPoint.date !== todayStr) {
+                console.log(`[Data Patch] 補齊最新一日資料: ${todayStr}, 價格: ${rtPrice}`);
+                rawPoints.push({
+                    date: todayStr,
+                    close: rtPrice,
+                    high: rtPrice, // 無高低點時用收盤價暫代
+                    low: rtPrice,
+                    open: rtPrice 
+                });
+            }
+        }
         
         const techStart = performance.now();
         const processedData = processTechnicalData(rawPoints);
@@ -1802,13 +1854,33 @@ const App = () => {
             <div className="lg:col-span-3 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-2 md:p-6 block md:flex md:flex-col relative h-auto md:h-[700px]">
               <div className="flex-none flex flex-col sm:flex-row justify-between items-start sm:items-center mb-2 gap-2">
                 <h3 className="text-xl font-bold text-white flex items-center">{selectedHistorySymbol} <span className="ml-2 text-base font-normal text-slate-400">{tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱']}</span></h3>
-                <div className={`flex space-x-2 self-end sm:self-auto ${isAiSummarizing || isLocked ? 'opacity-50 pointer-events-none' : ''}`}>{[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (<button key={tf.id} disabled={isAiSummarizing || isLocked} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{tf.label}</button>))}</div>
+                <div className={`flex space-x-2 self-end sm:self-auto ${isAiSummarizing || isLocked ? 'opacity-50 pointer-events-none' : ''}`}>
+                    {[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (
+                        <button key={tf.id} disabled={isAiSummarizing || isLocked} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{tf.label}</button>
+                    ))}
+                    <button
+                        onClick={() => {
+                            setHistoricalData(prev => {
+                                const next = { ...prev };
+                                delete next[`${selectedHistorySymbol}_${timeframe}`];
+                                return next;
+                            });
+                            fetchHistoricalData(selectedHistorySymbol, timeframe);
+                        }}
+                        disabled={isAiSummarizing || isLocked}
+                        className="px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border border-slate-600 text-slate-400 hover:bg-slate-700 transition-colors flex items-center"
+                        title="清除快取並重新抓取"
+                    >
+                        <RefreshCw className={`w-3 h-3 ${historyLoading ? 'animate-spin' : ''} md:mr-1`} />
+                        <span className="hidden md:inline">重抓</span>
+                    </button>
+                </div>
               </div>
               
-              <div className="flex-none flex flex-col space-y-1 h-auto min-h-[400px] md:h-[400px]">
+              <div className="flex-none flex flex-col space-y-1 h-auto min-h-[450px] md:h-[450px]">
               {historyLoading ? <div className="flex-1 flex items-center justify-center h-full"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div> : currentChartData && currentChartData.length > 0 ? (
                 <>
-                  <div className="h-64 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip content={<CustomChartTooltip />} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} /><Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" /><Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" /></ComposedChart></ResponsiveContainer></div>
+                  <div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip content={<CustomChartTooltip />} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} /><Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" /><Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Scatter name="買入點" dataKey="buyPricePoint" shape={<CustomStrategyDot />} legendType="none" /><Brush dataKey="date" height={25} stroke="#64748B" fill="#0F172A" travellerWidth={10} tickFormatter={(tick) => tick} /></ComposedChart></ResponsiveContainer></div>
                   
                   <div className="h-32 w-full border-t border-slate-700 pt-1 relative group">
                       <div className="md:hidden absolute top-1 right-2 z-10 flex space-x-1">
@@ -2212,10 +2284,10 @@ const App = () => {
                                 <select 
                                     value={addon2Logic}
                                     onChange={(e) => handleSettingChange(row['標的'], 'addon2', e.target.value)}
-                                    className="text-[10px] px-1 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-300 focus:outline-none cursor-pointer hover:border-slate-500 flex-1"
+                                    className="text-[10px] px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-300 focus:outline-none cursor-pointer hover:border-slate-500 flex-1"
                                     onClick={(e) => e.stopPropagation()}
                                 >
-                                    <option value="NONE">無</option>
+                                    <option value="NONE">無 (None)</option>
                                     <option value="PYRAMID">跌幅金字塔</option>
                                     <option value="TECHNICAL">技術指標</option>
                                     <option value="YIELD_MACRO">殖利率/總經</option>
