@@ -11,10 +11,10 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.9 (Fix Mobile CSV Fetch 404)
+ * Alpha 投資戰情室 v54.10 (Fix CSV Fetch via Proxy)
  * * [修正內容]
- * 1. 修正 Google Sheets CSV 在手機版讀取時可能發生 HTTP 404 的問題。
- * 移除 URL 後方附加的時間戳參數，改用 HTTP Headers 強制清除快取。
+ * 1. 解決直接 fetch Google Sheets CSV 造成的 CORS (桌機 Failed to fetch) 與重導向失敗 (手機 404) 問題。
+ * 2. 將 CSV 讀取全面改用內建的 fetchWithProxyFallback 機制，確保跨平台相容性。
  */
 
 // --- 靜態配置 ---
@@ -195,7 +195,7 @@ const withTimer = async (name, promiseFn) => {
 };
 
 // --- 網路請求與代理 (v54.3: 強制防快取) ---
-const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) => {
+const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null, returnType = 'json') => {
   // 檢查是否已自帶防快取參數 (如 _=)
   const hasCacheBuster = targetUrl.includes('_=');
   // 加入雙重亂數，改用標準 _= 徹底避免瀏覽器、CDN或中繼伺服器快取
@@ -226,28 +226,41 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
 
   // 1. 優先嘗試直連 (若允許跨域)
   try {
+      // 僅允許特定網域直連，避免觸發 CORS 錯誤
       if(targetUrl.includes('openapi.twse.com.tw') || targetUrl.includes('mis.twse.com.tw')) {
           const response = await fetch(urlWithTime, options);
-          if (response.ok) return await response.json();
+          if (response.ok) {
+              return returnType === 'text' ? await response.text() : await response.json();
+          }
       }
   } catch(e) { /* ignore */ } 
 
   // 2. 代理伺服器競速模式 (Race Condition)
   const promises = proxies.map(proxy => new Promise(async (resolve, reject) => {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => { controller.abort(); reject(new Error('Timeout')); }, 4500);
+      const timeoutId = setTimeout(() => { controller.abort(); reject(new Error('Timeout')); }, 6000);
       try {
           const response = await fetch(proxy.url(urlWithTime), { ...options, signal: controller.signal });
           clearTimeout(timeoutId);
           if (!response.ok) throw new Error(`Proxy HTTP error: ${response.status}`);
           
-          const data = await response.json();
-          if (proxy.isAllOrigins && data.contents) {
-              if (typeof data.contents === 'string') {
-                  try { resolve(JSON.parse(data.contents)); } catch (e) { resolve(data.contents); }
-              } else { resolve(data.contents); }
-          } else { 
-              resolve(data); 
+          if (returnType === 'text') {
+              if (proxy.isAllOrigins) {
+                  const data = await response.json();
+                  resolve(data.contents);
+              } else {
+                  const text = await response.text();
+                  resolve(text);
+              }
+          } else {
+              const data = await response.json();
+              if (proxy.isAllOrigins && data.contents) {
+                  if (typeof data.contents === 'string') {
+                      try { resolve(JSON.parse(data.contents)); } catch (e) { resolve(data.contents); }
+                  } else { resolve(data.contents); }
+              } else { 
+                  resolve(data); 
+              }
           }
       } catch (e) {
           clearTimeout(timeoutId);
@@ -272,7 +285,7 @@ const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null) =>
 // --- Trading Economics Scraper (TE) ---
 const fetchTradingEconomicsYields = async () => {
     try {
-        const html = await fetchWithProxyFallback('https://tradingeconomics.com/united-states/government-bond-yield');
+        const html = await fetchWithProxyFallback('https://tradingeconomics.com/united-states/government-bond-yield', 'GET', null, 'text');
         if (typeof html !== 'string') return {};
         
         const extractYield = (code) => {
@@ -1506,22 +1519,13 @@ const App = () => {
     try {
       const Papa = await loadPapaParse();
       
-      // [修正] 改用單純的 fetch，並使用 Headers 控制快取，不修改 URL 避免 Google Sheets 回傳 404
-      const response = await fetch(cleanUrl, {
-          method: 'GET',
-          headers: {
-              'Cache-Control': 'no-cache, no-store, must-revalidate',
-              'Pragma': 'no-cache',
-              'Expires': '0'
-          },
-          cache: 'no-store'
-      });
+      // [修正] 改用我們內建的 fetchWithProxyFallback 機制來讀取 CSV
+      // 這樣能透過 Proxy 解決 CORS 阻擋 (桌機) 以及嚴格的重新導向限制 (手機)
+      const csvText = await fetchWithProxyFallback(cleanUrl, 'GET', null, 'text');
       
-      if (!response.ok) {
-          throw new Error(`讀取失敗 (HTTP ${response.status})`);
+      if (!csvText || typeof csvText !== 'string' || csvText.includes('<html')) {
+          throw new Error(`讀取失敗或回傳格式不正確`);
       }
-      
-      const csvText = await response.text();
 
       Papa.parse(csvText, {
         header: true,
