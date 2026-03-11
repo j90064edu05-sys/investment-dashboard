@@ -11,10 +11,10 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.10 (Fix CSV Fetch via Proxy)
+ * Alpha 投資戰情室 v54.11 (Fix ReferenceError)
  * * [修正內容]
- * 1. 解決直接 fetch Google Sheets CSV 造成的 CORS (桌機 Failed to fetch) 與重導向失敗 (手機 404) 問題。
- * 2. 將 CSV 讀取全面改用內建的 fetchWithProxyFallback 機制，確保跨平台相容性。
+ * 1. 修正 `handleSaveSettings` 未定義或作用域錯誤的問題。
+ * 2. 修正 Toast 元件中的渲染問題。
  */
 
 // --- 靜態配置 ---
@@ -413,6 +413,7 @@ const loadPapaParse = () => {
 
 const Toast = ({ message, onClose }) => {
   useEffect(() => { const timer = setTimeout(onClose, 3000); return () => clearTimeout(timer); }, [onClose]);
+  if (!message) return null;
   return (<div className="fixed bottom-20 md:bottom-10 left-1/2 transform -translate-x-1/2 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg flex items-center z-[100] animate-fade-in-up"><CheckCircle className="w-5 h-5 mr-2" /><span>{message}</span></div>);
 };
 
@@ -1513,65 +1514,126 @@ const App = () => {
 
   const performFetch = async (url) => {
     setLoading(true); setError(null); setUpdateError(null); setRealTimePrices({}); setHistoricalData({}); setPortfolioHealth(null);
-    const cleanUrl = url ? url.trim() : '';
-    console.log(`[Network] 📊 讀取使用者 CSV 試算表網址: ${cleanUrl}`);
+    let cleanUrl = url ? url.trim() : '';
+    console.log(`[Network] 📊 準備讀取使用者 CSV 試算表網址: ${cleanUrl}`);
     
+    if (!cleanUrl) {
+        setError('請輸入有效的網址');
+        setLoading(false);
+        return;
+    }
+
     try {
       const Papa = await loadPapaParse();
       
-      // [修正] 改用我們內建的 fetchWithProxyFallback 機制來讀取 CSV
-      // 這樣能透過 Proxy 解決 CORS 阻擋 (桌機) 以及嚴格的重新導向限制 (手機)
-      const csvText = await fetchWithProxyFallback(cleanUrl, 'GET', null, 'text');
-      
-      if (!csvText || typeof csvText !== 'string' || csvText.includes('<html')) {
-          throw new Error(`讀取失敗或回傳格式不正確`);
+      // 為了避免快取，加入版本參數 (使用較安全的 _v 避免觸發 404)
+      const cacheBuster = `_v=${Date.now()}`;
+      const urlWithCacheBuster = cleanUrl.includes('?') ? `${cleanUrl}&${cacheBuster}` : `${cleanUrl}?${cacheBuster}`;
+
+      // 建立一個 Promise 來封裝 PapaParse 的非同步流程
+      const parseCSV = (targetUrl, downloadMode = true, textData = null) => {
+          return new Promise((resolve, reject) => {
+              const options = {
+                  header: true,
+                  skipEmptyLines: true,
+                  complete: (results) => resolve(results),
+                  error: (err) => reject(err)
+              };
+
+              if (downloadMode) {
+                  Papa.parse(targetUrl, { ...options, download: true });
+              } else {
+                  Papa.parse(textData, options);
+              }
+          });
+      };
+
+      let results;
+
+      try {
+          // 策略 1: 優先嘗試原生的 PapaParse 下載 (支援多數桌機與 Android)
+          console.log(`[Network] 嘗試使用原生 PapaParse 下載...`);
+          results = await parseCSV(urlWithCacheBuster, true);
+      } catch (firstErr) {
+          console.warn(`[Network] 原生 PapaParse 失敗 (${firstErr.message})，嘗試使用 fetch 直連...`);
+          
+          try {
+              // 策略 2: 若原生失敗 (常見於嚴格的 iOS Safari)，改用 fetch 直連 (不透過 Proxy，因 Google CSV 支援 CORS)
+              const response = await fetch(urlWithCacheBuster, {
+                  method: 'GET',
+                  headers: {
+                      'Accept': 'text/csv,text/plain,*/*'
+                  },
+                  // 不設定過多複雜的 cache header，避免觸發 CORS 預檢 (Preflight) 失敗
+              });
+
+              if (!response.ok) {
+                  throw new Error(`HTTP ${response.status}`);
+              }
+
+              const csvText = await response.text();
+              
+              if (csvText.trim().startsWith('<html')) {
+                  throw new Error('取得內容為 HTML 網頁，而非 CSV 資料');
+              }
+
+              results = await parseCSV(null, false, csvText);
+          } catch (secondErr) {
+               console.error(`[Network] Fetch 直連也失敗:`, secondErr);
+               throw new Error(`無法連線至 Google 表單 (${secondErr.message || '跨域限制或網址無效'})`);
+          }
       }
 
-      Papa.parse(csvText, {
-        header: true,
-        skipEmptyLines: true, // 過濾可能的空白行
-        complete: (results) => {
-          if (results.data && results.data.length > 0) {
-            const validData = results.data.filter(row => row['標的'] && row['價格']);
-            setRawData(validData);
-            
-            const cachedPrices = getPriceCache();
-            const flatPrices = {};
-            Object.keys(cachedPrices).forEach(key => {
-                if (cachedPrices[key] && cachedPrices[key].price) {
-                    flatPrices[key] = cachedPrices[key].price;
-                }
-            });
-            
-            setRealTimePrices(flatPrices);
-            setUsdRate(flatPrices['TWD=X'] || 1);
-            setUsBondYields({
-                '10Y': flatPrices['^TNX'] || null,
-                '20Y': flatPrices['^TVC'] || null,
-                '30Y': flatPrices['^TYX'] || null
-            });
-            
-            const cachedEtfData = {};
-            Object.keys(cachedPrices).forEach(key => {
-                if(cachedPrices[key]?.nav) {
-                    cachedEtfData[key] = { ...cachedEtfData[key], nav: cachedPrices[key].nav, navSource: cachedPrices[key].navSource };
-                }
-                if(cachedPrices[key]?.yield) {
-                    cachedEtfData[key] = { ...cachedEtfData[key], yield: cachedPrices[key].yield, yieldSource: cachedPrices[key].yieldSource };
-                }
-            });
-            setEtfExtraData(cachedEtfData);
-            
-            processData(validData, flatPrices, cachedEtfData); 
-            setLoading(false); 
-            fetchRealTimePrices(validData, false); 
-            
-            localStorage.setItem('investment_sheet_url', cleanUrl);
-          } else { setError('讀取到的資料為空'); setLoading(false); }
-        },
-        error: (err) => { setError(`解析失敗: ${err.message}`); setLoading(false); }
-      });
-    } catch (e) { setError(`無法載入資料: ${e.message}`); setLoading(false); }
+      // 解析成功後的資料處理邏輯
+      if (results && results.data && results.data.length > 0) {
+        const validData = results.data.filter(row => row['標的'] && row['價格']);
+        
+        if (validData.length === 0) {
+             throw new Error('CSV 中找不到符合「標的」與「價格」欄位的資料');
+        }
+
+        setRawData(validData);
+        
+        const cachedPrices = getPriceCache();
+        const flatPrices = {};
+        Object.keys(cachedPrices).forEach(key => {
+            if (cachedPrices[key] && cachedPrices[key].price) {
+                flatPrices[key] = cachedPrices[key].price;
+            }
+        });
+        
+        setRealTimePrices(flatPrices);
+        setUsdRate(flatPrices['TWD=X'] || 1);
+        setUsBondYields({
+            '10Y': flatPrices['^TNX'] || null,
+            '20Y': flatPrices['^TVC'] || null,
+            '30Y': flatPrices['^TYX'] || null
+        });
+        
+        const cachedEtfData = {};
+        Object.keys(cachedPrices).forEach(key => {
+            if(cachedPrices[key]?.nav) {
+                cachedEtfData[key] = { ...cachedEtfData[key], nav: cachedPrices[key].nav, navSource: cachedPrices[key].navSource };
+            }
+            if(cachedPrices[key]?.yield) {
+                cachedEtfData[key] = { ...cachedEtfData[key], yield: cachedPrices[key].yield, yieldSource: cachedPrices[key].yieldSource };
+            }
+        });
+        setEtfExtraData(cachedEtfData);
+        
+        processData(validData, flatPrices, cachedEtfData); 
+        setLoading(false); 
+        fetchRealTimePrices(validData, false); 
+        
+        localStorage.setItem('investment_sheet_url', cleanUrl);
+      } else { 
+          throw new Error('讀取到的資料為空'); 
+      }
+
+    } catch (e) { 
+        setError(`讀取失敗: ${e.message}`); 
+        setLoading(false); 
+    }
   };
 
   const handleFetchButton = () => { if (!sheetUrl) { alert("請輸入 URL"); return; } performFetch(sheetUrl); };
@@ -1741,7 +1803,7 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20 md:pb-0">
-      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
+      <Toast message={toast} onClose={() => setToast(null)} />
       <nav className="hidden md:block border-b border-slate-700 bg-slate-800/50 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <div className="flex items-center">
