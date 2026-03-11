@@ -1501,12 +1501,25 @@ const App = () => {
 
   const performFetch = async (url) => {
     setLoading(true); setError(null); setUpdateError(null); setRealTimePrices({}); setHistoricalData({}); setPortfolioHealth(null);
-    console.log(`[Network] 📊 讀取使用者 CSV 試算表網址: ${url}`);
+    const cleanUrl = url ? url.trim() : '';
+    console.log(`[Network] 📊 讀取使用者 CSV 試算表網址: ${cleanUrl}`);
     
     try {
       const Papa = await loadPapaParse();
-      Papa.parse(url, {
-        download: true, header: true,
+      
+      // [修正] 改用原生 fetch 取代 PapaParse 內建的 XHR 下載，解決手機版瀏覽器對重導向/跨域的嚴格限制
+      const fetchUrl = cleanUrl + (cleanUrl.includes('?') ? '&' : '?') + '_=' + Date.now();
+      const response = await fetch(fetchUrl, { cache: 'no-store' });
+      
+      if (!response.ok) {
+          throw new Error(`讀取失敗 (HTTP ${response.status})`);
+      }
+      
+      const csvText = await response.text();
+
+      Papa.parse(csvText, {
+        header: true,
+        skipEmptyLines: true, // 過濾可能的空白行
         complete: (results) => {
           if (results.data && results.data.length > 0) {
             const validData = results.data.filter(row => row['標的'] && row['價格']);
@@ -1543,12 +1556,12 @@ const App = () => {
             setLoading(false); 
             fetchRealTimePrices(validData, false); 
             
-            localStorage.setItem('investment_sheet_url', url);
+            localStorage.setItem('investment_sheet_url', cleanUrl);
           } else { setError('讀取到的資料為空'); setLoading(false); }
         },
-        error: (err) => { setError(`讀取失敗: ${err.message}`); setLoading(false); }
+        error: (err) => { setError(`解析失敗: ${err.message}`); setLoading(false); }
       });
-    } catch (e) { setError('無法載入解析庫'); setLoading(false); }
+    } catch (e) { setError(`無法載入資料: ${e.message}`); setLoading(false); }
   };
 
   const handleFetchButton = () => { if (!sheetUrl) { alert("請輸入 URL"); return; } performFetch(sheetUrl); };
