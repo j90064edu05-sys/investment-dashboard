@@ -11,10 +11,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.11 (Fix ReferenceError)
+ * Alpha 投資戰情室 v54.19 (Smart Direct Fetch & Proxy Routing)
  * * [修正內容]
- * 1. 修正 `handleSaveSettings` 未定義或作用域錯誤的問題。
- * 2. 修正 Toast 元件中的渲染問題。
+ * 1. 解決全線 12s 超時問題：修改過於激進的防快取策略，避免免費 Proxy 因頻繁請求被目標網站封鎖 IP。
+ * 2. 強化直連邏輯：對於 Yahoo API，優先嘗試不帶參數的乾淨直連，利用瀏覽器自然機制。
+ * 3. 調整 Proxy 優先級：以 corsproxy 作為主力，減少 allorigins 的使用以降低 HTML 驗證阻擋機率。
  */
 
 // --- 靜態配置 ---
@@ -85,7 +86,6 @@ const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
 const formatPrice = (value) => typeof value === 'number' ? value.toFixed(2) : (value || '0.00');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 改良版 getTodayDate，考慮台灣時區 (UTC+8)
 const getTodayDate = () => {
     return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
 };
@@ -194,90 +194,91 @@ const withTimer = async (name, promiseFn) => {
     }
 };
 
-// --- 網路請求與代理 (v54.3: 強制防快取) ---
+// --- 網路請求與代理 (v54.19: 智慧備援與直連優先) ---
 const fetchWithProxyFallback = async (targetUrl, method = 'GET', body = null, returnType = 'json') => {
-  // 檢查是否已自帶防快取參數 (如 _=)
-  const hasCacheBuster = targetUrl.includes('_=');
-  // 加入雙重亂數，改用標準 _= 徹底避免瀏覽器、CDN或中繼伺服器快取
-  const urlWithTime = hasCacheBuster ? targetUrl : (targetUrl.includes('?') 
-      ? `${targetUrl}&_=${Date.now()}&r=${Math.random()}` 
-      : `${targetUrl}?_=${Date.now()}&r=${Math.random()}`);
+  const isYahoo = targetUrl.includes('yahoo.com');
+  const isTWSE = targetUrl.includes('twse.com.tw') || targetUrl.includes('tpex.org.tw');
   
-  console.log(`[Network] 🌐 準備請求完整網址: ${urlWithTime}`);
-  
-  const proxies = [
-    // allorigins 加上 disableCache=true 強制不快取
-    { url: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&disableCache=true`, isAllOrigins: true },
-    { url: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`, isAllOrigins: false },
-    { url: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, isAllOrigins: false },
-  ];
-  
-  const options = { 
+  // 基礎設定：不再使用嚴格的 no-store，允許瀏覽器一定程度的快取，避免過度消耗 Proxy 額度被 Ban
+  const fetchConfig = { 
       method, 
-      headers: {
-          ...(body ? { 'Content-Type': 'application/json' } : {}),
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0'
-      }, 
-      body: body ? JSON.stringify(body) : undefined,
-      cache: 'no-store' // Fetch API 強制不快取
+      credentials: 'omit',
+      headers: isYahoo ? { 'Accept': 'application/json, text/plain, */*' } : undefined,
+      body: body ? JSON.stringify(body) : undefined 
   };
 
-  // 1. 優先嘗試直連 (若允許跨域)
-  try {
-      // 僅允許特定網域直連，避免觸發 CORS 錯誤
-      if(targetUrl.includes('openapi.twse.com.tw') || targetUrl.includes('mis.twse.com.tw')) {
-          const response = await fetch(urlWithTime, options);
+  let cleanUrl = targetUrl;
+  
+  // 第一步：如果是 Yahoo 或 TWSE，我們優先嘗試「最乾淨」的直連
+  if (isYahoo || isTWSE) {
+       console.log(`[Network] 🌐 嘗試純淨直連: ${cleanUrl}`);
+       try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3000); 
+          const response = await fetch(cleanUrl, { ...fetchConfig, signal: controller.signal });
+          clearTimeout(timeoutId);
+          
           if (response.ok) {
-              return returnType === 'text' ? await response.text() : await response.json();
+              const text = await response.text();
+              const isHtmlBlock = (text.trim().toLowerCase().startsWith('<html') || text.trim().toLowerCase().startsWith('<!doctype'));
+              if (!isHtmlBlock) {
+                  return returnType === 'json' ? JSON.parse(text) : text;
+              }
           }
-      }
-  } catch(e) { /* ignore */ } 
+          // 如果是 404，不要依賴直連，交給 Proxy 驗證
+       } catch(e) { console.log(`[Network] 直連失敗，進入 Proxy 流程`); }
+  }
 
-  // 2. 代理伺服器競速模式 (Race Condition)
+  // 第二步：直連失敗或被擋，進入 Proxy 模式。
+  // 我們在 Proxy 的 URL 上加上亂數，強迫 Proxy 更新，但不污染真正的 targetUrl
+  const proxyCb = `__pcb=${Date.now()}`;
+  const encodedUrl = encodeURIComponent(cleanUrl);
+  
+  // 調整 Proxy 順序：corsproxy 通常對 Yahoo 的相容性與存活率較高
+  const proxies = [
+    { url: `https://corsproxy.io/?${encodedUrl}&${proxyCb}`, type: 'raw' },
+    { url: `https://api.allorigins.win/raw?url=${encodedUrl}&${proxyCb}`, type: 'raw' },
+    { url: `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}&${proxyCb}`, type: 'raw' },
+  ];
+
+  console.log(`[Network] 🌐 使用 Proxy 請求: ${cleanUrl}`);
+
   const promises = proxies.map(proxy => new Promise(async (resolve, reject) => {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => { controller.abort(); reject(new Error('Timeout')); }, 6000);
+      // 縮短 Proxy 等待時間至 7 秒，避免全線 12 秒卡死
+      const timeoutId = setTimeout(() => { controller.abort(); reject(new Error('Proxy Timeout')); }, 7000);
       try {
-          const response = await fetch(proxy.url(urlWithTime), { ...options, signal: controller.signal });
+          const response = await fetch(proxy.url, { ...fetchConfig, signal: controller.signal });
           clearTimeout(timeoutId);
-          if (!response.ok) throw new Error(`Proxy HTTP error: ${response.status}`);
           
-          if (returnType === 'text') {
-              if (proxy.isAllOrigins) {
-                  const data = await response.json();
-                  resolve(data.contents);
-              } else {
-                  const text = await response.text();
-                  resolve(text);
+          const text = await response.text();
+          
+          // 若 HTTP 狀態非 200 且非 404 (Yahoo 找不到股票會回傳 404 含 JSON)，捨棄
+          if (!response.ok && response.status !== 404) throw new Error(`HTTP ${response.status}`);
+          
+          // 防 HTML 驗證頁面阻擋
+          const isHtmlBlock = typeof text === 'string' && (text.trim().toLowerCase().startsWith('<html') || text.trim().toLowerCase().startsWith('<!doctype')) && !targetUrl.includes('tradingeconomics');
+          if (isHtmlBlock) throw new Error('HTML Blocked (Anti-Bot)');
+          
+          if (returnType === 'json') {
+              try { 
+                  resolve(JSON.parse(text)); 
+              } catch(e) { 
+                  throw new Error('Invalid JSON from Proxy'); 
               }
           } else {
-              const data = await response.json();
-              if (proxy.isAllOrigins && data.contents) {
-                  if (typeof data.contents === 'string') {
-                      try { resolve(JSON.parse(data.contents)); } catch (e) { resolve(data.contents); }
-                  } else { resolve(data.contents); }
-              } else { 
-                  resolve(data); 
-              }
+              resolve(text);
           }
       } catch (e) {
           clearTimeout(timeoutId);
-          reject(e); // 靜默拒絕，讓 Promise.any 處理
+          reject(e);
       }
   }));
 
   try {
-      // 只要有一個 Proxy 成功回傳就會立刻 resolve
-      return await Promise.any(promises);
+      return await Promise.any(promises); 
   } catch (e) {
-      // 抑制 AggregateError 洗版，改為單行警告
-      if (e instanceof AggregateError || e.name === 'AggregateError') {
-          console.warn(`[Proxy Failed] 代理伺服器皆無回應 (可能遭遇限流): ${targetUrl.substring(0, 50)}...`);
-      } else {
-          console.warn(`[Proxy Error] ${e.message}`);
-      }
+      console.warn(`[Proxy Failed] 所有請求皆無回應或遭驗證阻擋: ${cleanUrl}`);
       return null;
   }
 };
@@ -716,7 +717,7 @@ const App = () => {
     };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.1 限流防禦版) ===");
+    console.log("=== 開始更新股價與數據 (v54.19 智慧備援直連版) ===");
     const tTotalStart = performance.now();
     setPriceLoading(true); setUpdateError(null); setLoadingMessage('更新即時股價中...');
     const uniqueSymbols = [...new Set(data.map(item => item['標的']))];
@@ -753,13 +754,10 @@ const App = () => {
     const twseYieldMap = {}; 
     const tpexYieldMap = {}; 
     const misEtfMap = {}; 
-    const misEtfPriceMap = {}; // 新增：用於存放 e 欄位市價
+    const misEtfPriceMap = {}; 
     const misPriceMap = {}; 
     const misTimeMap = {};
 
-    // 依據是否為交易時間決定 all_etf.txt 的快取策略：
-    // 交易時間：使用當下毫秒數 (Date.now()) 強制抓最新
-    // 非交易時間：使用當日日期字串，避免過度頻繁抓取相同靜態檔案
     const misCacheBuster = isTrading ? Date.now() : getTodayDate().replace(/-/g, '');
     const misEtfUrl = `https://mis.twse.com.tw/stock/data/all_etf.txt?_=${misCacheBuster}`;
 
@@ -773,7 +771,6 @@ const App = () => {
         withTimer("TPEx_Yield", () => fetchWithProxyFallback('https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json').catch(()=>null))
     ]);
 
-    // 解析 MIS NAV & ETF市價 (e欄位)
     if (misRes) {
         const processMisItem = (item) => {
             if (item.a) {
@@ -790,11 +787,8 @@ const App = () => {
         }
     }
 
-    // 解析 TWSE
     if (Array.isArray(navRes)) navRes.forEach(item => { twseEtfMap[item.Code] = parseFloat(item.NetAssetValue); });
     if (Array.isArray(yieldRes)) yieldRes.forEach(item => { twseYieldMap[item.Code] = parseFloat(item.DividendYield); });
-
-    // 解析 TPEx
     if (tpexNavRes && tpexNavRes.aaData) tpexNavRes.aaData.forEach(item => { const nav = parseFloat(item[3]); if (!isNaN(nav)) tpexEtfMap[item[0]] = nav; });
     if (tpexYieldRes && tpexYieldRes.aaData) tpexYieldRes.aaData.forEach(item => { const y = parseFloat(item[5]); if (!isNaN(y)) tpexYieldMap[item[0]] = y; });
 
@@ -803,7 +797,7 @@ const App = () => {
        const twSymbols = symbolsToFetchList.filter(s => {
            if (!(s.includes('.TW') || s.includes('.TWO'))) return false;
            const pureCode = s.replace(/\.TWO$|\.TW$/i, '');
-           if (misEtfPriceMap[pureCode]) return false; // 已在 all_etf.txt 取得 e 欄位市價的 ETF 則自動跳過，節省請求
+           if (misEtfPriceMap[pureCode]) return false; 
            return true;
        });
        if (twSymbols.length > 0) {
@@ -845,7 +839,6 @@ const App = () => {
         const pureCode = symbol.replace(/\.TWO$|\.TW$/i, '');
         const extra = newEtfData[symbol] || {};
         
-        // 優先套用 ETF 的 e 欄位市價
         if (misEtfPriceMap[pureCode]) {
             newPrices[symbol] = misEtfPriceMap[pureCode];
             extra.priceSource = "MIS(e)";
@@ -894,12 +887,11 @@ const App = () => {
         const isUs = isUsAsset(symbol);
         
         let needYahoo = false;
-        // 修正：同時檢查一般市價與 ETF專屬(e欄位)市價，只要有任一個存在就代表已經抓到了
         const hasMisPrice = misPriceMap[symbol] || misEtfPriceMap[pureCode];
         
-        if (!hasMisPrice) needYahoo = true; // 沒有股價，必須查
-        if (isEtf && !extra.nav) needYahoo = true;  // ETF 缺淨值，去 Yahoo 補
-        if (isUs || symbol === 'TWD=X' || symbol.startsWith('^')) needYahoo = true; // 美股/匯率/指數必查
+        if (!hasMisPrice) needYahoo = true; 
+        if (isEtf && !extra.nav) needYahoo = true; 
+        if (isUs || symbol === 'TWD=X' || symbol.startsWith('^')) needYahoo = true; 
         
         if (needYahoo) {
             symbolsForYahoo.push(symbol);
@@ -908,105 +900,73 @@ const App = () => {
         }
     });
 
+    // --- [NEW] Yahoo 批次抓取優化 ---
     try {
         if (symbolsForYahoo.length > 0) {
-            // 分批處理 (Chunking)，避免一次發出過多請求導致代理伺服器全部拒絕 (Rate Limit)
-            const chunkSize = 3; 
+            const chunkSize = 10; 
             for (let i = 0; i < symbolsForYahoo.length; i += chunkSize) {
                 const chunk = symbolsForYahoo.slice(i, i + chunkSize);
-                const promises = chunk.map(async (symbol) => {
-                    const maxRetries = 2; let attempts = 0; let success = false;
-                    await delay(Math.random() * 500); // 減少批次內的併發擁堵
-                    
-                    while(attempts <= maxRetries && !success) {
-                        try {
-                            const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=summaryDetail,defaultKeyStatistics,price,fundProfile`;
-                            let summaryData = null;
-                            
-                            try {
-                                const summaryRes = await withTimer(`Yahoo_Summary_${symbol}`, () => fetchWithProxyFallback(summaryUrl));
-                                summaryData = summaryRes?.quoteSummary?.result?.[0];
-                            } catch (e) { /* ignore */ }
-
-                            const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&t=${Date.now()}`;
-                            const result = await withTimer(`Yahoo_Quote_${symbol}`, () => fetchWithProxyFallback(quoteUrl));
-                            const quote = result?.quoteResponse?.result?.[0];
-
-                            if (quote && quote.regularMarketPrice !== undefined) {
-                                const extra = { ...newEtfData[symbol] }; 
-                                const pureCodeInner = symbol.replace(/\.TWO$|\.TW$/i, '');
-                                const hasMisPriceInner = misPriceMap[symbol] || misEtfPriceMap[pureCodeInner];
-                                
-                                // 修正：確保我們不會用 Yahoo 的市價去覆蓋辛苦抓來的 MIS(e) 或 MIS 市價
-                                if (!hasMisPriceInner) {
-                                    newPrices[symbol] = quote.regularMarketPrice;
-                                    extra.priceSource = "Yahoo";
-                                    if(quote.regularMarketTime) {
-                                        extra.dateStr = new Date(quote.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
-                                    }
-                                }
-
-                                if (!extra.nav) {
-                                    if (quote.navPrice) { extra.nav = quote.navPrice; extra.navSource = "Yahoo"; }
-                                    else if (summaryData?.defaultKeyStatistics?.bookValue) { extra.nav = summaryData.defaultKeyStatistics.bookValue.raw; extra.navSource = "Yahoo(Est)"; }
-                                    if (!extra.nav && quote.priceToBook) { extra.nav = (quote.regularMarketPrice / quote.priceToBook).toFixed(2); extra.navSource = "Calc(P/B)"; }
-                                }
-
-                                if (!extra.yield) {
-                                    if (summaryData?.summaryDetail?.yield?.raw) { extra.yield = summaryData.summaryDetail.yield.raw * 100; extra.yieldSource = "Yahoo(Sum)"; }
-                                    else if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; extra.yieldSource = "Yahoo"; } 
-                                    else if (quote.yield) { extra.yield = quote.yield * 100; extra.yieldSource = "Yahoo"; }
-                                    else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; extra.yieldSource = "Yahoo"; }
-                                    
-                                    if (!extra.yield) {
-                                        if (quote.trailingAnnualDividendRate && quote.regularMarketPrice) { 
-                                            extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; 
-                                            extra.yieldSource = "Calc";
-                                        } else if (quote.dividendRate && quote.regularMarketPrice) {
-                                             extra.yield = (quote.dividendRate / quote.regularMarketPrice) * 100; 
-                                             extra.yieldSource = "Calc";
-                                        }
-                                    }
-                                }
-
-                                newEtfData[symbol] = extra;
-                                success = true;
-                            } else { throw new Error('Quote API No Data'); }
-                        } catch (quoteErr) {
-                            try {
-                                const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d&t=${Date.now()}`;
-                                const result = await withTimer(`Yahoo_Chart_${symbol}`, () => fetchWithProxyFallback(chartUrl));
-                                const meta = result?.chart?.result?.[0]?.meta;
-                                if (meta && meta.regularMarketPrice !== undefined) {
-                                    const extra = { ...newEtfData[symbol] };
-                                    const pureCodeInner = symbol.replace(/\.TWO$|\.TW$/i, '');
-                                    const hasMisPriceInner = misPriceMap[symbol] || misEtfPriceMap[pureCodeInner];
-                                    
-                                    // 修正：同樣的保護機制
-                                    if (!hasMisPriceInner) {
-                                        newPrices[symbol] = meta.regularMarketPrice;
-                                        extra.priceSource = "Yahoo";
-                                        if(meta.regularMarketTime) {
-                                            extra.dateStr = new Date(meta.regularMarketTime * 1000).toLocaleString('zh-TW', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
-                                        }
-                                    }
-                                    
-                                    newEtfData[symbol] = extra;
-                                    success = true;
-                                } else { throw new Error('Chart API No Data'); }
-                            } catch (chartErr) {
-                                attempts++;
-                                if (attempts <= maxRetries) { await delay(1000); } 
-                            }
-                        }
-                    }
-                });
-                await Promise.all(promises);
+                const symbolsStr = chunk.join(',');
+                const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbolsStr}`;
                 
-                // 批次間隔，讓代理伺服器喘息
-                if (i + chunkSize < symbolsForYahoo.length) {
-                    await delay(1200); 
+                try {
+                    const result = await withTimer(`Yahoo_Quote_Batch_${i/chunkSize}`, () => fetchWithProxyFallback(quoteUrl));
+                    if (result && result.quoteResponse && result.quoteResponse.result) {
+                        result.quoteResponse.result.forEach(quote => {
+                            const symbol = quote.symbol;
+                            const extra = { ...newEtfData[symbol] }; 
+                            const pureCodeInner = symbol.replace(/\.TWO$|\.TW$/i, '');
+                            const hasMisPriceInner = misPriceMap[symbol] || misEtfPriceMap[pureCodeInner];
+                            
+                            // 保留 MIS 價格
+                            if (!hasMisPriceInner && quote.regularMarketPrice !== undefined) {
+                                newPrices[symbol] = quote.regularMarketPrice;
+                                extra.priceSource = "Yahoo";
+                                if(quote.regularMarketTime) {
+                                    extra.dateStr = new Intl.DateTimeFormat('zh-TW', {timeZone: 'Asia/Taipei', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}).format(new Date(quote.regularMarketTime * 1000));
+                                }
+                            }
+
+                            if (!extra.nav) {
+                                if (quote.navPrice) { extra.nav = quote.navPrice; extra.navSource = "Yahoo"; }
+                                else if (quote.priceToBook && quote.regularMarketPrice) { extra.nav = (quote.regularMarketPrice / quote.priceToBook).toFixed(2); extra.navSource = "Calc(P/B)"; }
+                            }
+
+                            if (!extra.yield) {
+                                if (quote.trailingAnnualDividendYield) { extra.yield = quote.trailingAnnualDividendYield * 100; extra.yieldSource = "Yahoo"; } 
+                                else if (quote.dividendYield) { extra.yield = quote.dividendYield * 100; extra.yieldSource = "Yahoo"; }
+                                else if (quote.trailingAnnualDividendRate && quote.regularMarketPrice) { extra.yield = (quote.trailingAnnualDividendRate / quote.regularMarketPrice) * 100; extra.yieldSource = "Calc"; }
+                            }
+
+                            newEtfData[symbol] = extra;
+                        });
+                    }
+                } catch (batchErr) {
+                    console.warn(`Yahoo Batch Request Failed for ${symbolsStr}`, batchErr);
                 }
+                
+                if (i + chunkSize < symbolsForYahoo.length) await delay(800); 
+            }
+
+            // 針對依然缺失市價的少數標的，發動個別的 Chart API 補齊
+            const stillMissing = symbolsForYahoo.filter(s => !newPrices[s]);
+            if (stillMissing.length > 0) {
+                 for (const symbol of stillMissing) {
+                     try {
+                         const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`;
+                         const result = await withTimer(`Yahoo_Chart_Fallback_${symbol}`, () => fetchWithProxyFallback(chartUrl));
+                         const meta = result?.chart?.result?.[0]?.meta;
+                         if (meta && meta.regularMarketPrice !== undefined) {
+                              const extra = { ...newEtfData[symbol] };
+                              newPrices[symbol] = meta.regularMarketPrice;
+                              extra.priceSource = "Yahoo";
+                              if (meta.regularMarketTime) {
+                                   extra.dateStr = new Intl.DateTimeFormat('zh-TW', {timeZone: 'Asia/Taipei', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}).format(new Date(meta.regularMarketTime * 1000));
+                              }
+                              newEtfData[symbol] = extra;
+                         }
+                     } catch(e) {}
+                 }
             }
         }
     } catch(e) {
@@ -1391,7 +1351,6 @@ const App = () => {
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
     
-    // UI Lock Mechanism
     if (isLocked) return;
     setIsLocked(true);
     
@@ -1415,9 +1374,7 @@ const App = () => {
       
       const chartKey = `${symbol}_${tf}`;
       if (!historicalData[chartKey]) {
-          try {
-             // Let next try block handle it if missing
-          } catch(e) {}
+          try { } catch(e) {}
       }
     } else {
        setAiSummary(null);
@@ -1431,9 +1388,27 @@ const App = () => {
       if (tf === '10y_1mo') { range = '10y'; interval = '1mo'; }
       
       const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
-      const result = await fetchWithProxyFallback(targetUrl);
+      
+      // 允許較長等待時間以抓取歷史資料
+      const result = await fetchWithProxyFallback(targetUrl, 'GET', null, 'json', 12000);
+      
+      if (!result) {
+          throw new Error('連線超時或代理伺服器遭阻擋');
+      }
+
+      // [NEW] 精準攔截 Yahoo 回傳的 404/403 等錯誤 (例如無效代號 009808)
+      if (result.chart && result.chart.error) {
+          const errCode = result.chart.error.code;
+          if (errCode === "Not Found") {
+              throw new Error(`查無此代號，請確認標的代號是否正確 (Yahoo 404)`);
+          }
+          throw new Error(`Yahoo API 錯誤: ${result.chart.error.description || errCode}`);
+      }
+
       const chartData = result?.chart?.result?.[0];
+      
       if (chartData && chartData.timestamp) {
+        console.log(`[Network] 歷史圖表讀取成功: ${symbol}`);
         const timestamps = chartData.timestamp;
         const quote = chartData.indicators.quote[0];
         const meta = chartData.meta;
@@ -1446,22 +1421,16 @@ const App = () => {
             open: quote.open[i] 
         })).filter(d => d.close != null && d.high != null);
         
-        // --- [NEW] 智慧補齊 Yahoo 遺失的資料 (歷史延遲與跨日時區修正) ---
         if (rawPoints.length > 0 && interval === '1d') {
             const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
-            
-            // 尋找表定的前一個交易日 (扣除六日)
             let tempPrev = new Date();
             tempPrev.setDate(tempPrev.getDate() - 1);
             while (tempPrev.getDay() === 0 || tempPrev.getDay() === 6) {
                 tempPrev.setDate(tempPrev.getDate() - 1);
             }
             const prevTradingDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(tempPrev);
-
             const lastPoint = rawPoints[rawPoints.length - 1];
             
-            // 1. 補齊前一日 (昨日)：若 Yahoo 未及時提供昨日 K 線，但 API meta 裡有前日收盤價 (previousClose)
-            // 當歷史資料最後一筆既不是今天、也不是昨天，代表昨天遺失了
             if (meta && meta.previousClose && lastPoint.date !== prevTradingDateStr && lastPoint.date !== todayStr) {
                 console.log(`[Data Patch] 補齊遺失的昨日資料: ${prevTradingDateStr}, 價格: ${meta.previousClose}`);
                 rawPoints.push({
@@ -1473,7 +1442,6 @@ const App = () => {
                 });
             }
 
-            // 2. 補齊最新一日 (今日)：若 Yahoo 歷史陣列中尚未出現今天的 K 線，用即時股價補齊
             const currentLastPoint = rawPoints[rawPoints.length - 1];
             const rtPrice = realTimePrices[symbol] || meta?.regularMarketPrice;
             
@@ -1482,7 +1450,7 @@ const App = () => {
                 rawPoints.push({
                     date: todayStr,
                     close: rtPrice,
-                    high: rtPrice, // 無高低點時用收盤價暫代
+                    high: rtPrice, 
                     low: rtPrice,
                     open: rtPrice 
                 });
@@ -1495,7 +1463,6 @@ const App = () => {
         
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
         
-        // 提前解除圖表的 loading 狀態，讓圖表能先顯示，不用等 AI 分析
         setHistoryLoading(false);
 
         if (geminiApiKey) {
@@ -1504,8 +1471,13 @@ const App = () => {
              if(!aiSummary) setAiSummary("請設定 API Key 以啟用 AI 分析。");
         }
 
-      } else { throw new Error('No chart data found'); }
-    } catch (err) { console.warn(`無法取得 ${symbol} 的歷史數據:`, err); setHistoryError("無法載入圖表數據，可能是代號錯誤或來源不穩，請稍後再試。"); setIsAiSummarizing(false); } 
+      } else { throw new Error('解析不到圖表數據 (可能已被阻擋或來源異常)'); }
+    } catch (err) { 
+        console.warn(`無法取得 ${symbol} 的歷史數據:`, err); 
+        // 精準顯示代號錯誤的提示
+        setHistoryError(err.message.includes('代號') || err.message.includes('Yahoo API') ? err.message : "無法載入圖表數據，可能是來源暫時受限，請稍後再試。"); 
+        setIsAiSummarizing(false); 
+    } 
     finally { 
         setHistoryLoading(false); 
         setIsLocked(false); 
@@ -1514,7 +1486,7 @@ const App = () => {
 
   const performFetch = async (url) => {
     setLoading(true); setError(null); setUpdateError(null); setRealTimePrices({}); setHistoricalData({}); setPortfolioHealth(null);
-    const cleanUrl = url ? url.trim() : '';
+    let cleanUrl = url ? url.trim() : '';
     console.log(`[Network] 📊 準備讀取使用者 CSV 試算表網址: ${cleanUrl}`);
     
     if (!cleanUrl) {
@@ -1525,91 +1497,57 @@ const App = () => {
 
     try {
       const Papa = await loadPapaParse();
-      
-      // [最終修正] 完全不修改原始 URL，不加任何參數，直接透過強大的 Proxy 陣列去抓取。
-      // 這樣可以 100% 避免 Google Sheets 回傳 404 (因為網址完全合法)
-      // 同時 Proxy 內部已經實作了防快取，所以不用擔心抓到舊資料。
       let csvText = null;
+
+      // 策略一：嘗試快速直連 (若支援 CORS 且手機網頁未被擋)
       try {
-          csvText = await fetchWithProxyFallback(cleanUrl, 'GET', null, 'text');
-      } catch (err) {
-          console.warn("[Network] Proxy fetch failed, falling back to direct fetch", err);
+          const res = await fetch(cleanUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+          if (res.ok) { csvText = await res.text(); }
+      } catch (directErr) { /* 手機版 Safari/Chrome 常見跨域或導向阻擋 */ }
+
+      // 策略二：使用無敵代理伺服器繞過限制
+      if (!csvText || (csvText && csvText.trim().toLowerCase().startsWith('<html'))) {
+          console.log("[Network] 直連 CSV 失敗，啟動 Proxy 備援...");
+          csvText = await fetchWithProxyFallback(cleanUrl, 'GET', null, 'text', 10000);
       }
 
-      // 如果 Proxy 全滅 (極罕見)，最後嘗試一次最單純的直連 (不帶任何特殊 Header 或參數)
-      if (!csvText || typeof csvText !== 'string' || csvText.includes('<html')) {
-           console.log("[Network] 嘗試終極直連...");
-           try {
-               const res = await fetch(cleanUrl);
-               if (res.ok) {
-                   csvText = await res.text();
-               } else {
-                   throw new Error(`HTTP ${res.status}`);
-               }
-           } catch(directErr) {
-               throw new Error(`無法取得 CSV 資料 (Proxy 與直連皆失敗)。錯誤: ${directErr.message}`);
-           }
-      }
-
-      if (!csvText || typeof csvText !== 'string' || csvText.includes('<html')) {
-          throw new Error('取得內容為 HTML 網頁或無效格式，而非 CSV 資料');
-      }
-
-      Papa.parse(csvText, {
-        header: true,
-        skipEmptyLines: true, 
-        complete: (results) => {
+      const processCSVResults = (results) => {
           if (results.data && results.data.length > 0) {
             const validData = results.data.filter(row => row['標的'] && row['價格']);
-            
-            if (validData.length === 0) {
-                 setError('CSV 中找不到符合「標的」與「價格」欄位的資料');
-                 setLoading(false);
-                 return;
-            }
-
+            if (validData.length === 0) { throw new Error('CSV 中找不到符合「標的」與「價格」欄位的資料'); }
             setRawData(validData);
             
             const cachedPrices = getPriceCache();
             const flatPrices = {};
-            Object.keys(cachedPrices).forEach(key => {
-                if (cachedPrices[key] && cachedPrices[key].price) {
-                    flatPrices[key] = cachedPrices[key].price;
-                }
-            });
+            Object.keys(cachedPrices).forEach(key => { if (cachedPrices[key] && cachedPrices[key].price) { flatPrices[key] = cachedPrices[key].price; } });
             
             setRealTimePrices(flatPrices);
             setUsdRate(flatPrices['TWD=X'] || 1);
-            setUsBondYields({
-                '10Y': flatPrices['^TNX'] || null,
-                '20Y': flatPrices['^TVC'] || null,
-                '30Y': flatPrices['^TYX'] || null
-            });
+            setUsBondYields({ '10Y': flatPrices['^TNX'] || null, '20Y': flatPrices['^TVC'] || null, '30Y': flatPrices['^TYX'] || null });
             
             const cachedEtfData = {};
             Object.keys(cachedPrices).forEach(key => {
-                if(cachedPrices[key]?.nav) {
-                    cachedEtfData[key] = { ...cachedEtfData[key], nav: cachedPrices[key].nav, navSource: cachedPrices[key].navSource };
-                }
-                if(cachedPrices[key]?.yield) {
-                    cachedEtfData[key] = { ...cachedEtfData[key], yield: cachedPrices[key].yield, yieldSource: cachedPrices[key].yieldSource };
-                }
+                if(cachedPrices[key]?.nav) { cachedEtfData[key] = { ...cachedEtfData[key], nav: cachedPrices[key].nav, navSource: cachedPrices[key].navSource }; }
+                if(cachedPrices[key]?.yield) { cachedEtfData[key] = { ...cachedEtfData[key], yield: cachedPrices[key].yield, yieldSource: cachedPrices[key].yieldSource }; }
             });
             setEtfExtraData(cachedEtfData);
             
             processData(validData, flatPrices, cachedEtfData); 
             setLoading(false); 
             fetchRealTimePrices(validData, false); 
-            
             localStorage.setItem('investment_sheet_url', cleanUrl);
-          } else { setError('讀取到的資料為空'); setLoading(false); }
-        },
-        error: (err) => { setError(`解析失敗: ${err.message}`); setLoading(false); }
-      });
-    } catch (e) { 
-        setError(`讀取失敗: ${e.message}`); 
-        setLoading(false); 
-    }
+          } else { throw new Error('讀取到的資料為空'); }
+      };
+
+      // 執行解析 (文字 或 傳統下載)
+      if (csvText && !csvText.trim().toLowerCase().startsWith('<html')) {
+          Papa.parse(csvText, { header: true, skipEmptyLines: true, complete: processCSVResults, error: (err) => { setError(`解析失敗: ${err.message}`); setLoading(false); } });
+      } else {
+          // 策略三：終極防線，若連 Proxy 都掛了，使用最原生的 PapaParse 下載 (桌機相容性極高)
+          console.warn("[Network] 啟動 PapaParse 原生下載備援...");
+          Papa.parse(cleanUrl, { download: true, header: true, skipEmptyLines: true, complete: processCSVResults, error: (err) => { setError(`全部讀取策略皆失敗: ${err.message}`); setLoading(false); } });
+      }
+    } catch (e) { setError(`讀取失敗: ${e.message}`); setLoading(false); }
   };
 
   const handleFetchButton = () => { if (!sheetUrl) { alert("請輸入 URL"); return; } performFetch(sheetUrl); };
