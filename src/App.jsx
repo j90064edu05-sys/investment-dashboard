@@ -7,7 +7,7 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair, Repeat, BarChart4, TrendingDown, Percent, Layers, Link as LinkIcon, XCircle, PlusCircle
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair, Repeat, BarChart4, TrendingDown, Percent, Layers, Link as LinkIcon, XCircle, PlusCircle, Trash2
 } from 'lucide-react';
 
 /**
@@ -493,6 +493,38 @@ const App = () => {
   const analysisInProgressRef = useRef({});
   const [feeDiscount, setFeeDiscount] = useState(1); 
   const [toast, setToast] = useState(null);
+  const [appLogs, setAppLogs] = useState([]); // 新增：負責儲存系統紀錄
+
+  // 新增：全域攔截 console 訊息並寫入 Log 狀態
+  useEffect(() => {
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    const originalError = console.error;
+
+    const handleLog = (level, originalFn, ...args) => {
+      originalFn(...args); // 保持在開發者工具中輸出
+      const msg = args.map(a => {
+        if (a instanceof Error) return a.message;
+        if (typeof a === 'object') {
+          try { return JSON.stringify(a); } catch(e) { return String(a); }
+        }
+        return String(a);
+      }).join(' ');
+      
+      // 保留最新的 200 筆紀錄，避免影響效能
+      setAppLogs(prev => [...prev, { time: new Date().toLocaleTimeString('zh-TW', { hour12: false }), level, msg }].slice(-200));
+    };
+
+    console.log = (...args) => handleLog('info', originalLog, ...args);
+    console.warn = (...args) => handleLog('warn', originalWarn, ...args);
+    console.error = (...args) => handleLog('error', originalError, ...args);
+
+    return () => {
+      console.log = originalLog;
+      console.warn = originalWarn;
+      console.error = originalError;
+    };
+  }, []);
 
   // 2. Memos - Core Data
   const summary = useMemo(() => {
@@ -1802,7 +1834,7 @@ const App = () => {
                       </div>
 
                       <div className="hidden md:flex absolute top-1 right-2 z-10 space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                           {Object.keys(INDICATOR_TYPES).map(key => (
+                            {Object.keys(INDICATOR_TYPES).map(key => (
                               <button 
                                 key={key} 
                                 onClick={() => setSelectedIndicator(key)} 
@@ -2264,6 +2296,35 @@ const App = () => {
 
               {error && <div className="p-3 bg-red-900/30 border border-red-500/50 text-red-300 rounded-md text-sm">{String(error)}</div>}
               <button onClick={handleFetchButton} disabled={loading} className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 focus:ring-offset-slate-800 transition-colors ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}>{loading ? '資料載入中...' : '匯入並更新股價'}</button>
+              
+              {/* --- 新增：系統執行紀錄 (Logs) 區塊 --- */}
+              <div className="pt-6 mt-6 border-t border-slate-700">
+                <div className="flex justify-between items-center mb-4">
+                  <h4 className="text-sm font-semibold text-slate-300 flex items-center">
+                    <FileSearch className="w-4 h-4 mr-2" /> 系統執行紀錄 (Logs)
+                  </h4>
+                  <button 
+                    onClick={() => setAppLogs([])} 
+                    className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-xs text-white rounded transition-colors flex items-center"
+                  >
+                    <Trash2 className="w-3 h-3 mr-1" /> 清除紀錄
+                  </button>
+                </div>
+                <div className="bg-slate-900 border border-slate-700 rounded-md p-3 h-64 overflow-y-auto font-mono text-[10px] sm:text-xs custom-scrollbar">
+                  {appLogs.length === 0 ? (
+                    <span className="text-slate-500">目前沒有紀錄...</span>
+                  ) : (
+                    appLogs.map((log, i) => (
+                      <div key={i} className={`mb-1 break-all ${log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-yellow-400' : 'text-slate-300'}`}>
+                        <span className="text-slate-500 mr-2 flex-shrink-0">[{log.time}]</span>
+                        <span>{log.msg}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+              {/* --- 結束：系統執行紀錄 (Logs) 區塊 --- */}
+
             </div>
           </div>
         )}
