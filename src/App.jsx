@@ -539,7 +539,15 @@ const App = () => {
     const group = {};
     portfolioData.forEach(item => { const cat = item['類別'] || '其他'; group[cat] = (group[cat] || 0) + item.marketValue; });
     const total = Object.values(group).reduce((a, b) => a + b, 0);
-    return Object.keys(group).map(key => ({ name: key, value: group[key], percentage: total > 0 ? (group[key] / total) : 0 }));
+    return Object.keys(group).map(key => {
+        const pct = total > 0 ? (group[key] / total) : 0;
+        return { 
+            name: key, 
+            value: group[key], 
+            percentage: pct, 
+            percent: pct // 強制寫入百分比資料，避免手機版圖表套件取值錯誤
+        };
+    });
   }, [portfolioData]);
 
   const aggregatedHoldings = useMemo(() => {
@@ -1711,7 +1719,10 @@ const App = () => {
                             {allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}
                           </Pie>
                           <RechartsTooltip itemStyle={{ color: '#f1f5f9' }} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} />
-                          <Legend formatter={(value, entry) => { const { payload } = entry; return `${value} (${(payload?.percent * 100).toFixed(1)}%)`; }} />
+                          <Legend formatter={(value, entry) => { 
+                              const p = entry?.payload?.percent ?? entry?.payload?.payload?.percent ?? 0;
+                              return `${value} (${(p * 100).toFixed(1)}%)`; 
+                          }} />
                         </PieChart>
                       </ResponsiveContainer>
                     ) : <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>}
