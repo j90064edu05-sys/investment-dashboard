@@ -206,14 +206,21 @@ const withTimer = async (name, promiseFn) => {
 
 // --- 無敵網路核心模組 (v54.59 Fast-Fail Sequential) ---
 
-const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500) => {
+const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, parentSignal = null) => {
+    if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
     const isYahoo = targetUrl.includes('yahoo.com');
     const bypassUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + `_t=${Date.now()}`;
 
     console.log(`[Network] 🌐 嘗試直連: ${targetUrl}`);
+    let abortHandler;
     try {
         const controller = new AbortController();
         const tid = setTimeout(() => controller.abort(), 1500); 
+        if (parentSignal) {
+            abortHandler = () => controller.abort();
+            parentSignal.addEventListener('abort', abortHandler);
+        }
+        
         const res = await fetch(bypassUrl, {
             method: 'GET', credentials: 'omit', cache: 'no-store',
             headers: isYahoo ? { 'Accept': '*/*' } : undefined,
@@ -221,12 +228,15 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500) => {
         });
         const text = await res.text(); 
         clearTimeout(tid); 
+        if (parentSignal && abortHandler) parentSignal.removeEventListener('abort', abortHandler);
         
         if (res.ok && !text.trim().toLowerCase().startsWith('<html')) {
             console.log(`[Network] 🟢 直連成功!`);
             return returnType === 'json' ? JSON.parse(text) : text;
         }
     } catch(e) {
+        if (parentSignal && abortHandler) parentSignal.removeEventListener('abort', abortHandler);
+        if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
         console.log(`[Network] 🟡 直連遭遇 CORS 或超時，啟動「快刀序列」代理備援 (Fast-Fail)`);
     }
 
@@ -234,30 +244,35 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500) => {
     const proxyCb = `__pcb=${Date.now()}`;
     
     // 嚴格序列代理，不再併發，避免限流
-    let proxies = [];
-    if (isYahoo) {
-        proxies = [
-            { name: 'cors.lol', url: `https://api.cors.lol/?url=${encodedUrl}`, type: 'raw' },
-            { name: 'allorigins-raw', url: `https://api.allorigins.win/raw?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'raw' },
-            { name: 'codetabs', url: `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}&${proxyCb}`, type: 'raw' }
-        ];
-    } else {
-        proxies = [
-            { name: 'allorigins-raw', url: `https://api.allorigins.win/raw?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'raw' },
-            { name: 'codetabs', url: `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}&${proxyCb}`, type: 'raw' },
-            { name: 'allorigins-get', url: `https://api.allorigins.win/get?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'wrapper' }
-        ];
+    // 移除已失效的 cors.lol，並替換為穩定度較高的 corsproxy.io 與 thingproxy
+    let proxies = [
+        { name: 'corsproxy.io', url: `https://corsproxy.io/?${encodedUrl}`, type: 'raw' },
+        { name: 'thingproxy', url: `https://thingproxy.freeboard.io/fetch/${bypassUrl}`, type: 'raw' },
+        { name: 'codetabs', url: `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}&${proxyCb}`, type: 'raw' },
+        { name: 'allorigins-raw', url: `https://api.allorigins.win/raw?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'raw' }
+    ];
+
+    if (!isYahoo) {
+        proxies.push({ name: 'allorigins-get', url: `https://api.allorigins.win/get?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'wrapper' });
     }
 
     // 嚴格 for...of 序列，快速失敗機制
     for (const proxy of proxies) {
+        if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
         console.log(`[Network] 🔄 嘗試 Proxy [${proxy.name}]...`);
+        let proxyAbortHandler;
         try {
             const controller = new AbortController();
             const tid = setTimeout(() => controller.abort(), timeoutMs);
+            if (parentSignal) {
+                proxyAbortHandler = () => controller.abort();
+                parentSignal.addEventListener('abort', proxyAbortHandler);
+            }
+            
             const res = await fetch(proxy.url, { method: 'GET', credentials: 'omit', cache: 'no-store', signal: controller.signal });
             const text = await res.text(); 
             clearTimeout(tid);
+            if (parentSignal && proxyAbortHandler) parentSignal.removeEventListener('abort', proxyAbortHandler);
 
             let resultData;
             if (proxy.type === 'wrapper') {
@@ -290,6 +305,8 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500) => {
             return resultData; 
 
         } catch (e) {
+            if (parentSignal && proxyAbortHandler) parentSignal.removeEventListener('abort', proxyAbortHandler);
+            if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
             // 精準判斷 AbortError 並標示為 Timeout
             const errName = e.name === 'AbortError' ? `超時 (>${timeoutMs}ms)` : e.message;
             console.log(`[Network] 🔴 [${proxy.name}] 失敗: ${errName}`);
@@ -297,11 +314,13 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500) => {
         }
     }
     
+    if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
     console.error(`[Network] ❌ 所有 Proxy 皆失敗: ${targetUrl}`);
     return null;
 };
 
-const fetchOfficialDataWithDegradation = async (url) => {
+const fetchOfficialDataWithDegradation = async (url, parentSignal = null) => {
+    if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
     const isHugeFile = url.includes('STOCK_DAY_ALL') || 
                        url.includes('BWIBBU_ALL') || 
                        url.includes('tpex_mainboard_quotes') || 
@@ -310,13 +329,20 @@ const fetchOfficialDataWithDegradation = async (url) => {
                        url.includes('net_value_result');
                        
     console.log(`[Network] 🌐 嘗試直連開放資料: ${url.split('/').pop().split('?')[0]}`);
+    let abortHandler;
     try {
         const controller = new AbortController();
         const id = setTimeout(() => controller.abort(), 2000); 
+        if (parentSignal) {
+            abortHandler = () => controller.abort();
+            parentSignal.addEventListener('abort', abortHandler);
+        }
+        
         const bypassUrl = url.includes('?') ? `${url}&_t=${Date.now()}` : `${url}?_t=${Date.now()}`;
         const res = await fetch(bypassUrl, { method: 'GET', credentials: 'omit', cache: 'no-store', signal: controller.signal });
         const text = await res.text();
         clearTimeout(id);
+        if (parentSignal && abortHandler) parentSignal.removeEventListener('abort', abortHandler);
         
         if (res.ok && !text.trim().toLowerCase().startsWith('<html')) {
              try { 
@@ -326,6 +352,8 @@ const fetchOfficialDataWithDegradation = async (url) => {
              } catch(e) { }
         }
     } catch(e) {
+        if (parentSignal && abortHandler) parentSignal.removeEventListener('abort', abortHandler);
+        if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
         console.log(`[Network] 直連發生例外或超時`);
     }
     
@@ -335,7 +363,7 @@ const fetchOfficialDataWithDegradation = async (url) => {
     }
 
     console.log(`[Network] 🔄 啟動 Proxy 快刀序列備援抓取微型官方資料: ${url.split('/').pop().split('?')[0]}`);
-    return await smartFetch(url, 'json', 4500); // 微型檔案給予極短 timeout
+    return await smartFetch(url, 'json', 4500, parentSignal); // 微型檔案給予極短 timeout
 };
 
 // 輔助獲取是否為最後交易日
@@ -377,9 +405,9 @@ const fetchIsLastTradingDay = async () => {
 
 
 // 取得總經殖利率
-const fetchTradingEconomicsYields = async () => {
+const fetchTradingEconomicsYields = async (parentSignal = null) => {
     try {
-        const html = await smartFetch('https://tradingeconomics.com/united-states/government-bond-yield', 'text', 6000);
+        const html = await smartFetch('https://tradingeconomics.com/united-states/government-bond-yield', 'text', 6000, parentSignal);
         if (typeof html !== 'string') return {};
         
         const extractYield = (code) => {
@@ -493,16 +521,18 @@ const App = () => {
   const analysisInProgressRef = useRef({});
   const [feeDiscount, setFeeDiscount] = useState(1); 
   const [toast, setToast] = useState(null);
-  const [appLogs, setAppLogs] = useState([]); // 新增：負責儲存系統紀錄
+  const [appLogs, setAppLogs] = useState([]); 
+  
+  // 新增：用於真正中斷背景查詢的信號參考
+  const fetchCancelRef = useRef(false);
 
-  // 新增：全域攔截 console 訊息並寫入 Log 狀態
   useEffect(() => {
     const originalLog = console.log;
     const originalWarn = console.warn;
     const originalError = console.error;
 
     const handleLog = (level, originalFn, ...args) => {
-      originalFn(...args); // 保持在開發者工具中輸出
+      originalFn(...args); 
       const msg = args.map(a => {
         if (a instanceof Error) return a.message;
         if (typeof a === 'object') {
@@ -511,7 +541,6 @@ const App = () => {
         return String(a);
       }).join(' ');
       
-      // 保留最新的 200 筆紀錄，避免影響效能
       setAppLogs(prev => [...prev, { time: new Date().toLocaleTimeString('zh-TW', { hour12: false }), level, msg }].slice(-200));
     };
 
@@ -545,7 +574,7 @@ const App = () => {
             name: key, 
             value: group[key], 
             percentage: pct, 
-            percent: pct // 強制寫入百分比資料，避免手機版圖表套件取值錯誤
+            percent: pct 
         };
     });
   }, [portfolioData]);
@@ -594,14 +623,28 @@ const App = () => {
        sortableItems.sort((a, b) => {
          const idxA = customOrder.indexOf(a['標的']);
          const idxB = customOrder.indexOf(b['標的']);
-         if (idxA === -1) return 1; if (idxB === -1) return -1;
-         return idxA - idxB;
+         // 修正：當新標的尚未在自訂排序清單內時，將其排至最後方避免 -1 擾亂排序
+         const finalIdxA = idxA === -1 ? 9999 : idxA;
+         const finalIdxB = idxB === -1 ? 9999 : idxB;
+         return finalIdxA - finalIdxB;
        });
     } else if (sortConfig.key !== null) {
       sortableItems.sort((a, b) => {
-        let aValue = a[sortConfig.key]; let bValue = b[sortConfig.key];
-        if (sortConfig.key === '標的') aValue = a['標的']; if (sortConfig.key === '類別') aValue = a['類別'];
-        if (typeof aValue === 'string') { aValue = aValue.toLowerCase(); bValue = bValue.toLowerCase(); }
+        let aValue = a[sortConfig.key]; 
+        let bValue = b[sortConfig.key];
+        
+        if (sortConfig.key === '標的') aValue = a['標的']; 
+        if (sortConfig.key === '類別') aValue = a['類別'];
+        
+        // 修正防呆：確保在存取 undefined 時不會中斷排序比對
+        if (aValue === undefined || aValue === null) aValue = '';
+        if (bValue === undefined || bValue === null) bValue = '';
+
+        if (typeof aValue === 'string' && typeof bValue === 'string') { 
+            aValue = aValue.toLowerCase(); 
+            bValue = bValue.toLowerCase(); 
+        }
+        
         if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
         if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
         return 0;
@@ -720,6 +763,7 @@ const App = () => {
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
     console.log("=== 開始更新股價與數據 (v54.59 Fast-Fail Engine) ===");
+    fetchCancelRef.current = false; // 重置中斷信號
     const tTotalStart = performance.now();
     setPriceLoading(true); setUpdateError(null); setLoadingMessage('更新即時股價中...');
     
@@ -761,6 +805,9 @@ const App = () => {
 
     console.log("Fetching Precise Official Data...");
     
+    // 若提早按下停止
+    if (fetchCancelRef.current) { console.log('[Network] 查詢已手動中止'); return; }
+
     // 2. 嘗試抓取官方大表 (絕對斷尾模式)
     const twseEodUrl = 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL';
     const tpexEodUrl = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes';
@@ -791,6 +838,8 @@ const App = () => {
             }
         });
     }
+
+    if (fetchCancelRef.current) { console.log('[Network] 查詢已手動中止'); return; }
 
     // 3. 精準狙擊：MIS ETF 現價與淨值
     const etfSymbols = symbolsToFetchList.filter(s => symbolToName[s]?.includes('ETF') || s.startsWith('00'));
@@ -840,6 +889,7 @@ const App = () => {
     if (missingTwSymbols.length > 0) {
         console.log(`[Network] 🔄 抓取 MIS 個股現價: ${missingTwSymbols.join(', ')}`);
         for (let i = 0; i < missingTwSymbols.length; i += 40) {
+            if (fetchCancelRef.current) { console.log('[Network] 查詢已手動中止'); return; }
             const chunk = missingTwSymbols.slice(i, i + 40);
             const queryList = chunk.map(s => {
                 const pureCode = getPureCode(s);
@@ -862,6 +912,8 @@ const App = () => {
             }
         }
     }
+
+    if (fetchCancelRef.current) { console.log('[Network] 查詢已手動中止'); return; }
 
     // PRE-FILL STEP
     symbolsToFetchList.forEach(symbol => {
@@ -935,6 +987,11 @@ const App = () => {
             console.log(`[Network] 🌐 啟動 Yahoo Chart v8 嚴格單線程序列備援: ${symbolsForYahoo.join(', ')}`);
             
             for (const symbol of symbolsForYahoo) {
+                if (fetchCancelRef.current) {
+                    console.log(`[Network] 偵測到手動取消，停止查詢後續 Yahoo 標的`);
+                    break;
+                }
+                
                 try {
                     const chartUrl = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
                     const result = await withTimer(`Yahoo_Chart_${symbol}`, () => smartFetch(chartUrl, 'json', 4500));
@@ -963,6 +1020,11 @@ const App = () => {
     } catch(e) {
         console.error("Fetch Loop Error:", e);
     } finally {
+        if (fetchCancelRef.current) {
+            setPriceLoading(false);
+            return; // 重要：中止後不再向下執行，直接略過更新 State 以免死灰復燃
+        }
+        
         const teYields = await tePromise;
         
         setUsBondYields({
@@ -1565,11 +1627,17 @@ const App = () => {
   const moveItem = (symbol, direction) => {
     if (sortConfig.key !== 'manual') setSortConfig({ key: 'manual', direction: 'asc' });
     setCustomOrder(prev => {
-      const currentIndex = prev.indexOf(symbol);
-      if (currentIndex === -1) return prev;
+      let newOrder = [...prev];
+      // 確保所有的標的都在排序清單中，以防新匯入的標的遺漏導致點擊失效
+      tradableSymbols.forEach(t => {
+          if (!newOrder.includes(t['標的'])) newOrder.push(t['標的']);
+      });
+
+      const currentIndex = newOrder.indexOf(symbol);
+      if (currentIndex === -1) return newOrder;
       const newIndex = currentIndex + direction;
-      if (newIndex < 0 || newIndex >= prev.length) return prev;
-      const newOrder = [...prev];
+      if (newIndex < 0 || newIndex >= newOrder.length) return newOrder;
+      
       [newOrder[currentIndex], newOrder[newIndex]] = [newOrder[newIndex], newOrder[currentIndex]];
       return newOrder;
     });
@@ -1689,7 +1757,25 @@ const App = () => {
       </div>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 md:py-8">
-        {priceLoading && <div className="mb-6 bg-blue-900/30 border border-blue-500/30 rounded-lg p-3 flex items-center justify-between animate-pulse"><div className="flex items-center"><Loader2 className="w-5 h-5 text-blue-400 animate-spin mr-3" /><span className="text-sm text-blue-200">{loadingMessage}</span></div><button onClick={() => setPriceLoading(false)} className="text-xs bg-red-900/50 text-red-200 px-2 py-1 rounded border border-red-500/50 flex items-center hover:bg-red-900/70"><XCircle className="w-3 h-3 mr-1" />停止</button></div>}
+        {priceLoading && (
+            <div className="mb-6 bg-blue-900/30 border border-blue-500/30 rounded-lg p-3 flex items-center justify-between animate-pulse">
+                <div className="flex items-center">
+                    <Loader2 className="w-5 h-5 text-blue-400 animate-spin mr-3" />
+                    <span className="text-sm text-blue-200">{loadingMessage}</span>
+                </div>
+                <button 
+                    onClick={() => { 
+                        fetchCancelRef.current = true; // 發出中止信號
+                        setPriceLoading(false); 
+                        setUpdateError('已手動取消資料更新');
+                        console.log('[System] 使用者手動終止更新'); 
+                    }} 
+                    className="text-xs bg-red-900/50 text-red-200 px-2 py-1 rounded border border-red-500/50 flex items-center hover:bg-red-900/70"
+                >
+                    <XCircle className="w-3 h-3 mr-1" />停止
+                </button>
+            </div>
+        )}
         {updateError && <div className="mb-6 bg-red-900/30 border border-red-500/30 rounded-lg p-3 flex items-center"><AlertTriangle className="w-5 h-5 text-red-400 mr-3 flex-shrink-0" /><span className="text-sm text-red-200">{String(updateError)}</span></div>}
 
         {activeTab === 'overview' && (
