@@ -11,11 +11,10 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.59 (Fast-Fail Sequential Engine)
+ * Alpha 投資戰情室 v54.60 (Ultimate Resilience Engine)
  * * [重大架構升級]
- * 1. 極速快刀序列 (Fast-Fail)：徹底捨棄所有 Promise 競速與並發，回歸最穩健的 for...of 序列代理。
- * 2. 嚴格短超時限制：將單一 Proxy 的 Timeout 容忍度大幅縮短至 4500ms。若 Proxy 裝死卡頓，4.5 秒立刻切換，保證整體系統流暢度。
- * 3. 智能 Log 標示：精準辨識 AbortError，將含糊的 Failed to fetch 明確標示為「超時 (Timeout)」，方便除錯。
+ * 1. 終極防禦緩存 (Last Known Good State)：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份，保證系統永不無資料可用。
+ * 2. 代理伺服器汰換：移除被台灣證交所高機率 403 封鎖的 corsproxy.io，引入其他替代方案。
  */
 
 // --- 靜態配置 ---
@@ -204,7 +203,7 @@ const withTimer = async (name, promiseFn) => {
     }
 };
 
-// --- 無敵網路核心模組 (v54.59 Fast-Fail Sequential) ---
+// --- 無敵網路核心模組 (v54.60 Fast-Fail Sequential) ---
 
 const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, parentSignal = null) => {
     if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
@@ -243,13 +242,13 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, pare
     const encodedUrl = encodeURIComponent(bypassUrl);
     const proxyCb = `__pcb=${Date.now()}`;
     
-    // 嚴格序列代理，不再併發，避免限流
-    // 移除已失效的 cors.lol，並替換為穩定度較高的 corsproxy.io 與 thingproxy
+    // 重新調整 Proxy 列表，將專屬的 Cloudflare Worker 設為第一順位最高優先級
     let proxies = [
-        { name: 'corsproxy.io', url: `https://corsproxy.io/?${encodedUrl}`, type: 'raw' },
-        { name: 'thingproxy', url: `https://thingproxy.freeboard.io/fetch/${bypassUrl}`, type: 'raw' },
+        { name: 'cf-worker (專屬)', url: `https://my-first-worker.j90064-edu05.workers.dev/?url=${encodedUrl}`, type: 'raw' },
         { name: 'codetabs', url: `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}&${proxyCb}`, type: 'raw' },
-        { name: 'allorigins-raw', url: `https://api.allorigins.win/raw?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'raw' }
+        { name: 'allorigins-raw', url: `https://api.allorigins.win/raw?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'raw' },
+        { name: 'cors-proxy.htmldriven', url: `https://cors-proxy.htmldriven.com/?url=${encodedUrl}`, type: 'raw' },
+        { name: 'thingproxy', url: `https://thingproxy.freeboard.io/fetch/${bypassUrl}`, type: 'raw' }
     ];
 
     if (!isYahoo) {
@@ -524,7 +523,7 @@ const App = () => {
   const [appLogs, setAppLogs] = useState([]); 
   
   // 新增：用於真正中斷背景查詢的信號參考
-  const fetchCancelRef = useRef(false);
+  const globalAbortRef = useRef(null);
 
   useEffect(() => {
     const originalLog = console.log;
@@ -636,18 +635,26 @@ const App = () => {
         if (sortConfig.key === '標的') aValue = a['標的']; 
         if (sortConfig.key === '類別') aValue = a['類別'];
         
-        // 修正防呆：確保在存取 undefined 時不會中斷排序比對
-        if (aValue === undefined || aValue === null) aValue = '';
-        if (bValue === undefined || bValue === null) bValue = '';
-
-        if (typeof aValue === 'string' && typeof bValue === 'string') { 
-            aValue = aValue.toLowerCase(); 
-            bValue = bValue.toLowerCase(); 
-        }
+        const numericFields = ['buyPrice', 'currentPrice', 'shares', 'profitLoss', 'roi', 'marketValue', 'costBasis'];
         
-        if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
-        if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
-        return 0;
+        if (numericFields.includes(sortConfig.key)) {
+            const numA = typeof aValue === 'number' ? aValue : (Number(aValue) || 0);
+            const numB = typeof bValue === 'number' ? bValue : (Number(bValue) || 0);
+            return sortConfig.direction === 'asc' ? numA - numB : numB - numA;
+        } else {
+            // 修正防呆：確保在存取 undefined 時不會中斷排序比對
+            if (aValue === undefined || aValue === null) aValue = '';
+            if (bValue === undefined || bValue === null) bValue = '';
+
+            if (typeof aValue === 'string' && typeof bValue === 'string') { 
+                aValue = aValue.toLowerCase(); 
+                bValue = bValue.toLowerCase(); 
+            }
+            
+            if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+            if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
+            return 0;
+        }
       });
     }
     return sortableItems;
@@ -762,8 +769,13 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.59 Fast-Fail Engine) ===");
-    fetchCancelRef.current = false; // 重置中斷信號
+    console.log("=== 開始更新股價與數據 (v54.60 Fast-Fail Engine) ===");
+    if (globalAbortRef.current) {
+        globalAbortRef.current.abort(); // 終止前一個尚未完成的請求
+    }
+    globalAbortRef.current = new AbortController();
+    const signal = globalAbortRef.current.signal;
+
     const tTotalStart = performance.now();
     setPriceLoading(true); setUpdateError(null); setLoadingMessage('更新即時股價中...');
     
@@ -781,7 +793,7 @@ const App = () => {
     // 1. 抓取總經殖利率
     const fetchTEWithTimer = async () => {
         const start = performance.now();
-        const res = await fetchTradingEconomicsYields();
+        const res = await fetchTradingEconomicsYields(signal);
         console.log(`[Timer] TradingEconomics 總耗時: ${(performance.now() - start).toFixed(2)} ms`);
         return res;
     };
@@ -805,196 +817,204 @@ const App = () => {
 
     console.log("Fetching Precise Official Data...");
     
-    // 若提早按下停止
-    if (fetchCancelRef.current) { console.log('[Network] 查詢已手動中止'); return; }
+    try {
+        if (signal.aborted) throw new Error('AbortError: 手動中止');
 
-    // 2. 嘗試抓取官方大表 (絕對斷尾模式)
-    const twseEodUrl = 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL';
-    const tpexEodUrl = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes';
+        // 2. 嘗試抓取官方大表 (絕對斷尾模式)
+        const twseEodUrl = 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL';
+        const tpexEodUrl = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes';
 
-    const [twseEodRes, tpexEodRes] = await Promise.all([
-        withTimer("TWSE_EOD", () => fetchOfficialDataWithDegradation(twseEodUrl)),
-        withTimer("TPEx_EOD", () => fetchOfficialDataWithDegradation(tpexEodUrl))
-    ]);
+        const [twseEodRes, tpexEodRes] = await Promise.all([
+            withTimer("TWSE_EOD", () => fetchOfficialDataWithDegradation(twseEodUrl, signal)),
+            withTimer("TPEx_EOD", () => fetchOfficialDataWithDegradation(tpexEodUrl, signal))
+        ]);
 
-    if (Array.isArray(twseEodRes)) {
-        twseEodRes.forEach(item => {
-            const code = getPureCode(item.Code || item.code);
-            const rawPrice = item.ClosingPrice || item.closingPrice;
-            if (code && rawPrice && rawPrice !== '--' && rawPrice !== '---') {
-                const price = parseFloat(String(rawPrice).replace(/,/g, ''));
-                if (!isNaN(price) && price > 0) misPriceMap[code] = price;
-            }
-        });
-    }
-    
-    if (Array.isArray(tpexEodRes)) {
-        tpexEodRes.forEach(item => {
-            const code = getPureCode(item.SecuritiesCompanyCode || item.Symbol || item.SecuCode || item.code);
-            const rawPrice = item.Close || item.ClosePrice || item.close;
-            if (code && rawPrice && rawPrice !== '--' && rawPrice !== '---') {
-                const price = parseFloat(String(rawPrice).replace(/,/g, ''));
-                if (!isNaN(price) && price > 0) misPriceMap[code] = price;
-            }
-        });
-    }
-
-    if (fetchCancelRef.current) { console.log('[Network] 查詢已手動中止'); return; }
-
-    // 3. 精準狙擊：MIS ETF 現價與淨值
-    const etfSymbols = symbolsToFetchList.filter(s => symbolToName[s]?.includes('ETF') || s.startsWith('00'));
-    if (etfSymbols.length > 0) {
-        const isTrading = isTaiwanTradingHours();
-        const misCacheBuster = isTrading ? Date.now() : getTodayDate().replace(/-/g, '');
-        const misEtfUrl = `https://mis.twse.com.tw/stock/data/all_etf.txt?_=${misCacheBuster}`;
-        console.log(`[Network] 🔄 抓取 MIS ETF 淨值與現價: all_etf.txt`);
-        
-        const misEtfText = await withTimer("MIS_ETF", () => smartFetch(misEtfUrl, 'text', 6000));
-        let misEtfRes = null;
-        if (misEtfText) {
-            try {
-                misEtfRes = JSON.parse(misEtfText);
-            } catch (e) {
-                console.log(`[Network] 🔴 all_etf.txt 文字轉換 JSON 失敗:`, e.message);
-            }
-        }
-        
-        if (misEtfRes && misEtfRes.a1) {
-            let etfData = [];
-            misEtfRes.a1.forEach((investmentTrust) => {
-                if (investmentTrust.msgArray !== undefined) {
-                    investmentTrust.msgArray.forEach((etf) => etfData.push(etf));
+        if (Array.isArray(twseEodRes)) {
+            twseEodRes.forEach(item => {
+                const code = getPureCode(item.Code || item.code);
+                const rawPrice = item.ClosingPrice || item.closingPrice;
+                if (code && rawPrice && rawPrice !== '--' && rawPrice !== '---') {
+                    const price = parseFloat(String(rawPrice).replace(/,/g, ''));
+                    if (!isNaN(price) && price > 0) misPriceMap[code] = price;
                 }
             });
-
-            etfData.forEach(item => {
-                const code = getPureCode(item.a);
-                if (item.f && item.f !== '-') {
-                    const nav = parseFloat(String(item.f).replace(/,/g, ''));
-                    if (!isNaN(nav)) misEtfNavMap[code] = nav;
-                }
-                if (item.e && item.e !== '-') {
-                    const price = parseFloat(String(item.e).replace(/,/g, ''));
-                    if (!isNaN(price) && price > 0) misEtfPriceMap[code] = price; 
+        }
+        
+        if (Array.isArray(tpexEodRes)) {
+            tpexEodRes.forEach(item => {
+                const code = getPureCode(item.SecuritiesCompanyCode || item.Symbol || item.SecuCode || item.code);
+                const rawPrice = item.Close || item.ClosePrice || item.close;
+                if (code && rawPrice && rawPrice !== '--' && rawPrice !== '---') {
+                    const price = parseFloat(String(rawPrice).replace(/,/g, ''));
+                    if (!isNaN(price) && price > 0) misPriceMap[code] = price;
                 }
             });
-            console.log(`[Data] 成功解析 MIS ETF 字典: 淨值 ${Object.keys(misEtfNavMap).length} 筆, 現價 ${Object.keys(misEtfPriceMap).length} 筆`);
         }
-    }
 
-    // 4. 精準狙擊：MIS 個股現價
-    const twSymbols = symbolsToFetchList.filter(s => s.includes('.TW') || s.includes('.TWO'));
-    const missingTwSymbols = twSymbols.filter(s => !misEtfPriceMap[getPureCode(s)] && !misPriceMap[getPureCode(s)]);
-    
-    if (missingTwSymbols.length > 0) {
-        console.log(`[Network] 🔄 抓取 MIS 個股現價: ${missingTwSymbols.join(', ')}`);
-        for (let i = 0; i < missingTwSymbols.length; i += 40) {
-            if (fetchCancelRef.current) { console.log('[Network] 查詢已手動中止'); return; }
-            const chunk = missingTwSymbols.slice(i, i + 40);
-            const queryList = chunk.map(s => {
-                const pureCode = getPureCode(s);
-                const prefix = s.includes('.TWO') ? 'otc' : 'tse';
-                return `${prefix}_${pureCode}.tw`;
-            }).join('|');
+        if (signal.aborted) throw new Error('AbortError: 手動中止');
+
+        // 3. 精準狙擊：MIS ETF 現價與淨值
+        const etfSymbols = symbolsToFetchList.filter(s => symbolToName[s]?.includes('ETF') || s.startsWith('00'));
+        if (etfSymbols.length > 0) {
+            const isTrading = isTaiwanTradingHours();
+            const misCacheBuster = isTrading ? Date.now() : getTodayDate().replace(/-/g, '');
+            const misEtfUrl = `https://mis.twse.com.tw/stock/data/all_etf.txt?_=${misCacheBuster}`;
+            console.log(`[Network] 🔄 抓取 MIS ETF 淨值與現價: all_etf.txt`);
             
-            const misIndivUrl = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${queryList}`;
-            const priceRes = await withTimer(`MIS_Price_Chunk_${i/40}`, () => smartFetch(misIndivUrl, 'json', 4500));
+            const misEtfText = await withTimer("MIS_ETF", () => smartFetch(misEtfUrl, 'text', 6000, signal));
+            let misEtfRes = null;
             
-            if (priceRes && priceRes.msgArray) {
-                priceRes.msgArray.forEach(item => {
-                    const pureCode = getPureCode(item.c);
-                    const price = parseFloat(item.z !== '-' ? item.z : item.y);
-                    if (!isNaN(price) && price > 0) {
-                        misPriceMap[pureCode] = price; 
-                        misTimeMap[pureCode] = `${item.d.substring(4,6)}/${item.d.substring(6,8)} ${item.t}`;
+            if (misEtfText) {
+                try {
+                    misEtfRes = JSON.parse(misEtfText);
+                    // 成功取得資料，更新本地端備份防禦庫
+                    localStorage.setItem('ALPHA_ETF_BACKUP', misEtfText);
+                } catch (e) {
+                    console.log(`[Network] 🔴 all_etf.txt 文字轉換 JSON 失敗:`, e.message);
+                }
+            } else {
+                // 如果所有代理皆失敗，載入最後一次成功的緩存備份
+                const backup = localStorage.getItem('ALPHA_ETF_BACKUP');
+                if (backup) {
+                    try {
+                        console.log(`[Network] 🛡️ 觸發終極防禦緩存機制：使用最後一次成功的 all_etf.txt 備份資料`);
+                        misEtfRes = JSON.parse(backup);
+                    } catch (e) {}
+                }
+            }
+            
+            if (misEtfRes && misEtfRes.a1) {
+                let etfData = [];
+                misEtfRes.a1.forEach((investmentTrust) => {
+                    if (investmentTrust.msgArray !== undefined) {
+                        investmentTrust.msgArray.forEach((etf) => etfData.push(etf));
                     }
                 });
+
+                etfData.forEach(item => {
+                    const code = getPureCode(item.a);
+                    if (item.f && item.f !== '-') {
+                        const nav = parseFloat(String(item.f).replace(/,/g, ''));
+                        if (!isNaN(nav)) misEtfNavMap[code] = nav;
+                    }
+                    if (item.e && item.e !== '-') {
+                        const price = parseFloat(String(item.e).replace(/,/g, ''));
+                        if (!isNaN(price) && price > 0) misEtfPriceMap[code] = price; 
+                    }
+                });
+                console.log(`[Data] 成功解析 MIS ETF 字典: 淨值 ${Object.keys(misEtfNavMap).length} 筆, 現價 ${Object.keys(misEtfPriceMap).length} 筆`);
             }
         }
-    }
 
-    if (fetchCancelRef.current) { console.log('[Network] 查詢已手動中止'); return; }
-
-    // PRE-FILL STEP
-    symbolsToFetchList.forEach(symbol => {
-        const pureCode = getPureCode(symbol); 
-        const extra = newEtfData[symbol] || {};
-        const isEtf = symbolToName[symbol]?.includes('ETF') || symbol.startsWith('00');
+        // 4. 精準狙擊：MIS 個股現價
+        const twSymbols = symbolsToFetchList.filter(s => s.includes('.TW') || s.includes('.TWO'));
+        const missingTwSymbols = twSymbols.filter(s => !misEtfPriceMap[getPureCode(s)] && !misPriceMap[getPureCode(s)]);
         
-        if (isEtf && misEtfPriceMap[pureCode]) {
-            newPrices[symbol] = misEtfPriceMap[pureCode];
-            extra.priceSource = "MIS(e)現價";
-            const d = new Date();
-            extra.dateStr = `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-        } 
-        else if (misPriceMap[pureCode]) {
-            newPrices[symbol] = misPriceMap[pureCode];
-            extra.dateStr = misTimeMap[pureCode] || getTodayDate().substring(5).replace('-', '/');
-            extra.priceSource = misTimeMap[pureCode] ? "MIS個股" : "官方收盤";
+        if (missingTwSymbols.length > 0) {
+            console.log(`[Network] 🔄 抓取 MIS 個股現價: ${missingTwSymbols.join(', ')}`);
+            for (let i = 0; i < missingTwSymbols.length; i += 40) {
+                if (signal.aborted) throw new Error('AbortError: 手動中止');
+                const chunk = missingTwSymbols.slice(i, i + 40);
+                const queryList = chunk.map(s => {
+                    const pureCode = getPureCode(s);
+                    const prefix = s.includes('.TWO') ? 'otc' : 'tse';
+                    return `${prefix}_${pureCode}.tw`;
+                }).join('|');
+                
+                const misIndivUrl = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${queryList}`;
+                const priceRes = await withTimer(`MIS_Price_Chunk_${i/40}`, () => smartFetch(misIndivUrl, 'json', 4500, signal));
+                
+                if (priceRes && priceRes.msgArray) {
+                    priceRes.msgArray.forEach(item => {
+                        const pureCode = getPureCode(item.c);
+                        const price = parseFloat(item.z !== '-' ? item.z : item.y);
+                        if (!isNaN(price) && price > 0) {
+                            misPriceMap[pureCode] = price; 
+                            misTimeMap[pureCode] = `${item.d.substring(4,6)}/${item.d.substring(6,8)} ${item.t}`;
+                        }
+                    });
+                }
+            }
         }
 
-        if (isEtf && misEtfNavMap[pureCode]) { 
-            extra.nav = misEtfNavMap[pureCode]; 
-            extra.navSource = "MIS(f)淨值"; 
-        } else if (twseEtfMap[pureCode]) { 
-            extra.nav = twseEtfMap[pureCode]; 
-            extra.navSource = "Off(TW)"; 
-        } else if (tpexEtfMap[pureCode]) { 
-            extra.nav = tpexEtfMap[pureCode]; 
-            extra.navSource = "Off(TP)"; 
-        }
+        if (signal.aborted) throw new Error('AbortError: 手動中止');
 
-        newEtfData[symbol] = extra;
-    });
+        // PRE-FILL STEP
+        symbolsToFetchList.forEach(symbol => {
+            const pureCode = getPureCode(symbol); 
+            const extra = newEtfData[symbol] || {};
+            const isEtf = symbolToName[symbol]?.includes('ETF') || symbol.startsWith('00');
+            
+            if (isEtf && misEtfPriceMap[pureCode]) {
+                newPrices[symbol] = misEtfPriceMap[pureCode];
+                extra.priceSource = "MIS(e)現價";
+                const d = new Date();
+                extra.dateStr = `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+            } 
+            else if (misPriceMap[pureCode]) {
+                newPrices[symbol] = misPriceMap[pureCode];
+                extra.dateStr = misTimeMap[pureCode] || getTodayDate().substring(5).replace('-', '/');
+                extra.priceSource = misTimeMap[pureCode] ? "MIS個股" : "官方收盤";
+            }
 
-    const symbolsToFetch = symbolsToFetchList.filter(symbol => {
-        if (forceUpdate) return true;
-        const cachedItem = cache[symbol];
-        if (!cachedItem) return true;
-        if (cachedItem.date !== today) return true;
-        
-        if (!newPrices[symbol] && cachedItem.price) {
-            newPrices[symbol] = cachedItem.price;
-            if (cachedItem.nav) newEtfData[symbol] = { ...newEtfData[symbol], nav: cachedItem.nav, navSource: cachedItem.navSource };
-            if (cachedItem.yield) newEtfData[symbol] = { ...newEtfData[symbol], yield: cachedItem.yield, yieldSource: cachedItem.yieldSource };
-            if (cachedItem.dateStr) newEtfData[symbol] = { ...newEtfData[symbol], dateStr: cachedItem.dateStr };
-            if (cachedItem.priceSource) newEtfData[symbol] = { ...newEtfData[symbol], priceSource: cachedItem.priceSource };
-        }
-        return false; 
-    });
+            if (isEtf && misEtfNavMap[pureCode]) { 
+                extra.nav = misEtfNavMap[pureCode]; 
+                extra.navSource = "MIS(f)淨值"; 
+            } else if (twseEtfMap[pureCode]) { 
+                extra.nav = twseEtfMap[pureCode]; 
+                extra.navSource = "Off(TW)"; 
+            } else if (tpexEtfMap[pureCode]) { 
+                extra.nav = tpexEtfMap[pureCode]; 
+                extra.navSource = "Off(TP)"; 
+            }
 
-    // 5. 針對美股與指數，啟動 Yahoo 嚴格序列 Chart API 引擎
-    const symbolsForYahoo = [];
-    symbolsToFetchList.forEach(symbol => {
-        const isUs = isUsAsset(symbol);
-        let needYahoo = false;
-        
-        if (!newPrices[symbol]) {
-            needYahoo = true; 
-        } else if (isUs || symbol === 'TWD=X' || symbol.startsWith('^')) {
-            needYahoo = true; 
-        }
-        
-        if (needYahoo) {
-            symbolsForYahoo.push(symbol);
-        } else {
-            console.log(`[Timer] 🚀 官方資料已完美滿足需求，跳過 Yahoo: ${symbol}`);
-        }
-    });
+            newEtfData[symbol] = extra;
+        });
 
-    try {
+        const symbolsToFetch = symbolsToFetchList.filter(symbol => {
+            if (forceUpdate) return true;
+            const cachedItem = cache[symbol];
+            if (!cachedItem) return true;
+            if (cachedItem.date !== today) return true;
+            
+            if (!newPrices[symbol] && cachedItem.price) {
+                newPrices[symbol] = cachedItem.price;
+                if (cachedItem.nav) newEtfData[symbol] = { ...newEtfData[symbol], nav: cachedItem.nav, navSource: cachedItem.navSource };
+                if (cachedItem.yield) newEtfData[symbol] = { ...newEtfData[symbol], yield: cachedItem.yield, yieldSource: cachedItem.yieldSource };
+                if (cachedItem.dateStr) newEtfData[symbol] = { ...newEtfData[symbol], dateStr: cachedItem.dateStr };
+                if (cachedItem.priceSource) newEtfData[symbol] = { ...newEtfData[symbol], priceSource: cachedItem.priceSource };
+            }
+            return false; 
+        });
+
+        // 5. 針對美股與指數，啟動 Yahoo 嚴格序列 Chart API 引擎
+        const symbolsForYahoo = [];
+        symbolsToFetchList.forEach(symbol => {
+            const isUs = isUsAsset(symbol);
+            let needYahoo = false;
+            
+            if (!newPrices[symbol]) {
+                needYahoo = true; 
+            } else if (isUs || symbol === 'TWD=X' || symbol.startsWith('^')) {
+                needYahoo = true; 
+            }
+            
+            if (needYahoo) {
+                symbolsForYahoo.push(symbol);
+            } else {
+                console.log(`[Timer] 🚀 官方資料已完美滿足需求，跳過 Yahoo: ${symbol}`);
+            }
+        });
+
         if (symbolsForYahoo.length > 0) {
             console.log(`[Network] 🌐 啟動 Yahoo Chart v8 嚴格單線程序列備援: ${symbolsForYahoo.join(', ')}`);
             
             for (const symbol of symbolsForYahoo) {
-                if (fetchCancelRef.current) {
-                    console.log(`[Network] 偵測到手動取消，停止查詢後續 Yahoo 標的`);
-                    break;
-                }
+                if (signal.aborted) throw new Error('AbortError: 手動中止');
                 
                 try {
                     const chartUrl = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
-                    const result = await withTimer(`Yahoo_Chart_${symbol}`, () => smartFetch(chartUrl, 'json', 4500));
+                    const result = await withTimer(`Yahoo_Chart_${symbol}`, () => smartFetch(chartUrl, 'json', 4500, signal));
                     
                     const meta = result?.chart?.result?.[0]?.meta;
                     if (meta && meta.regularMarketPrice !== undefined) {
@@ -1010,19 +1030,13 @@ const App = () => {
                         console.log(`[Network] 🔴 Yahoo Chart 失敗或無資料 (${symbol})`);
                     }
                 } catch (e) {
+                    if (signal.aborted) throw new Error('AbortError: 手動中止');
                     console.warn(`[Network] Yahoo Chart 例外 (${symbol}):`, e);
                 }
                 
                 // 【關鍵冷卻】嚴格間隔 1000ms，徹底避免 cors.lol 或 allorigins 判定限流
-                await delay(1000); 
+                if (!signal.aborted) await delay(1000); 
             }
-        }
-    } catch(e) {
-        console.error("Fetch Loop Error:", e);
-    } finally {
-        if (fetchCancelRef.current) {
-            setPriceLoading(false);
-            return; // 重要：中止後不再向下執行，直接略過更新 State 以免死灰復燃
         }
         
         const teYields = await tePromise;
@@ -1061,6 +1075,14 @@ const App = () => {
         setAiSignals({}); setAiSummary(null); setAiDetail(null); setUsedModel(null); setPortfolioHealth(null); 
         setPriceLoading(false); setLastUpdated(new Date()); setLoadingMessage('更新即時股價中...'); 
         processData(data, newPrices, newEtfData);
+
+    } catch(e) {
+        if (e.message.includes('AbortError') || signal.aborted) {
+            console.log('[System] 更新程序已全面手動中止');
+            return; // 立即中斷，不更新任何載入狀態與畫面
+        }
+        console.error("Fetch Loop Error:", e);
+        setPriceLoading(false);
     }
   };
 
@@ -1766,6 +1788,9 @@ const App = () => {
                 <button 
                     onClick={() => { 
                         fetchCancelRef.current = true; // 發出中止信號
+                        if (globalAbortRef.current) {
+                            globalAbortRef.current.abort(); // 立刻斷開所有進行中的 fetch
+                        }
                         setPriceLoading(false); 
                         setUpdateError('已手動取消資料更新');
                         console.log('[System] 使用者手動終止更新'); 
