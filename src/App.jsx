@@ -242,14 +242,25 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, pare
     const encodedUrl = encodeURIComponent(bypassUrl);
     const proxyCb = `__pcb=${Date.now()}`;
     
-    // 重新調整 Proxy 列表，將專屬的 Cloudflare Worker 設為第一順位最高優先級
+    // 重新調整 Proxy 列表，移除寫死在程式碼中的 Cloudflare Worker
     let proxies = [
-        { name: 'cf-worker (專屬)', url: `https://my-first-worker.j90064-edu05.workers.dev/?url=${encodedUrl}`, type: 'raw' },
         { name: 'codetabs', url: `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}&${proxyCb}`, type: 'raw' },
         { name: 'allorigins-raw', url: `https://api.allorigins.win/raw?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'raw' },
         { name: 'cors-proxy.htmldriven', url: `https://cors-proxy.htmldriven.com/?url=${encodedUrl}`, type: 'raw' },
         { name: 'thingproxy', url: `https://thingproxy.freeboard.io/fetch/${bypassUrl}`, type: 'raw' }
     ];
+
+    // 動態載入自訂 Proxy 並設為第一順位
+    try {
+        const customProxy = localStorage.getItem('custom_proxy_url');
+        if (customProxy && customProxy.trim() !== '') {
+            let pUrl = customProxy.trim();
+            const finalUrl = pUrl.includes('?') 
+                ? (pUrl.endsWith('=') ? pUrl + encodedUrl : pUrl + '&url=' + encodedUrl)
+                : pUrl + '?url=' + encodedUrl;
+            proxies.unshift({ name: '自訂 Proxy', url: finalUrl, type: 'raw' });
+        }
+    } catch(e) {}
 
     if (!isYahoo) {
         proxies.push({ name: 'allorigins-get', url: `https://api.allorigins.win/get?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'wrapper' });
@@ -521,6 +532,7 @@ const App = () => {
   const [feeDiscount, setFeeDiscount] = useState(1); 
   const [toast, setToast] = useState(null);
   const [appLogs, setAppLogs] = useState([]); 
+  const [customProxyUrl, setCustomProxyUrl] = useState(''); // 新增：自訂 Proxy 狀態
   
   // 新增：用於真正中斷背景查詢的信號參考
   const globalAbortRef = useRef(null);
@@ -1587,6 +1599,7 @@ const App = () => {
     localStorage.setItem('gemini_api_key', geminiApiKey);
     localStorage.setItem('gemini_model', selectedModel);
     localStorage.setItem('fee_discount', feeDiscount);
+    localStorage.setItem('custom_proxy_url', customProxyUrl); // 儲存自訂 Proxy
     localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
     if (customOrder.length > 0) localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
     setToast("設定已儲存！"); 
@@ -1679,6 +1692,7 @@ const App = () => {
     const savedOrder = localStorage.getItem('investment_custom_order');
     const savedSettings = localStorage.getItem('investment_settings');
     const savedClassifications = localStorage.getItem('investment_asset_classifications');
+    const savedProxyUrl = localStorage.getItem('custom_proxy_url'); // 載入自訂 Proxy
 
     if (savedKey) setGeminiApiKey(savedKey);
     const isValidModel = AVAILABLE_MODELS.some(m => m.id === savedModel);
@@ -1688,6 +1702,7 @@ const App = () => {
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount));
     if (savedSort) setSortConfig(JSON.parse(savedSort));
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
+    if (savedProxyUrl) setCustomProxyUrl(savedProxyUrl); // 設定初始自訂 Proxy
 
     let initialSettings = {};
     if (savedSettings) {
@@ -2397,6 +2412,14 @@ const App = () => {
                     <button onClick={handleSaveSettings} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-sm font-medium transition-colors"><Save className="w-4 h-4 mr-1 inline" />儲存</button>
                 </div>
                 <p className="mt-2 text-xs text-slate-500">* 單機版需自行申請 API Key 才能使用 AI 功能。<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 ml-1 underline">前往申請</a></p>
+              </div>
+
+              <div className="pt-4 border-t border-slate-700">
+                <label className="block text-sm font-medium text-slate-300 mb-2">自訂 Proxy 伺服器 (選填)</label>
+                <div className="flex gap-2">
+                    <input type="text" value={customProxyUrl} onChange={(e) => setCustomProxyUrl(e.target.value)} placeholder="例如: https://my-worker.workers.dev" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
+                </div>
+                <p className="mt-2 text-xs text-slate-500">* 若您有自行架設 Cloudflare Worker 等 Proxy，請在此輸入網址，儲存後系統將優先使用此節點抓取資料。</p>
               </div>
 
               <div className="mt-4">
