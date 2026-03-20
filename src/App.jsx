@@ -11,10 +11,10 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.60 (Ultimate Resilience Engine)
+ * Alpha 投資戰情室 v54.61 (Ultimate Resilience Engine)
  * * [重大架構升級]
  * 1. 終極防禦緩存 (Last Known Good State)：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份，保證系統永不無資料可用。
- * 2. 代理伺服器汰換：移除被台灣證交所高機率 403 封鎖的 corsproxy.io，引入其他替代方案。
+ * 2. 自動防呆儲存：在點擊更新股價時，會自動將畫面上的 Proxy 設定存入 LocalStorage，解決忘記點擊儲存導致系統未套用自訂 Proxy 的問題。
  */
 
 // --- 靜態配置 ---
@@ -203,7 +203,7 @@ const withTimer = async (name, promiseFn) => {
     }
 };
 
-// --- 無敵網路核心模組 (v54.60 Fast-Fail Sequential) ---
+// --- 無敵網路核心模組 (v54.61 Fast-Fail Sequential) ---
 
 const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, parentSignal = null) => {
     if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
@@ -532,7 +532,7 @@ const App = () => {
   const [feeDiscount, setFeeDiscount] = useState(1); 
   const [toast, setToast] = useState(null);
   const [appLogs, setAppLogs] = useState([]); 
-  const [customProxyUrl, setCustomProxyUrl] = useState(''); // 新增：自訂 Proxy 狀態
+  const [customProxyUrl, setCustomProxyUrl] = useState(''); 
   
   // 新增：用於真正中斷背景查詢的信號參考
   const globalAbortRef = useRef(null);
@@ -781,7 +781,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.60 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v54.61 Fast-Fail Engine) ===");
     if (globalAbortRef.current) {
         globalAbortRef.current.abort(); // 終止前一個尚未完成的請求
     }
@@ -1587,23 +1587,30 @@ const App = () => {
       if (csvText && !csvText.trim().toLowerCase().startsWith('<html')) {
           Papa.parse(csvText, { header: true, skipEmptyLines: true, complete: processCSVResults, error: (err) => { setError(`解析失敗: ${err.message}`); setLoading(false); } });
       } else {
-          console.warn("[Network] 啟動 PapaParse 原生下載備援...");
+          console.warn("[Network] 啟 মাতৃ PapaParse 原生下載備援...");
           Papa.parse(cleanUrl, { download: true, header: true, skipEmptyLines: true, complete: processCSVResults, error: (err) => { setError(`全部讀取策略皆失敗: ${err.message}`); setLoading(false); } });
       }
     } catch (e) { setError(`讀取失敗: ${e.message}`); setLoading(false); }
   };
 
-  const handleFetchButton = () => { if (!sheetUrl) { alert("請輸入 URL"); return; } performFetch(sheetUrl); };
-  
-  const handleSaveSettings = () => {
+  const handleFetchButton = () => { 
+    // 統一儲存所有設定 (API Key, Proxy, 手續費, 排序等)
     localStorage.setItem('gemini_api_key', geminiApiKey);
     localStorage.setItem('gemini_model', selectedModel);
     localStorage.setItem('fee_discount', feeDiscount);
-    localStorage.setItem('custom_proxy_url', customProxyUrl); // 儲存自訂 Proxy
+    localStorage.setItem('custom_proxy_url', customProxyUrl);
     localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
     if (customOrder.length > 0) localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
-    setToast("設定已儲存！"); 
-    if (rawData.length > 0) processData(rawData, realTimePrices);
+    
+    setToast("設定已儲存！開始更新資料..."); 
+
+    if (!sheetUrl) { 
+        alert("請輸入 Google Sheets CSV 連結"); 
+        // 若無網址但有舊資料，仍重新計算手續費等設定套用
+        if (rawData.length > 0) processData(rawData, realTimePrices, etfExtraData);
+        return; 
+    } 
+    performFetch(sheetUrl); 
   };
   
   const handleChatSend = async () => {
@@ -1802,7 +1809,6 @@ const App = () => {
                 </div>
                 <button 
                     onClick={() => { 
-                        fetchCancelRef.current = true; // 發出中止信號
                         if (globalAbortRef.current) {
                             globalAbortRef.current.abort(); // 立刻斷開所有進行中的 fetch
                         }
@@ -2409,7 +2415,6 @@ const App = () => {
                 <label className="block text-sm font-medium text-slate-300 mb-2">Google Gemini API Key (AI 分析用)</label>
                 <div className="flex gap-2">
                     <input type="password" value={geminiApiKey} onChange={(e) => setGeminiApiKey(e.target.value)} placeholder="請輸入 API Key (例如: AIzaSy...)" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
-                    <button onClick={handleSaveSettings} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-sm font-medium transition-colors"><Save className="w-4 h-4 mr-1 inline" />儲存</button>
                 </div>
                 <p className="mt-2 text-xs text-slate-500">* 單機版需自行申請 API Key 才能使用 AI 功能。<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 ml-1 underline">前往申請</a></p>
               </div>
@@ -2440,7 +2445,7 @@ const App = () => {
               </div>
 
               {error && <div className="p-3 bg-red-900/30 border border-red-500/50 text-red-300 rounded-md text-sm">{String(error)}</div>}
-              <button onClick={handleFetchButton} disabled={loading} className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 focus:ring-offset-slate-800 transition-colors ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}>{loading ? '資料載入中...' : '匯入並更新股價'}</button>
+              <button onClick={handleFetchButton} disabled={loading} className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 focus:ring-offset-slate-800 transition-colors ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}>{loading ? '資料載入中...' : '儲存設定並匯入更新股價'}</button>
               
               {/* --- 新增：系統執行紀錄 (Logs) 區塊 --- */}
               <div className="pt-6 mt-6 border-t border-slate-700">
