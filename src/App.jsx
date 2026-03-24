@@ -11,10 +11,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.61 (Ultimate Resilience Engine)
+ * Alpha 投資戰情室 v54.62 (Ultimate Resilience Engine & AI Consensus)
  * * [重大架構升級]
  * 1. 終極防禦緩存 (Last Known Good State)：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份，保證系統永不無資料可用。
  * 2. 自動防呆儲存：在點擊更新股價時，會自動將畫面上的 Proxy 設定存入 LocalStorage，解決忘記點擊儲存導致系統未套用自訂 Proxy 的問題。
+ * 3. AI 多數決共識委員會：針對個股分析，自動進行 3 次獨立隨機判定，並以多數決 (Mode) 決定最終燈號，解決單次 AI 分析結果不穩定的痛點。
  */
 
 // --- 靜態配置 ---
@@ -510,6 +511,7 @@ const App = () => {
   const [aiSummary, setAiSummary] = useState(null);
   const [aiDetail, setAiDetail] = useState(null);
   const [isAiSummarizing, setIsAiSummarizing] = useState(false);
+  const [aiProgressMsg, setAiProgressMsg] = useState(''); // 新增：用於顯示多數決分析進度
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
@@ -781,7 +783,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.61 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v54.62 Fast-Fail Engine) ===");
     if (globalAbortRef.current) {
         globalAbortRef.current.abort(); // 終止前一個尚未完成的請求
     }
@@ -1098,7 +1100,7 @@ const App = () => {
     }
   };
 
-  const callGeminiWithFallback = async (prompt) => {
+  const callGeminiWithFallback = async (prompt, customTemperature = 0.2) => {
     if (!geminiApiKey) {
       const confirm = window.confirm("尚未設定 AI 金鑰。\n\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n\n是否現在前往「設定」頁面輸入？");
       if (confirm) setActiveTab('config');
@@ -1120,7 +1122,7 @@ const App = () => {
           const response = await fetch(`${aiUrl}?key=${geminiApiKey}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 4096, temperature: 0.2 } }),
+              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 4096, temperature: customTemperature } }),
               signal: controller.signal
             });
           clearTimeout(timeoutId);
@@ -1223,6 +1225,7 @@ const App = () => {
         }
 
         setIsAiSummarizing(true); setAiSummary(null); setAiDetail(null); setUsedModel(null); setIsCachedResult(false); setAnalysisSymbol(symbol); 
+        setAiProgressMsg("準備進行多次獨立分析...");
         setAiSignals(prev => { const next = { ...prev }; delete next[symbol]; return next; });
 
         const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
@@ -1406,30 +1409,81 @@ const App = () => {
       [SIGNAL] (請輸出單一詞彙，例如：ADD_ALL)`;
 
         try {
-          console.log(`[AI 個股分析發送字句 (Prompt) - ${symbol}]:\n`, prompt);
-          const aiStart = performance.now();
-          const { text, model } = await callGeminiWithFallback(prompt);
-          console.log(`[Timer] AI 分析 (${symbol}) 耗時: ${(performance.now() - aiStart).toFixed(2)} ms`);
-          setUsedModel(model);
-          const summaryMatch = text.match(/\[SUMMARY\]\s*([\s\S]*?)\s*(?=\[DETAIL\]|$)/i);
-          const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
-          const signalMatch = text.match(/\[SIGNAL\]\s*[:：\-]?\s*(ADD_ALL|ADD_BASIC|ADD_BONUS|REDUCE|HOLD)/i);
-          
-          let summary = summaryMatch ? summaryMatch[1].trim() : "分析完成"; summary = summary.replace(/[`*#]/g, '').replace(/\n/g, ' ').trim();
-          const detail = detailMatch ? detailMatch[1].trim() : text;
-          const signalCode = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
-          setAiSummary(String(summary)); setAiDetail(String(detail)); setAiSignals(prev => ({ ...prev, [symbol]: signalCode }));
-          updateAiCache(symbol, { summary, detail, signal: signalCode, model }, dataDate); 
-          setIsDetailExpanded(true); 
+            console.log(`[AI 個股分析發送字句 (Prompt) - ${symbol}]:\n`, prompt);
+            const MAX_VOTES = 3;
+            let results = [];
+            
+            // 執行 3 次獨立 API 呼叫以取得多數決
+            for (let i = 1; i <= MAX_VOTES; i++) {
+                setAiProgressMsg(`AI 委員會投票中... (第 ${i}/${MAX_VOTES} 次獨立分析)`);
+                const aiStart = performance.now();
+                try {
+                    // 稍微提高 Temperature (0.5) 以獲取更多樣的獨立思考觀點
+                    const { text, model } = await callGeminiWithFallback(prompt, 0.5);
+                    console.log(`[Timer] AI 分析 (${symbol} - 第 ${i} 次) 耗時: ${(performance.now() - aiStart).toFixed(2)} ms`);
+                    
+                    const summaryMatch = text.match(/\[SUMMARY\]\s*([\s\S]*?)\s*(?=\[DETAIL\]|$)/i);
+                    const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
+                    const signalMatch = text.match(/\[SIGNAL\]\s*[:：\-]?\s*(ADD_ALL|ADD_BASIC|ADD_BONUS|REDUCE|HOLD)/i);
+                    
+                    let parsedSummary = summaryMatch ? summaryMatch[1].trim().replace(/[`*#]/g, '').replace(/\n/g, ' ') : "分析完成";
+                    const parsedDetail = detailMatch ? detailMatch[1].trim() : text;
+                    const parsedSignal = signalMatch ? signalMatch[1].toUpperCase() : 'HOLD';
+                    
+                    results.push({ summary: parsedSummary, detail: parsedDetail, signal: parsedSignal, model });
+                } catch (err) {
+                    console.error(`[AI 分析解析錯誤 - ${symbol} - 第 ${i} 次]:`, err);
+                }
+                
+                // 加入延遲以避免短時間過多請求導致 Rate Limit (429)
+                if (i < MAX_VOTES) await delay(1000);
+            }
+
+            if (results.length === 0) {
+                throw new Error("所有獨立分析皆失敗，無法取得共識。");
+            }
+
+            // 統計並取得多數決 (Mode)
+            const signalCounts = {};
+            results.forEach(r => {
+                signalCounts[r.signal] = (signalCounts[r.signal] || 0) + 1;
+            });
+            
+            let majoritySignal = results[0].signal;
+            let maxCount = 0;
+            for (const sig in signalCounts) {
+                if (signalCounts[sig] > maxCount) {
+                    maxCount = signalCounts[sig];
+                    majoritySignal = sig;
+                }
+            }
+
+            // 挑選符合多數決的第一份結果作為代表性詳細報告
+            const finalResult = results.find(r => r.signal === majoritySignal) || results[0];
+            
+            // 在標題補上多數決的標籤
+            const consensusSummary = `【多數決共識 (${maxCount}/${results.length})】${finalResult.summary}`;
+            
+            setAiSummary(consensusSummary); 
+            setAiDetail(finalResult.detail); 
+            setAiSignals(prev => ({ ...prev, [symbol]: majoritySignal }));
+            setUsedModel(finalResult.model);
+            updateAiCache(symbol, { summary: consensusSummary, detail: finalResult.detail, signal: majoritySignal, model: finalResult.model }, dataDate); 
+            setIsDetailExpanded(true); 
+            
         } catch (err) { 
-            console.error(`[AI 分析解析錯誤 - ${symbol}]:`, err);
+            console.error(`[AI 分析全域錯誤 - ${symbol}]:`, err);
             setAiSummary(String(err.message) || "分析暫時無法使用。"); 
-        } 
+        } finally {
+            setIsAiSummarizing(false); 
+            setAiProgressMsg('');
+            delete analysisInProgressRef.current[symbol];
+        }
     } catch(err) {
         console.error(`[AI 分析全域錯誤 - ${symbol}]:`, err);
         setAiSummary("分析發生預期外錯誤，請稍後再試。");
-    } finally {
         setIsAiSummarizing(false); 
+        setAiProgressMsg('');
         delete analysisInProgressRef.current[symbol];
     }
   };
@@ -2080,7 +2134,7 @@ const App = () => {
 
                 <div className="flex-1 md:overflow-y-auto bg-slate-900/50 rounded-lg p-3 border border-slate-700 shadow-inner custom-scrollbar">
                   {isAiSummarizing ? (
-                    <div className="flex items-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin mr-2" />AI 正在分析中...</div>
+                    <div className="flex items-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin mr-2" />{aiProgressMsg || 'AI 正在分析中...'}</div>
                   ) : (
                     <>
                       {aiSummary ? <div className="mb-2"><p className="text-slate-300 text-sm leading-relaxed border-l-2 border-purple-500 pl-3">{String(aiSummary)}</p></div> : <div className="text-slate-500 text-sm">暫無 AI 分析數據 (請點擊重新分析)</div>}
