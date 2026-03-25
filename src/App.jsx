@@ -11,11 +11,12 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.62 (Ultimate Resilience Engine & AI Consensus)
+ * Alpha 投資戰情室 v54.63 (Ultimate Resilience Engine & Enhanced UI)
  * * [重大架構升級]
  * 1. 終極防禦緩存 (Last Known Good State)：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份，保證系統永不無資料可用。
  * 2. 自動防呆儲存：在點擊更新股價時，會自動將畫面上的 Proxy 設定存入 LocalStorage，解決忘記點擊儲存導致系統未套用自訂 Proxy 的問題。
  * 3. AI 多數決共識委員會：針對個股分析，自動進行 3 次獨立隨機判定，並以多數決 (Mode) 決定最終燈號，解決單次 AI 分析結果不穩定的痛點。
+ * 4. 圖表體驗優化：強化 CustomChartTooltip 邏輯，確保在放大圖表時也能強制精準顯示當日的買入紀錄；過濾無效的圖表寬高 Console 警告。
  */
 
 // --- 靜態配置 ---
@@ -204,7 +205,7 @@ const withTimer = async (name, promiseFn) => {
     }
 };
 
-// --- 無敵網路核心模組 (v54.61 Fast-Fail Sequential) ---
+// --- 無敵網路核心模組 (v54.63 Fast-Fail Sequential) ---
 
 const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, parentSignal = null) => {
     if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
@@ -373,7 +374,7 @@ const fetchOfficialDataWithDegradation = async (url, parentSignal = null) => {
         return null;
     }
 
-    console.log(`[Network] 🔄 啟動 Proxy 快刀序列備援抓取微型官方資料: ${url.split('/').pop().split('?')[0]}`);
+    console.log(`[Network] 🔄 啟提 Proxy 快刀序列備援抓取微型官方資料: ${url.split('/').pop().split('?')[0]}`);
     return await smartFetch(url, 'json', 4500, parentSignal); // 微型檔案給予極短 timeout
 };
 
@@ -457,18 +458,44 @@ const Toast = ({ message, onClose }) => {
   return (<div className="fixed bottom-20 md:bottom-10 left-1/2 transform -translate-x-1/2 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg flex items-center z-[100] animate-fade-in-up"><CheckCircle className="w-5 h-5 mr-2" /><span>{String(message)}</span></div>);
 };
 
-// 使用字串轉型保護，防止 Object Child Error
+// 強化版 CustomChartTooltip：直接讀取底層 raw payload，解決放大或 Scatter 點失焦問題
 const CustomChartTooltip = ({ active, payload, label }) => {
   if (active && payload && payload.length) {
+    // 強制從第一個 payload 的底層資料提取我們注入的 dataPoint
+    const dataPoint = payload[0].payload; 
+    
     return (
-      <div className="p-3 border border-slate-700 rounded-lg shadow-xl bg-slate-800 text-slate-100 text-xs">
+      <div className="p-3 border border-slate-700 rounded-lg shadow-xl bg-slate-800/95 backdrop-blur-sm text-slate-100 text-xs z-50">
         <p className="mb-2 font-bold text-slate-300">{`日期: ${String(label)}`}</p>
-        {payload.filter(p => p.dataKey !== 'BB_Range').map((entry, index) => (
+        
+        {/* 渲染一般指標數據 */}
+        {payload.filter(p => p.dataKey !== 'BB_Range' && p.dataKey !== 'buyPricePoint').map((entry, index) => (
           <div key={index} className="flex items-center justify-between gap-4 mb-1">
             <span style={{ color: entry.color }}>{String(entry.name)}</span>
             <span className="font-mono font-medium">{formatPrice(entry.value)}</span>
           </div>
         ))}
+        
+        {/* 若此日期有發生買入行為，強制顯示買入明細 (不受套件過濾影響) */}
+        {dataPoint && dataPoint.buyAction && (
+          <div className="mt-2 pt-2 border-t border-slate-600 border-dashed">
+            <div className="text-yellow-400 font-bold mb-1 flex items-center">
+              <Target className="w-3 h-3 mr-1" /> 買入紀錄
+            </div>
+            <div className="flex items-center justify-between gap-4 mb-1">
+              <span className="text-slate-400">買入價</span>
+              <span className="font-mono font-medium text-yellow-400">{formatPrice(dataPoint.buyAction['價格'])}</span>
+            </div>
+            <div className="flex items-center justify-between gap-4 mb-1">
+              <span className="text-slate-400">股數</span>
+              <span className="font-mono text-slate-200">{dataPoint.buyAction['股數']}</span>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-slate-400">策略</span>
+              <span className="text-slate-200">{dataPoint.buyAction['策略']}</span>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -511,7 +538,7 @@ const App = () => {
   const [aiSummary, setAiSummary] = useState(null);
   const [aiDetail, setAiDetail] = useState(null);
   const [isAiSummarizing, setIsAiSummarizing] = useState(false);
-  const [aiProgressMsg, setAiProgressMsg] = useState(''); // 新增：用於顯示多數決分析進度
+  const [aiProgressMsg, setAiProgressMsg] = useState(''); 
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
@@ -536,7 +563,6 @@ const App = () => {
   const [appLogs, setAppLogs] = useState([]); 
   const [customProxyUrl, setCustomProxyUrl] = useState(''); 
   
-  // 新增：用於真正中斷背景查詢的信號參考
   const globalAbortRef = useRef(null);
 
   useEffect(() => {
@@ -545,7 +571,6 @@ const App = () => {
     const originalError = console.error;
 
     const handleLog = (level, originalFn, ...args) => {
-      originalFn(...args); 
       const msg = args.map(a => {
         if (a instanceof Error) return a.message;
         if (typeof a === 'object') {
@@ -553,6 +578,13 @@ const App = () => {
         }
         return String(a);
       }).join(' ');
+      
+      // 靜默過濾 Recharts 在響應式排版瞬間產生的無害負數寬高警告，避免洗版
+      if (level === 'warn' && msg.includes('of chart should be greater than 0')) {
+         return;
+      }
+      
+      originalFn(...args); 
       
       setAppLogs(prev => [...prev, { time: new Date().toLocaleTimeString('zh-TW', { hour12: false }), level, msg }].slice(-200));
     };
@@ -636,7 +668,6 @@ const App = () => {
        sortableItems.sort((a, b) => {
          const idxA = customOrder.indexOf(a['標的']);
          const idxB = customOrder.indexOf(b['標的']);
-         // 修正：當新標的尚未在自訂排序清單內時，將其排至最後方避免 -1 擾亂排序
          const finalIdxA = idxA === -1 ? 9999 : idxA;
          const finalIdxB = idxB === -1 ? 9999 : idxB;
          return finalIdxA - finalIdxB;
@@ -656,7 +687,6 @@ const App = () => {
             const numB = typeof bValue === 'number' ? bValue : (Number(bValue) || 0);
             return sortConfig.direction === 'asc' ? numA - numB : numB - numA;
         } else {
-            // 修正防呆：確保在存取 undefined 時不會中斷排序比對
             if (aValue === undefined || aValue === null) aValue = '';
             if (bValue === undefined || bValue === null) bValue = '';
 
@@ -783,7 +813,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.62 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v54.63 Fast-Fail Engine) ===");
     if (globalAbortRef.current) {
         globalAbortRef.current.abort(); // 終止前一個尚未完成的請求
     }
@@ -1641,7 +1671,7 @@ const App = () => {
       if (csvText && !csvText.trim().toLowerCase().startsWith('<html')) {
           Papa.parse(csvText, { header: true, skipEmptyLines: true, complete: processCSVResults, error: (err) => { setError(`解析失敗: ${err.message}`); setLoading(false); } });
       } else {
-          console.warn("[Network] 啟 মাতৃ PapaParse 原生下載備援...");
+          console.warn("[Network] 啟動 PapaParse 原生下載備援...");
           Papa.parse(cleanUrl, { download: true, header: true, skipEmptyLines: true, complete: processCSVResults, error: (err) => { setError(`全部讀取策略皆失敗: ${err.message}`); setLoading(false); } });
       }
     } catch (e) { setError(`讀取失敗: ${e.message}`); setLoading(false); }
