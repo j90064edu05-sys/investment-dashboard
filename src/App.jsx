@@ -11,12 +11,13 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.63 (Ultimate Resilience Engine & Enhanced UI)
+ * Alpha 投資戰情室 v54.64 (Ultimate Resilience Engine & Enhanced UI)
  * * [重大架構升級]
  * 1. 終極防禦緩存 (Last Known Good State)：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份，保證系統永不無資料可用。
  * 2. 自動防呆儲存：在點擊更新股價時，會自動將畫面上的 Proxy 設定存入 LocalStorage，解決忘記點擊儲存導致系統未套用自訂 Proxy 的問題。
  * 3. AI 多數決共識委員會：針對個股分析，自動進行 3 次獨立隨機判定，並以多數決 (Mode) 決定最終燈號，解決單次 AI 分析結果不穩定的痛點。
  * 4. 圖表體驗優化：強化 CustomChartTooltip 邏輯，確保在放大圖表時也能強制精準顯示當日的買入紀錄；過濾無效的圖表寬高 Console 警告。
+ * 5. 系統紀錄優化：Logs 區塊將自動捲動至最底部，確保預設顯示最新的一筆紀錄。
  */
 
 // --- 靜態配置 ---
@@ -205,7 +206,7 @@ const withTimer = async (name, promiseFn) => {
     }
 };
 
-// --- 無敵網路核心模組 (v54.63 Fast-Fail Sequential) ---
+// --- 無敵網路核心模組 (v54.64 Fast-Fail Sequential) ---
 
 const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, parentSignal = null) => {
     if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
@@ -563,7 +564,10 @@ const App = () => {
   const [appLogs, setAppLogs] = useState([]); 
   const [customProxyUrl, setCustomProxyUrl] = useState(''); 
   
+  // 新增：用於真正中斷背景查詢的信號參考
   const globalAbortRef = useRef(null);
+  // 新增：指向 Log 容器的 Reference，用於控制容器本身的滾動條
+  const logsContainerRef = useRef(null);
 
   useEffect(() => {
     const originalLog = console.log;
@@ -599,6 +603,13 @@ const App = () => {
       console.error = originalError;
     };
   }, []);
+
+  // 修正：確保只有系統日誌本身的容器進行滾動，而不會帶動整個網頁畫面
+  useEffect(() => {
+    if (logsContainerRef.current) {
+        logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+    }
+  }, [appLogs]);
 
   // 2. Memos - Core Data
   const summary = useMemo(() => {
@@ -668,6 +679,7 @@ const App = () => {
        sortableItems.sort((a, b) => {
          const idxA = customOrder.indexOf(a['標的']);
          const idxB = customOrder.indexOf(b['標的']);
+         // 修正：當新標的尚未在自訂排序清單內時，將其排至最後方避免 -1 擾亂排序
          const finalIdxA = idxA === -1 ? 9999 : idxA;
          const finalIdxB = idxB === -1 ? 9999 : idxB;
          return finalIdxA - finalIdxB;
@@ -687,6 +699,7 @@ const App = () => {
             const numB = typeof bValue === 'number' ? bValue : (Number(bValue) || 0);
             return sortConfig.direction === 'asc' ? numA - numB : numB - numA;
         } else {
+            // 修正防呆：確保在存取 undefined 時不會中斷排序比對
             if (aValue === undefined || aValue === null) aValue = '';
             if (bValue === undefined || bValue === null) bValue = '';
 
@@ -813,7 +826,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.63 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v54.64 Fast-Fail Engine) ===");
     if (globalAbortRef.current) {
         globalAbortRef.current.abort(); // 終止前一個尚未完成的請求
     }
@@ -2544,7 +2557,7 @@ const App = () => {
                     <Trash2 className="w-3 h-3 mr-1" /> 清除紀錄
                   </button>
                 </div>
-                <div className="bg-slate-900 border border-slate-700 rounded-md p-3 h-64 overflow-y-auto font-mono text-[10px] sm:text-xs custom-scrollbar">
+                <div ref={logsContainerRef} className="bg-slate-900 border border-slate-700 rounded-md p-3 h-64 overflow-y-auto font-mono text-[10px] sm:text-xs custom-scrollbar">
                   {appLogs.length === 0 ? (
                     <span className="text-slate-500">目前沒有紀錄...</span>
                   ) : (
