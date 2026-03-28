@@ -1760,11 +1760,18 @@ const App = () => {
   const requestSort = (key) => {
     let direction = 'desc'; 
     if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
-    setSortConfig({ key, direction });
+    const newSortConfig = { key, direction };
+    setSortConfig(newSortConfig);
+    // 即時記憶排序設定
+    localStorage.setItem('investment_sort_config', JSON.stringify(newSortConfig));
   };
 
   const moveItem = (symbol, direction) => {
-    if (sortConfig.key !== 'manual') setSortConfig({ key: 'manual', direction: 'asc' });
+    if (sortConfig.key !== 'manual') {
+        const manualConfig = { key: 'manual', direction: 'asc' };
+        setSortConfig(manualConfig);
+        localStorage.setItem('investment_sort_config', JSON.stringify(manualConfig));
+    }
     setCustomOrder(prev => {
       let newOrder = [...prev];
       // 確保所有的標的都在排序清單中，以防新匯入的標的遺漏導致點擊失效
@@ -1778,6 +1785,9 @@ const App = () => {
       if (newIndex < 0 || newIndex >= newOrder.length) return newOrder;
       
       [newOrder[currentIndex], newOrder[newIndex]] = [newOrder[newIndex], newOrder[currentIndex]];
+      
+      // 即時記憶自訂清單順序
+      localStorage.setItem('investment_custom_order', JSON.stringify(newOrder));
       return newOrder;
     });
   };
