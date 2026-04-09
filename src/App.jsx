@@ -7,17 +7,19 @@ import {
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
   TrendingUp, DollarSign, Briefcase, FileText, AlertCircle, BarChart2, 
   Loader2, Wifi, WifiOff, LineChart as LineIcon, Info, AlertTriangle, 
-  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair, Repeat, BarChart4, TrendingDown, Percent, Layers, Link as LinkIcon, XCircle, PlusCircle, Trash2
+  ArrowUp, ArrowDown, ArrowUpDown, Move, Sparkles, Bot, ChevronDown, ChevronUp, FileSearch, Save, Key, Cpu, Calculator, Globe, CheckCircle, Database, BrainCircuit, Lock, MessageSquare, Send, Target, Clock, Activity, ClipboardCheck, ShieldAlert, Crosshair, Repeat, BarChart4, TrendingDown, Percent, Layers, Link as LinkIcon, XCircle, PlusCircle, Trash2, Edit
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.64 (Ultimate Resilience Engine & Enhanced UI)
+ * Alpha 投資戰情室 v54.67 (Ultimate Resilience Engine & Data Patching Tool)
  * * [重大架構升級]
  * 1. 終極防禦緩存 (Last Known Good State)：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份，保證系統永不無資料可用。
  * 2. 自動防呆儲存：在點擊更新股價時，會自動將畫面上的 Proxy 設定存入 LocalStorage，解決忘記點擊儲存導致系統未套用自訂 Proxy 的問題。
  * 3. AI 多數決共識委員會：針對個股分析，自動進行 3 次獨立隨機判定，並以多數決 (Mode) 決定最終燈號，解決單次 AI 分析結果不穩定的痛點。
  * 4. 圖表體驗優化：強化 CustomChartTooltip 邏輯，確保在放大圖表時也能強制精準顯示當日的買入紀錄；過濾無效的圖表寬高 Console 警告。
  * 5. 系統紀錄優化：Logs 區塊將自動捲動至最底部，確保預設顯示最新的一筆紀錄。
+ * 6. 真實昨收校正 (True PrevClose Patch)：解決 Yahoo 歷史 K 線延遲導致少一天時，AI 誤判漲跌的問題。強制抽取官方即時 MIS 與 Yahoo Meta 中的「真實昨收價」餵給 AI，確保最高交易鐵律 100% 準確。
+ * 7. 使用者自訂 K 線縫合器 (Manual Data Patching)：允許使用者針對特定標的，手動補齊 Yahoo 漏給的特定日期歷史收盤價，並自動重算所有技術指標與 AI 判定。
  */
 
 // --- 靜態配置 ---
@@ -143,7 +145,8 @@ const savePriceCache = (newPrices, extraData) => {
             yield: extraData[symbol]?.yield || existing.yield,
             yieldSource: extraData[symbol]?.yieldSource || existing.yieldSource,
             dateStr: extraData[symbol]?.dateStr || existing.dateStr,
-            priceSource: extraData[symbol]?.priceSource || existing.priceSource
+            priceSource: extraData[symbol]?.priceSource || existing.priceSource,
+            prevClose: extraData[symbol]?.prevClose || existing.prevClose // 保存真實昨收
         }; 
     });
     localStorage.setItem('investment_price_cache', JSON.stringify(updatedCache));
@@ -206,7 +209,7 @@ const withTimer = async (name, promiseFn) => {
     }
 };
 
-// --- 無敵網路核心模組 (v54.64 Fast-Fail Sequential) ---
+// --- 無敵網路核心模組 (v54.67 Fast-Fail Sequential) ---
 
 const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, parentSignal = null) => {
     if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
@@ -467,7 +470,11 @@ const CustomChartTooltip = ({ active, payload, label }) => {
     
     return (
       <div className="p-3 border border-slate-700 rounded-lg shadow-xl bg-slate-800/95 backdrop-blur-sm text-slate-100 text-xs z-50">
-        <p className="mb-2 font-bold text-slate-300">{`日期: ${String(label)}`}</p>
+        <p className="mb-2 font-bold text-slate-300 flex items-center">
+            {`日期: ${String(label)}`}
+            {dataPoint.isPatched && <span className="ml-2 text-[10px] bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded border border-blue-500/30">官方現價補齊</span>}
+            {dataPoint.isManual && <span className="ml-2 text-[10px] bg-purple-900/50 text-purple-300 px-1.5 py-0.5 rounded border border-purple-500/30">使用者自訂</span>}
+        </p>
         
         {/* 渲染一般指標數據 */}
         {payload.filter(p => p.dataKey !== 'BB_Range' && p.dataKey !== 'buyPricePoint').map((entry, index) => (
@@ -563,6 +570,12 @@ const App = () => {
   const [toast, setToast] = useState(null);
   const [appLogs, setAppLogs] = useState([]); 
   const [customProxyUrl, setCustomProxyUrl] = useState(''); 
+
+  // 新增：使用者手動補齊 K 線資料的 State
+  const [showManualPatch, setShowManualPatch] = useState(false);
+  const [patchDate, setPatchDate] = useState('');
+  const [patchPrice, setPatchPrice] = useState('');
+  const [manualKLinesState, setManualKLinesState] = useState({});
   
   // 新增：用於真正中斷背景查詢的信號參考
   const globalAbortRef = useRef(null);
@@ -679,7 +692,6 @@ const App = () => {
        sortableItems.sort((a, b) => {
          const idxA = customOrder.indexOf(a['標的']);
          const idxB = customOrder.indexOf(b['標的']);
-         // 修正：當新標的尚未在自訂排序清單內時，將其排至最後方避免 -1 擾亂排序
          const finalIdxA = idxA === -1 ? 9999 : idxA;
          const finalIdxB = idxB === -1 ? 9999 : idxB;
          return finalIdxA - finalIdxB;
@@ -699,7 +711,6 @@ const App = () => {
             const numB = typeof bValue === 'number' ? bValue : (Number(bValue) || 0);
             return sortConfig.direction === 'asc' ? numA - numB : numB - numA;
         } else {
-            // 修正防呆：確保在存取 undefined 時不會中斷排序比對
             if (aValue === undefined || aValue === null) aValue = '';
             if (bValue === undefined || bValue === null) bValue = '';
 
@@ -742,8 +753,44 @@ const App = () => {
   const currentChartData = useMemo(() => {
     const baseData = historicalData[`${selectedHistorySymbol}_${timeframe}`];
     if (!baseData || !selectedHistorySymbol) return [];
+    
+    let merged = [...baseData];
+    const currentPrice = realTimePrices[selectedHistorySymbol];
+    const extraData = etfExtraData[selectedHistorySymbol];
+    
+    // --- 核心防禦：補齊 Yahoo API 缺漏的最新 K 線 ---
+    if (currentPrice && merged.length > 0) {
+        let latestDateStr = getTodayDate(); // 預設為 YYYY-MM-DD
+        if (extraData && extraData.dateStr) {
+            const dStr = extraData.dateStr.split(' ')[0]; // 取出 "MM/DD" 或 "YYYY/MM/DD"
+            const parts = dStr.split('/');
+            const today = new Date();
+            if (parts.length === 2) {
+                latestDateStr = `${today.getFullYear()}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+            } else if (parts.length === 3) {
+                latestDateStr = `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+            }
+        }
+        
+        const lastPoint = merged[merged.length - 1];
+        if (lastPoint.date < latestDateStr) {
+            // Yahoo 漏給資料，將官方最新價格與昨天的技術指標結合成一根新 K 線補上
+            merged.push({
+                ...lastPoint,
+                date: latestDateStr,
+                close: currentPrice,
+                isPatched: true
+            });
+        } else if (lastPoint.date === latestDateStr && !lastPoint.isManual) {
+            // 已經有當日資料且非手動補齊，用官方即時價格覆寫以求最準確
+            merged[merged.length - 1] = {
+                ...lastPoint,
+                close: currentPrice
+            };
+        }
+    }
+
     const buys = portfolioData.filter(p => p['標的'] === selectedHistorySymbol);
-    const merged = [...baseData];
     buys.forEach(buy => {
         const rawDate = (buy['日期'] || '').toString().trim().replace(/\//g, '-');
         let closestIdx = merged.findIndex(pt => pt.date === rawDate);
@@ -761,7 +808,7 @@ const App = () => {
         if (closestIdx !== -1) { merged[closestIdx] = { ...merged[closestIdx], buyPricePoint: buy['價格'], buyAction: buy }; }
     });
     return merged;
-  }, [historicalData, selectedHistorySymbol, timeframe, portfolioData]);
+  }, [historicalData, selectedHistorySymbol, timeframe, portfolioData, realTimePrices, etfExtraData]);
 
   // 3. UI Helpers
   const getResponsiveFontSize = (text) => {
@@ -826,7 +873,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.64 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v54.67 Fast-Fail Engine) ===");
     if (globalAbortRef.current) {
         globalAbortRef.current.abort(); // 終止前一個尚未完成的請求
     }
@@ -867,6 +914,7 @@ const App = () => {
     const twseEtfMap = {};
     const tpexEtfMap = {}; 
     const misPriceMap = {}; 
+    const misPrevPriceMap = {}; // 新增：負責儲存官方昨收價
     const misTimeMap = {};
     
     const misEtfNavMap = {};
@@ -963,7 +1011,7 @@ const App = () => {
             }
         }
 
-        // 4. 精準狙擊：MIS 個股現價
+        // 4. 精準狙擊：MIS 個股現價 (此處同時獲取 y=昨收價)
         const twSymbols = symbolsToFetchList.filter(s => s.includes('.TW') || s.includes('.TWO'));
         const missingTwSymbols = twSymbols.filter(s => !misEtfPriceMap[getPureCode(s)] && !misPriceMap[getPureCode(s)]);
         
@@ -985,9 +1033,13 @@ const App = () => {
                     priceRes.msgArray.forEach(item => {
                         const pureCode = getPureCode(item.c);
                         const price = parseFloat(item.z !== '-' ? item.z : item.y);
+                        const yClose = parseFloat(item.y); // 抓取官方昨收價
                         if (!isNaN(price) && price > 0) {
                             misPriceMap[pureCode] = price; 
                             misTimeMap[pureCode] = `${item.d.substring(4,6)}/${item.d.substring(6,8)} ${item.t}`;
+                        }
+                        if (!isNaN(yClose) && yClose > 0) {
+                            misPrevPriceMap[pureCode] = yClose; // 儲存官方昨收價
                         }
                     });
                 }
@@ -1012,6 +1064,11 @@ const App = () => {
                 newPrices[symbol] = misPriceMap[pureCode];
                 extra.dateStr = misTimeMap[pureCode] || getTodayDate().substring(5).replace('-', '/');
                 extra.priceSource = misTimeMap[pureCode] ? "MIS個股" : "官方收盤";
+            }
+            
+            // 寫入昨收價
+            if (misPrevPriceMap[pureCode]) {
+                extra.prevClose = misPrevPriceMap[pureCode];
             }
 
             if (isEtf && misEtfNavMap[pureCode]) { 
@@ -1040,6 +1097,7 @@ const App = () => {
                 if (cachedItem.yield) newEtfData[symbol] = { ...newEtfData[symbol], yield: cachedItem.yield, yieldSource: cachedItem.yieldSource };
                 if (cachedItem.dateStr) newEtfData[symbol] = { ...newEtfData[symbol], dateStr: cachedItem.dateStr };
                 if (cachedItem.priceSource) newEtfData[symbol] = { ...newEtfData[symbol], priceSource: cachedItem.priceSource };
+                if (cachedItem.prevClose) newEtfData[symbol] = { ...newEtfData[symbol], prevClose: cachedItem.prevClose };
             }
             return false; 
         });
@@ -1080,6 +1138,9 @@ const App = () => {
                         extra.priceSource = "Yahoo";
                         if (meta.regularMarketTime) {
                             extra.dateStr = new Intl.DateTimeFormat('zh-TW', {timeZone: 'Asia/Taipei', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}).format(new Date(meta.regularMarketTime * 1000));
+                        }
+                        if (meta.previousClose !== undefined) {
+                            extra.prevClose = meta.previousClose; // 儲存 Yahoo 提供的真實昨收
                         }
                         newEtfData[symbol] = extra;
                         console.log(`[Network] 🟢 Yahoo Chart 成功: ${symbol} = ${meta.regularMarketPrice}`);
@@ -1249,7 +1310,7 @@ const App = () => {
     } finally { setIsHealthChecking(false); }
   };
 
-  const generateFullAnalysis = async (symbol, data, forceUpdate = false) => {
+  const generateFullAnalysis = async (symbol, data, forceUpdate = false, metaPrevCloseOverride = null) => {
     if (!data || data.length === 0) { console.warn("AI Analysis Aborted: No Chart Data"); return; }
     if (analysisInProgressRef.current[symbol]) { console.warn("AI Analysis Aborted: Already in progress"); return; }
     
@@ -1316,7 +1377,14 @@ const App = () => {
         }
 
         const performanceInfo = assetInfo ? `目前損益：${formatCurrency(assetInfo.profitLoss)} (ROI: ${formatPercent(assetInfo.roi)})。` : "";
-        const currentPrice = realTimePrices[symbol] || latest.close; const prevClose = prevDay ? prevDay.close : latest.close;
+        const currentPrice = realTimePrices[symbol] || latest.close; 
+        
+        // 核心修正：使用從官方或 Yahoo meta 獲取的真實昨收價，覆寫因 Yahoo 歷史 K 線延遲所造成的誤判
+        let prevClose = prevDay ? prevDay.close : latest.close;
+        const truePrevClose = metaPrevCloseOverride ?? etfData?.prevClose;
+        if (truePrevClose !== undefined && truePrevClose !== null && !isNaN(truePrevClose)) {
+            prevClose = truePrevClose;
+        }
         
         let keyMetrics = "";
         
@@ -1415,8 +1483,8 @@ const App = () => {
       - 投資定位：${classLabel}
       - 投資模式：${isDCA ? '定期定額 (DCA)' : '單筆投入'}
       - ${performanceInfo}
-      - K線收盤價 (Data Date): ${formatPrice(latest.close)}
-      - 昨日收盤價 (Prev Close): ${formatPrice(prevClose)}
+      - K線最新資料日期: ${dataDate}
+      - 昨日收盤價 (Prev Close): ${formatPrice(prevClose)} ${truePrevClose !== undefined ? '(已由系統自動校正為官方最新昨收價)' : ''}
       - **目前即時價 (Real-time): ${formatPrice(currentPrice)}** (請以此價格判斷當下操作)
       **關鍵數據 (Key Metrics - 必備)**：${keyMetrics}
       **技術指標**：
@@ -1588,6 +1656,7 @@ const App = () => {
       }
 
       const chartData = result?.chart?.result?.[0];
+      const metaPrevClose = chartData?.meta?.previousClose; // 擷取 Yahoo Meta 中的真實昨收
       
       if (chartData && chartData.timestamp) {
         console.log(`[Network] 歷史圖表讀取成功: ${symbol}`);
@@ -1602,6 +1671,23 @@ const App = () => {
             open: quote.open[i] 
         })).filter(d => d.close != null && d.high != null);
         
+        // --- 補齊自訂歷史 K 線 (手動修復 Yahoo 漏檔) ---
+        const manualKLines = JSON.parse(localStorage.getItem('investment_manual_klines') || '{}');
+        const symbolManualData = manualKLines[symbol] || {};
+        Object.keys(symbolManualData).forEach(date => {
+            const price = parseFloat(symbolManualData[date]);
+            const existingIdx = rawPoints.findIndex(p => p.date === date);
+            const newData = { date, close: price, open: price, high: price, low: price, isManual: true };
+            if (existingIdx >= 0) {
+                rawPoints[existingIdx] = { ...rawPoints[existingIdx], ...newData };
+            } else {
+                rawPoints.push(newData);
+            }
+        });
+        // 確保資料依時間正確排序，以免技術指標錯亂
+        rawPoints.sort((a, b) => new Date(a.date) - new Date(b.date));
+        // ---------------------------------------------
+
         const techStart = performance.now();
         const processedData = processTechnicalData(rawPoints);
         console.log(`[Timer] 計算技術指標 (${symbol}) 耗時: ${(performance.now() - techStart).toFixed(2)} ms`);
@@ -1611,7 +1697,7 @@ const App = () => {
         setHistoryLoading(false);
 
         if (geminiApiKey) {
-             await generateFullAnalysis(symbol, processedData); 
+             await generateFullAnalysis(symbol, processedData, false, metaPrevClose); 
         } else {
              if(!aiSummary) setAiSummary("請設定 API Key 以啟用 AI 分析。");
         }
@@ -1671,6 +1757,7 @@ const App = () => {
             Object.keys(cachedPrices).forEach(key => {
                 if(cachedPrices[key]?.nav) { cachedEtfData[key] = { ...cachedEtfData[key], nav: cachedPrices[key].nav, navSource: cachedPrices[key].navSource }; }
                 if(cachedPrices[key]?.yield) { cachedEtfData[key] = { ...cachedEtfData[key], yield: cachedPrices[key].yield, yieldSource: cachedPrices[key].yieldSource }; }
+                if(cachedPrices[key]?.prevClose) { cachedEtfData[key] = { ...cachedEtfData[key], prevClose: cachedPrices[key].prevClose }; }
             });
             setEtfExtraData(cachedEtfData);
             
@@ -1792,6 +1879,47 @@ const App = () => {
     });
   };
 
+  // --- 手動補齊 K 線 Handler ---
+  const handleAddPatch = () => {
+    if (!patchDate || !patchPrice || !selectedHistorySymbol) return;
+    const currentObj = JSON.parse(localStorage.getItem('investment_manual_klines') || '{}');
+    if (!currentObj[selectedHistorySymbol]) currentObj[selectedHistorySymbol] = {};
+    currentObj[selectedHistorySymbol][patchDate] = parseFloat(patchPrice);
+    
+    localStorage.setItem('investment_manual_klines', JSON.stringify(currentObj));
+    setManualKLinesState(currentObj);
+    setPatchDate('');
+    setPatchPrice('');
+    setToast(`已新增 ${selectedHistorySymbol} 的自訂資料，重新繪製圖表中...`);
+    
+    // 觸發重新抓取與分析
+    setHistoricalData(prev => {
+        const next = { ...prev };
+        delete next[`${selectedHistorySymbol}_${timeframe}`];
+        return next;
+    });
+    fetchHistoricalData(selectedHistorySymbol, timeframe);
+  };
+
+  const handleDeletePatch = (date) => {
+    if (!selectedHistorySymbol) return;
+    const currentObj = JSON.parse(localStorage.getItem('investment_manual_klines') || '{}');
+    if (currentObj[selectedHistorySymbol] && currentObj[selectedHistorySymbol][date]) {
+        delete currentObj[selectedHistorySymbol][date];
+        localStorage.setItem('investment_manual_klines', JSON.stringify(currentObj));
+        setManualKLinesState(currentObj);
+        setToast(`已移除 ${date} 的自訂資料，重新繪製圖表中...`);
+        
+        // 觸發重新抓取與分析
+        setHistoricalData(prev => {
+            const next = { ...prev };
+            delete next[`${selectedHistorySymbol}_${timeframe}`];
+            return next;
+        });
+        fetchHistoricalData(selectedHistorySymbol, timeframe);
+    }
+  };
+
   const SortIcon = ({ columnKey }) => {
     if (sortConfig.key !== columnKey) return <ArrowUpDown className="w-3 h-3 ml-1 text-slate-600 opacity-50" />;
     return sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3 ml-1 text-blue-400" /> : <ArrowDown className="w-3 h-3 ml-1 text-blue-400" />;
@@ -1806,7 +1934,8 @@ const App = () => {
     const savedOrder = localStorage.getItem('investment_custom_order');
     const savedSettings = localStorage.getItem('investment_settings');
     const savedClassifications = localStorage.getItem('investment_asset_classifications');
-    const savedProxyUrl = localStorage.getItem('custom_proxy_url'); // 載入自訂 Proxy
+    const savedProxyUrl = localStorage.getItem('custom_proxy_url'); 
+    const savedManualKLines = localStorage.getItem('investment_manual_klines');
 
     if (savedKey) setGeminiApiKey(savedKey);
     const isValidModel = AVAILABLE_MODELS.some(m => m.id === savedModel);
@@ -1816,7 +1945,8 @@ const App = () => {
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount));
     if (savedSort) setSortConfig(JSON.parse(savedSort));
     if (savedOrder) setCustomOrder(JSON.parse(savedOrder));
-    if (savedProxyUrl) setCustomProxyUrl(savedProxyUrl); // 設定初始自訂 Proxy
+    if (savedProxyUrl) setCustomProxyUrl(savedProxyUrl); 
+    if (savedManualKLines) setManualKLinesState(JSON.parse(savedManualKLines));
 
     let initialSettings = {};
     if (savedSettings) {
@@ -1863,7 +1993,7 @@ const App = () => {
          const cache = getAiCache();
          const today = getTodayDate();
          if (!cache[selectedHistorySymbol] || cache[selectedHistorySymbol].date !== today) {
-             generateFullAnalysis(selectedHistorySymbol, historicalData[key]);
+             generateFullAnalysis(selectedHistorySymbol, historicalData[key], false, etfExtraData[selectedHistorySymbol]?.prevClose);
          } else {
              setAiSummary(String(cache[selectedHistorySymbol].summary));
              setAiDetail(String(cache[selectedHistorySymbol].detail));
@@ -2025,8 +2155,8 @@ const App = () => {
         )}
 
         {activeTab === 'history' && (
-          <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6 h-full pb-20 md:pb-0">
-            <div className={`lg:col-span-1 bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[700px] flex-none transition-opacity duration-300 ${isLocked ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
+          <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6 h-full pb-20 md:pb-0 items-start">
+            <div className={`lg:col-span-1 w-full bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[calc(100vh-7rem)] lg:sticky lg:top-20 flex-none transition-opacity duration-300 ${isLocked ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
               <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center sticky top-0 z-10"><h3 className="font-semibold text-white flex items-center"><LineIcon className="w-5 h-5 mr-2 text-blue-400" /> 持股列表</h3></div>
               <div className={`overflow-y-auto flex-1 p-2 space-y-2 ${isAiSummarizing ? 'opacity-50 pointer-events-none' : ''}`}>
                 {tradableSymbols.map((item) => (
@@ -2039,7 +2169,7 @@ const App = () => {
               </div>
             </div>
 
-            <div className="lg:col-span-3 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-2 md:p-6 block md:flex md:flex-col relative h-auto md:h-[700px]">
+            <div className="lg:col-span-3 w-full bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-2 md:p-6 flex flex-col relative h-auto min-h-[700px]">
               <div className="flex-none flex flex-col sm:flex-row justify-between items-start sm:items-center mb-2 gap-2">
                 <h3 className="text-xl font-bold text-white flex items-center">{selectedHistorySymbol} <span className="ml-2 text-base font-normal text-slate-400">{tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱']}</span></h3>
                 <div className={`flex space-x-2 self-end sm:self-auto ${isAiSummarizing || isLocked ? 'opacity-50 pointer-events-none' : ''}`}>
@@ -2048,12 +2178,12 @@ const App = () => {
                     ))}
                     <button
                         onClick={() => {
-                            setHistoricalData(prev => {
-                                const next = { ...prev };
-                                delete next[`${selectedHistorySymbol}_${timeframe}`];
-                                return next;
-                            });
-                            fetchHistoricalData(selectedHistorySymbol, timeframe);
+                            const data = historicalData[`${selectedHistorySymbol}_${timeframe}`];
+                            if (data && data.length > 0) {
+                                generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose);
+                            } else {
+                                fetchHistoricalData(selectedHistorySymbol, timeframe);
+                            }
                         }}
                         disabled={isAiSummarizing || isLocked}
                         className="px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border border-slate-600 text-slate-400 hover:bg-slate-700 transition-colors flex items-center"
@@ -2150,14 +2280,60 @@ const App = () => {
               ) : <div className="flex-1 flex items-center justify-center h-full text-slate-500">{historyError ? <span className="text-red-400">{String(historyError)}</span> : "請選擇左側標的以查看走勢"}</div>}
               </div>
 
+              {/* 手動補齊 K 線工具區塊 */}
+              <div className="mt-4 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-4">
+                  <div className="flex items-center justify-between cursor-pointer" onClick={() => setShowManualPatch(!showManualPatch)}>
+                    <h4 className="text-sm font-semibold text-slate-300 flex items-center">
+                        <Edit className="w-4 h-4 mr-2 text-purple-400" /> 
+                        手動補齊 / 修正歷史 K 線 (解決資料源漏檔)
+                    </h4>
+                    {showManualPatch ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+                  </div>
+                  
+                  {showManualPatch && (
+                      <div className="mt-4 pt-4 border-t border-slate-700 space-y-4 animate-fade-in">
+                          <p className="text-xs text-slate-400 leading-relaxed">若發現 Yahoo Finance 漏給特定日期的股價，可在此手動新增或覆寫。系統將自動重新計算所有技術指標與 AI 分析基準。</p>
+                          
+                          <div className="flex flex-wrap gap-3 items-end">
+                              <div>
+                                  <label className="block text-[10px] text-slate-500 mb-1">日期 (YYYY-MM-DD)</label>
+                                  <input type="date" value={patchDate} onChange={(e)=>setPatchDate(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-3 py-1.5 rounded text-sm focus:ring-blue-500 focus:border-blue-500" />
+                              </div>
+                              <div>
+                                  <label className="block text-[10px] text-slate-500 mb-1">收盤價</label>
+                                  <input type="number" step="0.01" value={patchPrice} onChange={(e)=>setPatchPrice(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-3 py-1.5 rounded text-sm focus:ring-blue-500 focus:border-blue-500 w-28" placeholder="例如: 150.5" />
+                              </div>
+                              <button onClick={handleAddPatch} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded text-sm transition-colors shadow-lg">
+                                  新增 / 覆寫
+                              </button>
+                          </div>
+
+                          {Object.keys(manualKLinesState[selectedHistorySymbol] || {}).length > 0 && (
+                              <div className="mt-3 bg-slate-900 rounded-lg p-3 border border-slate-700/50">
+                                  <h5 className="text-[10px] text-slate-500 mb-2">已儲存的自訂資料：</h5>
+                                  <div className="flex flex-wrap gap-2">
+                                      {Object.entries(manualKLinesState[selectedHistorySymbol]).map(([d, p]) => (
+                                          <div key={d} className="flex items-center bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs shadow-sm">
+                                              <span className="text-slate-300 mr-2">{d}</span>
+                                              <span className="text-yellow-400 font-mono mr-2">{p}</span>
+                                              <button onClick={() => handleDeletePatch(d)} className="text-red-400 hover:text-red-300 transition-colors" title="移除"><XCircle className="w-3 h-3" /></button>
+                                          </div>
+                                      ))}
+                                  </div>
+                              </div>
+                          )}
+                      </div>
+                  )}
+              </div>
+
               <div className="flex-none px-2 py-1 mt-2 text-[10px] text-slate-500 flex items-center space-x-3 border-t border-dashed border-slate-700/50">
                   <span className="flex items-center"><DollarSign className="w-3 h-3 mr-1" /> 價: {etfExtraData[selectedHistorySymbol]?.priceSource || 'Yahoo'}</span>
                   <span className="flex items-center"><Layers className="w-3 h-3 mr-1" /> 淨: {etfExtraData[selectedHistorySymbol]?.navSource || '-'}</span>
                   <span className="flex items-center"><Percent className="w-3 h-3 mr-1" /> 殖: {etfExtraData[selectedHistorySymbol]?.yieldSource || '-'}</span>
               </div>
 
-              <div className="flex-1 md:min-h-0 flex flex-col mt-4 md:mt-4 pt-2 border-t-2 border-dashed border-slate-600/50 md:overflow-hidden relative z-10 bg-slate-800">
-                <div className="flex-none flex items-center justify-between mb-2">
+              <div className="flex flex-col mt-6 pt-4 border-t-2 border-dashed border-slate-600/50 relative z-10 bg-slate-800">
+                <div className="flex-none flex items-center justify-between mb-4">
                     <div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="hidden md:inline ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符)</span>} {selectedModel !== usedModel && !isCachedResult && <span className="text-yellow-400 ml-1 text-[10px]">(自動切換)</span>}</span>}
                     {aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
                     {aiSignals[selectedHistorySymbol] === 'ADD_ALL' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
@@ -2171,7 +2347,7 @@ const App = () => {
                             onClick={() => {
                                 const data = historicalData[`${selectedHistorySymbol}_${timeframe}`];
                                 if (data && data.length > 0) {
-                                    generateFullAnalysis(selectedHistorySymbol, data, true);
+                                    generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose);
                                 } else {
                                     fetchHistoricalData(selectedHistorySymbol, timeframe);
                                 }
@@ -2185,15 +2361,15 @@ const App = () => {
                     )}
                 </div>
 
-                <div className="flex-1 md:overflow-y-auto bg-slate-900/50 rounded-lg p-3 border border-slate-700 shadow-inner custom-scrollbar">
+                <div className="bg-slate-900/50 rounded-lg p-5 border border-slate-700 shadow-inner h-auto">
                   {isAiSummarizing ? (
-                    <div className="flex items-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin mr-2" />{aiProgressMsg || 'AI 正在分析中...'}</div>
+                    <div className="flex items-center text-slate-400 text-sm py-4"><Loader2 className="w-5 h-5 animate-spin mr-2" />{aiProgressMsg || 'AI 正在分析中...'}</div>
                   ) : (
                     <>
-                      {aiSummary ? <div className="mb-2"><p className="text-slate-300 text-sm leading-relaxed border-l-2 border-purple-500 pl-3">{String(aiSummary)}</p></div> : <div className="text-slate-500 text-sm">暫無 AI 分析數據 (請點擊重新分析)</div>}
+                      {aiSummary ? <div className="mb-4"><p className="text-slate-200 text-base font-medium leading-relaxed border-l-4 border-purple-500 pl-4">{String(aiSummary)}</p></div> : <div className="text-slate-500 text-sm py-4">暫無 AI 分析數據 (請點擊重新分析)</div>}
                       {aiDetail && (
-                        <div className={`pt-2 border-t border-slate-700/50 transition-all duration-300 ${isDetailExpanded ? 'block' : 'hidden'}`}>
-                          <div className="prose prose-invert prose-sm max-w-none text-slate-300 whitespace-pre-wrap leading-relaxed text-xs">{String(aiDetail)}</div>
+                        <div className={`pt-4 border-t border-slate-700/50 transition-all duration-300 ${isDetailExpanded ? 'block' : 'hidden'}`}>
+                          <div className="prose prose-invert max-w-none text-slate-300 whitespace-pre-wrap leading-relaxed text-sm md:text-base">{String(aiDetail)}</div>
                         </div>
                       )}
                     </>
