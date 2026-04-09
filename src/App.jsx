@@ -1325,6 +1325,7 @@ const App = () => {
           setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
           if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
           setUsedModel(cache[symbol].model); setIsCachedResult(true); setAnalysisSymbol(symbol); setIsDetailExpanded(true); setIsAiSummarizing(false); 
+          delete analysisInProgressRef.current[symbol]; // 解除鎖定，避免後續點擊重新分析時無反應
           return;
         }
 
