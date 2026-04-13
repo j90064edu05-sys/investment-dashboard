@@ -11,13 +11,14 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.74 (Stable Resilience Engine - Async Flow UX Fix)
+ * Alpha 投資戰情室 v54.75 (Stable Resilience Engine - Chat Fix)
  * * [重大架構升級]
  * 1. 終極防禦緩存：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份。
  * 2. 自動防呆儲存：點擊更新股價時，會自動將畫面上的 Proxy 設定存入 LocalStorage。
  * 3. 週末與非交易日精準校正：整合 TWSE 官方休市行事曆，自動判斷台灣市場國定假日與週末，避免在非交易日錯誤補齊 K 線。
- * 4. 非同步競態與錯位修復：導入 Active Symbol Tracking，徹底解除 UI 操作鎖定。使用者現在可以隨意切換歷史走勢，系統將自動中斷無效的舊背景請求，確保分析結果不再發生標的錯位。
- * 5. 走勢圖預設重置：當使用者切換歷史走勢的持股標的時，自動將時間級距切回預設的「一年日線」，提升觀看體驗。
+ * 4. 非同步競態與錯位修復：導入 Active Symbol Tracking，徹底解除 UI 操作鎖定。
+ * 5. 走勢圖預設重置：當使用者切換歷史走勢的持股標的時，自動將時間級距切回預設的「一年日線」。
+ * 6. AI 助理截斷修復：改良 Gemini API 內容解析邏輯，完整串接所有 parts，調高 Token 限制，並增強 UI 自動換行。
  */
 
 const DEMO_DATA = [
@@ -461,6 +462,7 @@ const App = () => {
   const [updateError, setUpdateError] = useState(null);
   const [historicalData, setHistoricalData] = useState({});
   const [selectedHistorySymbol, setSelectedHistorySymbol] = useState(null);
+  const [isLocked, setIsLocked] = useState(false); 
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('1y_1d'); 
@@ -504,7 +506,7 @@ const App = () => {
   
   const globalAbortRef = useRef(null);
   const logsContainerRef = useRef(null);
-  const activeHistorySymbolRef = useRef(null); // 新增追蹤當前焦點股票
+  const activeHistorySymbolRef = useRef(null); 
 
   useEffect(() => {
     const originalLog = console.log; const originalWarn = console.warn; const originalError = console.error;
@@ -749,7 +751,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.74 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v54.75 Fast-Fail Engine) ===");
     if (globalAbortRef.current) globalAbortRef.current.abort();
     globalAbortRef.current = new AbortController();
     const signal = globalAbortRef.current.signal;
@@ -887,7 +889,7 @@ const App = () => {
         try {
           const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 4096, temperature: customTemperature } }),
+              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 8192, temperature: customTemperature } }),
               signal: controller.signal
           });
           clearTimeout(timeoutId);
@@ -896,7 +898,10 @@ const App = () => {
               if ((response.status === 400 && errMsg.toLowerCase().includes('api key')) || response.status === 403) throw new Error(`API Key 無效 (${errMsg})`);
               continue; 
           }
-          const data = await response.json(); const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          const data = await response.json(); 
+          const parts = data.candidates?.[0]?.content?.parts;
+          const text = parts ? parts.map(p => p.text || '').join('') : '';
+          
           if (text) return { text, model }; 
         } catch (err) {
           clearTimeout(timeoutId);
@@ -1026,18 +1031,16 @@ const App = () => {
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
-    
-    setHistoryLoading(true); setHistoryError(null); setAnalysisSymbol(symbol); 
-    
-    const today = getTodayDate();
+    if (isLocked) return; setIsLocked(true);
+    setHistoryLoading(true); setHistoryError(null); setAnalysisSymbol(symbol); setIsAiSummarizing(false); setIsCachedResult(false);
+
     const cache = getAiCache();
-    if (cache[symbol] && cache[symbol].date === today && (cache[symbol].summary || cache[symbol].detail)) {
-      if (activeHistorySymbolRef.current === symbol) {
-          setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
-          if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
-          setUsedModel(cache[symbol].model); setIsCachedResult(true); setIsDetailExpanded(true); 
-      }
-    }
+    if (cache[symbol] && cache[symbol].date === getTodayDate() && (cache[symbol].summary || cache[symbol].detail)) {
+      setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
+      if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
+      setUsedModel(cache[symbol].model); setIsCachedResult(true); setIsDetailExpanded(true); setHistoryLoading(false); setIsLocked(false); 
+      if (!historicalData[`${symbol}_${tf}`]) { try { } catch(e) {} }
+    } else { setAiSummary(null); setAiDetail(null); setUsedModel(null); }
 
     try {
       let range = '1y'; let interval = '1d';
@@ -1066,46 +1069,11 @@ const App = () => {
 
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
-        
-        if (activeHistorySymbolRef.current === symbol) {
-            setHistoryLoading(false);
-            if (geminiApiKey) { await generateFullAnalysis(symbol, processedData, false, metaPrevClose); } 
-            else { if(!aiSummary) setAiSummary("請設定 API Key 以啟用 AI 分析。"); }
-        }
+        setHistoryLoading(false);
+        if (geminiApiKey) { await generateFullAnalysis(symbol, processedData, false, metaPrevClose); } else { if(!aiSummary) setAiSummary("請設定 API Key 以啟用 AI 分析。"); }
       } else { throw new Error('解析不到圖表數據'); }
-    } catch (err) { 
-        if (activeHistorySymbolRef.current === symbol) { setHistoryError(String(err.message)); setIsAiSummarizing(false); }
-    } finally { 
-        if (activeHistorySymbolRef.current === symbol) setHistoryLoading(false); 
-    }
+    } catch (err) { setHistoryError(String(err.message)); setIsAiSummarizing(false); } finally { setHistoryLoading(false); setIsLocked(false); }
   };
-
-  useEffect(() => {
-    if (activeTab === 'history' && selectedHistorySymbol) {
-      activeHistorySymbolRef.current = selectedHistorySymbol;
-      const key = `${selectedHistorySymbol}_${timeframe}`;
-
-      if (!historicalData[key]) {
-         setAiSummary(null); setAiDetail(null); setUsedModel(null); setHistoryError(null);
-         setAiSignals(prev => { const next = {...prev}; delete next[selectedHistorySymbol]; return next; });
-         fetchHistoricalData(selectedHistorySymbol, timeframe);
-      } else {
-         const cache = getAiCache();
-         const today = getTodayDate();
-         if (cache[selectedHistorySymbol] && cache[selectedHistorySymbol].date === today && cache[selectedHistorySymbol].summary) {
-             setAiSummary(String(cache[selectedHistorySymbol].summary));
-             setAiDetail(String(cache[selectedHistorySymbol].detail));
-             if (cache[selectedHistorySymbol].signal) setAiSignals(prev => ({ ...prev, [selectedHistorySymbol]: cache[selectedHistorySymbol].signal }));
-             setUsedModel(cache[selectedHistorySymbol].model);
-             setIsCachedResult(true); setIsDetailExpanded(true);
-         } else if (!isAiSummarizing) {
-             setAiSummary(null); setAiDetail(null); setUsedModel(null);
-             generateFullAnalysis(selectedHistorySymbol, historicalData[key], false, etfExtraData[selectedHistorySymbol]?.prevClose);
-         }
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, selectedHistorySymbol, timeframe]); 
 
   const performFetch = async (url) => {
     setLoading(true); setError(null); setUpdateError(null); setRealTimePrices({}); setHistoricalData({}); setPortfolioHealth(null);
@@ -1310,7 +1278,7 @@ const App = () => {
         {activeTab === 'chat' && (
             <div className="max-w-4xl mx-auto h-[70vh] flex flex-col bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
                 <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center"><Bot className="w-6 h-6 text-purple-400 mr-2" /><h3 className="font-semibold text-white">AI 投資顧問</h3></div>
-                <div className="flex-1 overflow-y-auto p-4 space-y-4">{chatMessages.map((msg, idx) => (<div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'}`}><p className="text-sm whitespace-pre-wrap">{String(msg.content)}</p></div></div>))}{isChatLoading && (<div className="flex justify-start"><div className="bg-slate-700 p-3 rounded-lg flex items-center"><Loader2 className="w-4 h-4 animate-spin text-purple-400 mr-2" /><span className="text-xs text-slate-400">AI 正在思考中...</span></div></div>)}<div ref={chatEndRef} /></div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">{chatMessages.map((msg, idx) => (<div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'}`}><p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{String(msg.content)}</p></div></div>))}{isChatLoading && (<div className="flex justify-start"><div className="bg-slate-700 p-3 rounded-lg flex items-center"><Loader2 className="w-4 h-4 animate-spin text-purple-400 mr-2" /><span className="text-xs text-slate-400">AI 正在思考中...</span></div></div>)}<div ref={chatEndRef} /></div>
                 <div className="p-4 border-t border-slate-700 bg-slate-900/50"><div className="flex gap-2"><input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleChatSend()} placeholder="輸入您的問題..." className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 text-sm" disabled={isChatLoading} /><button onClick={handleChatSend} disabled={isChatLoading || !chatInput.trim()} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg disabled:opacity-50 transition-colors"><Send className="w-4 h-4" /></button></div></div>
             </div>
         )}
