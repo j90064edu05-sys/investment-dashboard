@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.86 (Stable Resilience Engine - Chat Input Upgrade)
+ * Alpha 投資戰情室 v54.87 (Stable Resilience Engine - Gross Profit Fix)
  * * [重大架構升級]
  * 1. 終極防禦緩存：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份。
  * 2. 週末與非交易日精準校正：自動判斷台灣市場國定假日與週末，避免在非交易日錯誤補齊 K 線。
@@ -19,6 +19,7 @@ import {
  * 4. 深度 AI 追蹤日誌 (Deep AI Debug Logs)：在 Gemini API 呼叫與多數決分析的每個關鍵節點加入詳細的 Console 與系統 Logs 輸出，方便追蹤任何失敗原因。
  * 5. 修正 ReferenceError：補回 `isUiLocked` 的狀態變數宣告，徹底解決畫面切換與渲染時產生的崩潰錯誤。
  * 6. AI 助理對話框升級：改為支援多行文字輸入的 Textarea，提供 Shift+Enter 換行體驗，增強長問題提問能力。
+ * 7. 修復帳面損益計算異常：補上持股明細加總時遺漏的 grossProfit 累加邏輯，確保滑鼠游標懸浮顯示的「帳面損益」數值正確。
  */
 
 const DEMO_DATA = [
@@ -600,10 +601,11 @@ const App = () => {
     const map = new Map();
     portfolioData.forEach(item => {
       const key = item['標的'];
-      if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, costBasisRaw: 0, marketValue: 0, profitLoss: 0, estimateFee: 0, estimateTax: 0, dates: new Set(), isUS: item.isUS }); }
+      if (!map.has(key)) { map.set(key, { ...item, shares: 0, costBasis: 0, costBasisRaw: 0, marketValue: 0, profitLoss: 0, grossProfit: 0, estimateFee: 0, estimateTax: 0, dates: new Set(), isUS: item.isUS }); }
       const entry = map.get(key);
       entry.shares += item.shares; entry.costBasis += item.costBasis; entry.marketValue += item.marketValue; 
       entry.costBasisRaw += (item.buyPriceRaw * item.shares); entry.profitLoss += item.profitLoss; 
+      entry.grossProfit += item.grossProfit;
       entry.estimateFee += item.estimateFee; entry.estimateTax += item.estimateTax; entry.dates.add(item['日期']);
       if (item.currentPrice !== item.buyPrice) entry.currentPrice = item.currentPrice;
       if (item.currentPriceRaw) entry.currentPriceRaw = item.currentPriceRaw; 
@@ -772,7 +774,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.85 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v54.87 Fast-Fail Engine) ===");
     if (globalAbortRef.current) globalAbortRef.current.abort();
     globalAbortRef.current = new AbortController();
     const signal = globalAbortRef.current.signal;
