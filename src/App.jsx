@@ -11,13 +11,14 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.85 (Stable Resilience Engine - Reference Fix)
+ * Alpha 投資戰情室 v54.86 (Stable Resilience Engine - Chat Input Upgrade)
  * * [重大架構升級]
  * 1. 終極防禦緩存：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份。
  * 2. 週末與非交易日精準校正：自動判斷台灣市場國定假日與週末，避免在非交易日錯誤補齊 K 線。
  * 3. 徹底解決 UI 鎖定與錯位 (Lock-free UI & Instant Wipe)：重構歷史走勢的狀態機，廢除會卡死的 isLocked，點擊新標的瞬間自動清空舊 AI 分析。
  * 4. 深度 AI 追蹤日誌 (Deep AI Debug Logs)：在 Gemini API 呼叫與多數決分析的每個關鍵節點加入詳細的 Console 與系統 Logs 輸出，方便追蹤任何失敗原因。
  * 5. 修正 ReferenceError：補回 `isUiLocked` 的狀態變數宣告，徹底解決畫面切換與渲染時產生的崩潰錯誤。
+ * 6. AI 助理對話框升級：改為支援多行文字輸入的 Textarea，提供 Shift+Enter 換行體驗，增強長問題提問能力。
  */
 
 const DEMO_DATA = [
@@ -518,7 +519,6 @@ const App = () => {
   const fetchingHistoryRef = useRef({});
   const aiAbortControllerRef = useRef(null); 
 
-  // 定義 isUiLocked 以鎖定介面特定元素（如歷史資料重抓按鈕），但不鎖定左側清單切換
   const isUiLocked = historyLoading || isAiSummarizing;
 
   useEffect(() => {
@@ -1403,7 +1403,27 @@ const App = () => {
             <div className="max-w-4xl mx-auto h-[70vh] flex flex-col bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
                 <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center"><Bot className="w-6 h-6 text-purple-400 mr-2" /><h3 className="font-semibold text-white">AI 投資顧問</h3></div>
                 <div className="flex-1 overflow-y-auto p-4 space-y-4">{chatMessages.map((msg, idx) => (<div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'}`}><p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{String(msg.content)}</p></div></div>))}{isChatLoading && (<div className="flex justify-start"><div className="bg-slate-700 p-3 rounded-lg flex items-center"><Loader2 className="w-4 h-4 animate-spin text-purple-400 mr-2" /><span className="text-xs text-slate-400">AI 正在思考中...</span></div></div>)}<div ref={chatEndRef} /></div>
-                <div className="p-4 border-t border-slate-700 bg-slate-900/50"><div className="flex gap-2"><input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleChatSend()} placeholder="輸入您的問題..." className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 text-sm" disabled={isChatLoading} /><button onClick={handleChatSend} disabled={isChatLoading || !chatInput.trim()} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg disabled:opacity-50 transition-colors"><Send className="w-4 h-4" /></button></div></div>
+                <div className="p-4 border-t border-slate-700 bg-slate-900/50">
+                    <div className="flex gap-2 items-end">
+                        <textarea 
+                            value={chatInput} 
+                            onChange={(e) => setChatInput(e.target.value)} 
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    if (chatInput.trim()) handleChatSend();
+                                }
+                            }} 
+                            placeholder="輸入您的問題... (Shift + Enter 換行)" 
+                            className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 text-sm resize-y min-h-[42px] max-h-[150px] custom-scrollbar" 
+                            rows={2}
+                            disabled={isChatLoading} 
+                        />
+                        <button onClick={handleChatSend} disabled={isChatLoading || !chatInput.trim()} className="bg-purple-600 hover:bg-purple-700 text-white px-4 rounded-lg disabled:opacity-50 transition-colors h-[42px] flex items-center justify-center mb-[2px]">
+                            <Send className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
             </div>
         )}
 
@@ -1435,6 +1455,7 @@ const App = () => {
                             const key = `${selectedHistorySymbol}_${timeframe}`;
                             fetchingHistoryRef.current[key] = false;
                             setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
+                            fetchHistoricalData(selectedHistorySymbol, timeframe).finally(() => { fetchingHistoryRef.current[key] = false; });
                         }}
                         disabled={isUiLocked}
                         className="px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border border-slate-600 text-slate-400 hover:bg-slate-700 transition-colors flex items-center" title="清除快取並重新抓取"
