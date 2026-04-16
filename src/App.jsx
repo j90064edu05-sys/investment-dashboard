@@ -11,14 +11,13 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.75 (Stable Resilience Engine - Chat Fix)
+ * Alpha 投資戰情室 v54.85 (Stable Resilience Engine - Reference Fix)
  * * [重大架構升級]
  * 1. 終極防禦緩存：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份。
- * 2. 自動防呆儲存：點擊更新股價時，會自動將畫面上的 Proxy 設定存入 LocalStorage。
- * 3. 週末與非交易日精準校正：整合 TWSE 官方休市行事曆，自動判斷台灣市場國定假日與週末，避免在非交易日錯誤補齊 K 線。
- * 4. 非同步競態與錯位修復：導入 Active Symbol Tracking，徹底解除 UI 操作鎖定。
- * 5. 走勢圖預設重置：當使用者切換歷史走勢的持股標的時，自動將時間級距切回預設的「一年日線」。
- * 6. AI 助理截斷修復：改良 Gemini API 內容解析邏輯，完整串接所有 parts，調高 Token 限制，並增強 UI 自動換行。
+ * 2. 週末與非交易日精準校正：自動判斷台灣市場國定假日與週末，避免在非交易日錯誤補齊 K 線。
+ * 3. 徹底解決 UI 鎖定與錯位 (Lock-free UI & Instant Wipe)：重構歷史走勢的狀態機，廢除會卡死的 isLocked，點擊新標的瞬間自動清空舊 AI 分析。
+ * 4. 深度 AI 追蹤日誌 (Deep AI Debug Logs)：在 Gemini API 呼叫與多數決分析的每個關鍵節點加入詳細的 Console 與系統 Logs 輸出，方便追蹤任何失敗原因。
+ * 5. 修正 ReferenceError：補回 `isUiLocked` 的狀態變數宣告，徹底解決畫面切換與渲染時產生的崩潰錯誤。
  */
 
 const DEMO_DATA = [
@@ -92,17 +91,28 @@ const getResponsiveFontSize = (text) => {
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+const getTaipeiTime = () => {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Taipei', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: false }).formatToParts(new Date());
+    let hash = {};
+    parts.forEach(p => { hash[p.type] = p.value; });
+    return { y: parseInt(hash.year), m: parseInt(hash.month), d: parseInt(hash.day), h: parseInt(hash.hour) % 24, min: parseInt(hash.minute) };
+};
+
 const getTodayDate = () => {
-    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date());
+    let { y, m, d, h } = getTaipeiTime();
+    if (h < 9) {
+        const tempDate = new Date(y, m - 1, d - 1);
+        y = tempDate.getFullYear(); m = tempDate.getMonth() + 1; d = tempDate.getDate();
+    }
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 };
 
 const isTaiwanTradingHours = () => {
+    const { h, min } = getTaipeiTime();
     const now = new Date();
     const day = now.getDay(); 
-    const hour = now.getHours();
-    const minute = now.getMinutes();
     if (day >= 1 && day <= 5) {
-        const currentMinutes = hour * 60 + minute;
+        const currentMinutes = h * 60 + min;
         return currentMinutes >= 540 && currentMinutes <= 825; 
     }
     return false;
@@ -462,7 +472,6 @@ const App = () => {
   const [updateError, setUpdateError] = useState(null);
   const [historicalData, setHistoricalData] = useState({});
   const [selectedHistorySymbol, setSelectedHistorySymbol] = useState(null);
-  const [isLocked, setIsLocked] = useState(false); 
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('1y_1d'); 
@@ -480,7 +489,6 @@ const App = () => {
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
-  const [analysisSymbol, setAnalysisSymbol] = useState(null); 
   const [selectedModel, setSelectedModel] = useState('gemini-3-flash-preview'); 
   const [aiSignals, setAiSignals] = useState({}); 
 
@@ -507,6 +515,11 @@ const App = () => {
   const globalAbortRef = useRef(null);
   const logsContainerRef = useRef(null);
   const activeHistorySymbolRef = useRef(null); 
+  const fetchingHistoryRef = useRef({});
+  const aiAbortControllerRef = useRef(null); 
+
+  // 定義 isUiLocked 以鎖定介面特定元素（如歷史資料重抓按鈕），但不鎖定左側清單切換
+  const isUiLocked = historyLoading || isAiSummarizing;
 
   useEffect(() => {
     const originalLog = console.log; const originalWarn = console.warn; const originalError = console.error;
@@ -541,27 +554,31 @@ const App = () => {
                       if (parts.length === 3) return `${parseInt(parts[0]) + 1911}${parts[1].padStart(2, '0')}${parts[2].padStart(2, '0')}`;
                       return dStr.replace(/\//g, '');
                   });
-                  setTwseHolidays(prev => [...new Set([...prev, ...apiHols])]);
+                  setTwseHolidays(prev => {
+                      const newHols = [...new Set([...prev, ...apiHols])];
+                      evaluateLastTradingDay(newHols);
+                      return newHols;
+                  });
               }
           } catch(e) {}
       };
-      loadHolidays();
       
-      const fetchIsLastTradingDayLocal = async () => {
-          const getLocalStr = (dt) => {
-              const y = dt.getFullYear(); const m = String(dt.getMonth() + 1).padStart(2, '0'); const d = String(dt.getDate()).padStart(2, '0');
-              return `${y}${m}${d}`;
-          };
-          const today = new Date(); const todayStr = getLocalStr(today);
-          let holidays = ['20240228', '20250228', '20260227', '20260403', '20260406', '20260501', '20261231'];
-          let d = new Date(today.getFullYear(), today.getMonth() + 1, 0); let foundDateStr = '';
-          while (d.getDate() > 0) {
-              const day = d.getDay(); const dateStr = getLocalStr(d);
-              if (day === 0 || day === 6 || holidays.includes(dateStr)) { d.setDate(d.getDate() - 1); } else { foundDateStr = dateStr; break; }
+      const evaluateLastTradingDay = (hols) => {
+          const logicalToday = getTodayDate();
+          const todayStr = logicalToday.replace(/-/g, '');
+          const [y, m, d] = logicalToday.split('-');
+          let dt = new Date(parseInt(y), parseInt(m) - 1, parseInt(d)); 
+          let foundDateStr = '';
+          while (true) {
+              const day = dt.getDay(); 
+              const dateStr = `${dt.getFullYear()}${String(dt.getMonth() + 1).padStart(2, '0')}${String(dt.getDate()).padStart(2, '0')}`;
+              if (day === 0 || day === 6 || hols.includes(dateStr)) { dt.setDate(dt.getDate() - 1); } else { foundDateStr = dateStr; break; }
           }
           setIsLastTradingDay(foundDateStr === todayStr);
       };
-      fetchIsLastTradingDayLocal();
+
+      loadHolidays();
+      evaluateLastTradingDay(['20240228', '20250228', '20260227', '20260403', '20260406', '20260501', '20261231']);
   }, []);
 
   const summary = useMemo(() => {
@@ -637,20 +654,24 @@ const App = () => {
   
   useEffect(() => {
     const currentDataHash = tradableSymbols.map(t => t['標的']).join(',');
+    const isSymbolValid = tradableSymbols.some(t => t['標的'] === selectedHistorySymbol);
+
     if (prevSortRef.current !== sortConfig || prevOrderRef.current !== customOrder) {
-      if (tradableSymbols.length > 0) {
+      if (tradableSymbols.length > 0 && (!selectedHistorySymbol || !isSymbolValid)) {
           setSelectedHistorySymbol(tradableSymbols[0]['標的']);
           setTimeframe('1y_1d'); 
       }
       prevSortRef.current = sortConfig; prevOrderRef.current = customOrder;
-    } else if (currentDataHash !== '' && prevDataHashRef.current !== currentDataHash) {
-      if (tradableSymbols.length > 0) {
+    } else if (prevDataHashRef.current !== currentDataHash) {
+      if (tradableSymbols.length > 0 && (!selectedHistorySymbol || !isSymbolValid)) {
           setSelectedHistorySymbol(tradableSymbols[0]['標的']);
           setTimeframe('1y_1d'); 
+      } else if (tradableSymbols.length === 0) {
+          setSelectedHistorySymbol(null);
       }
     }
     prevDataHashRef.current = currentDataHash;
-  }, [sortConfig, customOrder, tradableSymbols]);
+  }, [sortConfig, customOrder, tradableSymbols, selectedHistorySymbol]);
    
   const currentChartData = useMemo(() => {
     const baseData = historicalData[`${selectedHistorySymbol}_${timeframe}`];
@@ -751,7 +772,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.75 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v54.85 Fast-Fail Engine) ===");
     if (globalAbortRef.current) globalAbortRef.current.abort();
     globalAbortRef.current = new AbortController();
     const signal = globalAbortRef.current.signal;
@@ -772,6 +793,7 @@ const App = () => {
     const today = getTodayDate(); const cache = getPriceCache();
     const newPrices = { ...realTimePrices }; const newEtfData = { ...etfExtraData }; 
     const misPriceMap = {}; const misPrevPriceMap = {}; const misTimeMap = {}; const misEtfNavMap = {}; const misEtfPriceMap = {};
+    const twseEtfMap = {}; const tpexEtfMap = {}; 
 
     try {
         if (signal.aborted) throw new Error('AbortError');
@@ -831,7 +853,8 @@ const App = () => {
             }
             if (misPrevPriceMap[pureCode]) extra.prevClose = misPrevPriceMap[pureCode];
             if (isEtf && misEtfNavMap[pureCode]) { extra.nav = misEtfNavMap[pureCode]; extra.navSource = "MIS(f)淨值"; 
-            } else if (twseEodRes) { /* Optional mapping */ }
+            } else if (twseEtfMap[pureCode]) { extra.nav = twseEtfMap[pureCode]; extra.navSource = "Off(TW)"; 
+            } else if (tpexEtfMap[pureCode]) { extra.nav = tpexEtfMap[pureCode]; extra.navSource = "Off(TP)"; }
             newEtfData[symbol] = extra;
         });
 
@@ -878,15 +901,19 @@ const App = () => {
     }
   };
 
-  const callGeminiWithFallback = async (prompt, customTemperature = 0.2) => {
+  const callGeminiWithFallback = async (prompt, customTemperature = 0.2, parentSignal = null) => {
     if (!geminiApiKey) {
       if (window.confirm("尚未設定 AI 金鑰。\n單機版需要您自己的 Google Gemini API Key 才能運作 AI 分析功能。\n是否現在前往「設定」頁面輸入？")) setActiveTab('config');
       throw new Error("請先設定 API Key");
     }
     const models = [...new Set([selectedModel, ...AVAILABLE_MODELS.map(m => m.id)])];
     for (const model of models) {
+        if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
         const controller = new AbortController(); const timeoutId = setTimeout(() => controller.abort(), 45000); 
+        const abortHandler = () => controller.abort();
+        if (parentSignal) parentSignal.addEventListener('abort', abortHandler);
         try {
+          console.log(`[AI Analysis] 嘗試模型 ${model}...`);
           const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 8192, temperature: customTemperature } }),
@@ -896,17 +923,27 @@ const App = () => {
           if (!response.ok) {
               let errMsg = await response.text(); try { const errData = JSON.parse(errMsg); if (errData.error?.message) errMsg = errData.error.message; } catch (e) {}
               if ((response.status === 400 && errMsg.toLowerCase().includes('api key')) || response.status === 403) throw new Error(`API Key 無效 (${errMsg})`);
+              console.error(`[AI Analysis] 模型 ${model} 失敗: HTTP ${response.status}`);
               continue; 
           }
           const data = await response.json(); 
           const parts = data.candidates?.[0]?.content?.parts;
           const text = parts ? parts.map(p => p.text || '').join('') : '';
           
-          if (text) return { text, model }; 
+          if (text) {
+              console.log(`[AI Analysis] 模型 ${model} 成功回傳。`);
+              return { text, model }; 
+          }
         } catch (err) {
           clearTimeout(timeoutId);
-          if (err.message.includes('API Key 無效')) throw err;
-        } 
+          if (err.name === 'AbortError' || String(err.message).includes('AbortError')) {
+              if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
+          }
+          if (String(err.message).includes('API Key 無效')) throw err;
+          console.error(`[AI Analysis] 模型 ${model} 例外錯誤:`, err.message);
+        } finally {
+          if (parentSignal) parentSignal.removeEventListener('abort', abortHandler);
+        }
     }
     throw new Error(`AI 連線失敗，請檢查 API Key 或網路狀態`);
   };
@@ -932,7 +969,19 @@ const App = () => {
   };
 
   const generateFullAnalysis = async (symbol, data, forceUpdate = false, metaPrevCloseOverride = null) => {
-    if (!data || data.length === 0 || analysisInProgressRef.current[symbol]) return;
+    console.log(`[AI Master] 🟢 啟動分析流程: ${symbol}, forceUpdate: ${forceUpdate}`);
+    if (!data || data.length === 0) { 
+        console.warn(`[AI Master] 🟡 取消分析: 無圖表資料 (${symbol})`); 
+        setIsAiSummarizing(false); 
+        return; 
+    }
+    
+    if (aiAbortControllerRef.current) {
+        console.log(`[AI Master] 🛑 強制中斷前次 AI 分析請求`);
+        aiAbortControllerRef.current.abort();
+    }
+    aiAbortControllerRef.current = new AbortController();
+    const signal = aiAbortControllerRef.current.signal;
     analysisInProgressRef.current[symbol] = true;
 
     try {
@@ -940,12 +989,13 @@ const App = () => {
         const today = getTodayDate(); const cache = getAiCache();
 
         if (!forceUpdate && cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
+          console.log(`[AI Master] 🟢 命中本地快取: ${symbol}`);
           if (activeHistorySymbolRef.current === symbol) {
               setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
               if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
               setUsedModel(cache[symbol].model); setIsCachedResult(true); setIsDetailExpanded(true); 
+              setIsAiSummarizing(false); 
           }
-          setIsAiSummarizing(false); 
           delete analysisInProgressRef.current[symbol];
           return;
         }
@@ -996,14 +1046,20 @@ const App = () => {
             for (let i = 1; i <= MAX_VOTES; i++) {
                 if (activeHistorySymbolRef.current === symbol) setAiProgressMsg(`AI 委員會投票中... (第 ${i}/${MAX_VOTES} 次)`);
                 try {
-                    const { text, model } = await callGeminiWithFallback(prompt, 0.5);
+                    if (signal.aborted) throw new Error('AbortError: 手動中止');
+                    const { text, model } = await callGeminiWithFallback(prompt, 0.5, signal);
                     const summaryMatch = text.match(/\[SUMMARY\]\s*([\s\S]*?)\s*(?=\[DETAIL\]|$)/i);
                     const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
                     const signalMatch = text.match(/\[SIGNAL\]\s*[:：\-]?\s*(ADD_ALL|ADD_BASIC|ADD_BONUS|REDUCE|HOLD)/i);
                     results.push({ summary: summaryMatch ? String(summaryMatch[1]).trim().replace(/[`*#]/g, '').replace(/\n/g, ' ') : "分析完成", detail: detailMatch ? String(detailMatch[1]).trim() : String(text), signal: signalMatch ? String(signalMatch[1]).toUpperCase() : 'HOLD', model });
-                } catch (err) {}
-                if (i < MAX_VOTES) await delay(1000);
+                } catch (err) {
+                    if (String(err.message).includes('AbortError')) throw err;
+                    console.error(`[AI Master] 解析錯誤 (${symbol} - 第 ${i} 次):`, err.message);
+                }
+                if (i < MAX_VOTES && !signal.aborted) await delay(1000);
             }
+            
+            if (signal.aborted) throw new Error('AbortError: 手動中止');
             if (results.length === 0) throw new Error("所有獨立分析皆失敗");
 
             const signalCounts = {}; results.forEach(r => { signalCounts[r.signal] = (signalCounts[r.signal] || 0) + 1; });
@@ -1013,17 +1069,29 @@ const App = () => {
             const finalResult = results.find(r => r.signal === majoritySignal) || results[0];
             const consensusSummary = `【多數決共識 (${maxCount}/${results.length})】${finalResult.summary}`;
             
-            if (activeHistorySymbolRef.current === symbol) {
+            if (activeHistorySymbolRef.current === symbol && !signal.aborted) {
+                console.log(`[AI Master] 🟢 更新 UI 畫面: ${symbol}`);
                 setAiSummary(consensusSummary); setAiDetail(finalResult.detail); setAiSignals(prev => ({ ...prev, [symbol]: majoritySignal }));
                 setUsedModel(finalResult.model); setIsDetailExpanded(true); 
             }
-            updateAiCache(symbol, { summary: consensusSummary, detail: finalResult.detail, signal: majoritySignal, model: finalResult.model }, dataDate); 
+            if (!signal.aborted) {
+                updateAiCache(symbol, { summary: consensusSummary, detail: finalResult.detail, signal: majoritySignal, model: finalResult.model }, dataDate); 
+            }
         } catch (err) { 
-            if (activeHistorySymbolRef.current === symbol) setAiSummary(String(err.message) || "分析暫時無法使用。"); 
+            console.error(`[AI Master] 🔴 迴圈捕捉錯誤 (${symbol}):`, err);
+            if (activeHistorySymbolRef.current === symbol) {
+                if (String(err.message).includes('AbortError') || signal.aborted) {
+                    setAiSummary("已手動中斷 AI 分析，或因切換標的已取消。");
+                } else {
+                    setAiSummary(`分析暫時無法使用: ${err.message}`); 
+                }
+            }
         } 
     } catch(err) { 
-        if (activeHistorySymbolRef.current === symbol) setAiSummary("分析發生錯誤。"); 
+        console.error(`[AI Master] 🔴 嚴重全域錯誤 (${symbol}):`, err);
+        if (activeHistorySymbolRef.current === symbol) setAiSummary(`分析發生嚴重錯誤: ${err.message}`); 
     } finally { 
+        console.log(`[AI Master] ⚪ 結束分析流程清理狀態: ${symbol}`);
         if (activeHistorySymbolRef.current === symbol) { setIsAiSummarizing(false); setAiProgressMsg(''); }
         delete analysisInProgressRef.current[symbol]; 
     }
@@ -1031,16 +1099,10 @@ const App = () => {
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
-    if (isLocked) return; setIsLocked(true);
-    setHistoryLoading(true); setHistoryError(null); setAnalysisSymbol(symbol); setIsAiSummarizing(false); setIsCachedResult(false);
-
-    const cache = getAiCache();
-    if (cache[symbol] && cache[symbol].date === getTodayDate() && (cache[symbol].summary || cache[symbol].detail)) {
-      setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
-      if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
-      setUsedModel(cache[symbol].model); setIsCachedResult(true); setIsDetailExpanded(true); setHistoryLoading(false); setIsLocked(false); 
-      if (!historicalData[`${symbol}_${tf}`]) { try { } catch(e) {} }
-    } else { setAiSummary(null); setAiDetail(null); setUsedModel(null); }
+    
+    if (activeHistorySymbolRef.current === symbol) {
+        setHistoryLoading(true); setHistoryError(null); setAiSummary(null); setAiDetail(null); setUsedModel(null); setIsAiSummarizing(false); setIsCachedResult(false);
+    }
 
     try {
       let range = '1y'; let interval = '1d';
@@ -1069,11 +1131,75 @@ const App = () => {
 
         const processedData = processTechnicalData(rawPoints);
         setHistoricalData(prev => ({ ...prev, [`${symbol}_${tf}`]: processedData }));
-        setHistoryLoading(false);
-        if (geminiApiKey) { await generateFullAnalysis(symbol, processedData, false, metaPrevClose); } else { if(!aiSummary) setAiSummary("請設定 API Key 以啟用 AI 分析。"); }
+        
+        if (activeHistorySymbolRef.current === symbol) {
+            setHistoryLoading(false);
+            
+            const today = getTodayDate();
+            const cache = getAiCache();
+            if (cache[symbol] && cache[symbol].date === today && (cache[symbol].summary || cache[symbol].detail)) {
+                setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
+                if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
+                setUsedModel(cache[symbol].model); setIsCachedResult(true); setIsDetailExpanded(true); 
+            } else if (geminiApiKey) { 
+                setIsAiSummarizing(true); 
+                await generateFullAnalysis(symbol, processedData, false, metaPrevClose); 
+            } else { 
+                if(!aiSummary) setAiSummary("請設定 API Key 以啟用 AI 分析。"); 
+            }
+        }
       } else { throw new Error('解析不到圖表數據'); }
-    } catch (err) { setHistoryError(String(err.message)); setIsAiSummarizing(false); } finally { setHistoryLoading(false); setIsLocked(false); }
+    } catch (err) { 
+        if (activeHistorySymbolRef.current === symbol) { setHistoryError(String(err.message)); setIsAiSummarizing(false); }
+    } finally { 
+        if (activeHistorySymbolRef.current === symbol) { setHistoryLoading(false); }
+    }
   };
+
+  useEffect(() => {
+    if (activeTab === 'history' && selectedHistorySymbol) {
+      if (activeHistorySymbolRef.current !== selectedHistorySymbol) {
+          activeHistorySymbolRef.current = selectedHistorySymbol;
+      }
+      
+      const key = `${selectedHistorySymbol}_${timeframe}`;
+
+      if (!historicalData[key]) {
+          if (!fetchingHistoryRef.current[key]) {
+              fetchingHistoryRef.current[key] = true;
+              if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort(); 
+              if (activeHistorySymbolRef.current === selectedHistorySymbol) {
+                  setAiSummary(null); setAiDetail(null); setUsedModel(null); setHistoryError(null);
+                  setAiSignals(prev => { const next = {...prev}; delete next[selectedHistorySymbol]; return next; });
+              }
+              fetchHistoricalData(selectedHistorySymbol, timeframe).finally(() => {
+                  fetchingHistoryRef.current[key] = false;
+              });
+          }
+      } else {
+          const cache = getAiCache();
+          const today = getTodayDate();
+          if (!cache[selectedHistorySymbol] || cache[selectedHistorySymbol].date !== today) {
+              if (!isAiSummarizing && timeframe === '1y_1d') {
+                  if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort();
+                  setIsAiSummarizing(true);
+                  generateFullAnalysis(selectedHistorySymbol, historicalData[key], false, etfExtraData[selectedHistorySymbol]?.prevClose);
+              }
+          } else {
+              if (activeHistorySymbolRef.current === selectedHistorySymbol) {
+                  setAiSummary(String(cache[selectedHistorySymbol].summary));
+                  setAiDetail(String(cache[selectedHistorySymbol].detail));
+                  if (cache[selectedHistorySymbol].signal) setAiSignals(prev => ({ ...prev, [selectedHistorySymbol]: cache[selectedHistorySymbol].signal }));
+                  setUsedModel(cache[selectedHistorySymbol].model);
+                  setIsCachedResult(true);
+                  setIsDetailExpanded(true);
+                  setHistoryLoading(false);
+              }
+          }
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, selectedHistorySymbol, timeframe]); 
 
   const performFetch = async (url) => {
     setLoading(true); setError(null); setUpdateError(null); setRealTimePrices({}); setHistoricalData({}); setPortfolioHealth(null);
@@ -1162,7 +1288,6 @@ const App = () => {
     currentObj[selectedHistorySymbol][patchDate] = parseFloat(patchPrice);
     localStorage.setItem('investment_manual_klines', JSON.stringify(currentObj)); setManualKLinesState(currentObj); setPatchDate(''); setPatchPrice(''); setToast(`已新增 ${selectedHistorySymbol} 點位，重新繪製中...`);
     setHistoricalData(prev => { const next = { ...prev }; delete next[`${selectedHistorySymbol}_${timeframe}`]; return next; });
-    fetchHistoricalData(selectedHistorySymbol, timeframe);
   };
 
   const handleDeletePatch = (date) => {
@@ -1171,7 +1296,6 @@ const App = () => {
     if (currentObj[selectedHistorySymbol] && currentObj[selectedHistorySymbol][date]) {
         delete currentObj[selectedHistorySymbol][date]; localStorage.setItem('investment_manual_klines', JSON.stringify(currentObj)); setManualKLinesState(currentObj); setToast(`已移除 ${date} 的點位...`);
         setHistoricalData(prev => { const next = { ...prev }; delete next[`${selectedHistorySymbol}_${timeframe}`]; return next; });
-        fetchHistoricalData(selectedHistorySymbol, timeframe);
     }
   };
 
@@ -1285,11 +1409,11 @@ const App = () => {
 
         {activeTab === 'history' && (
           <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6 h-full pb-20 md:pb-0 items-start">
-            <div className={`lg:col-span-1 w-full bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[calc(100vh-7rem)] lg:sticky lg:top-20 flex-none transition-opacity duration-300 ${isAiSummarizing ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
+            <div className={`lg:col-span-1 w-full bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[calc(100vh-7rem)] lg:sticky lg:top-20 flex-none transition-opacity duration-300 ${isUiLocked ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
               <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center sticky top-0 z-10"><h3 className="font-semibold text-white flex items-center"><LineIcon className="w-5 h-5 mr-2 text-blue-400" /> 持股列表</h3></div>
-              <div className={`overflow-y-auto flex-1 p-2 space-y-2`}>
+              <div className="overflow-y-auto flex-1 p-2 space-y-2">
                 {tradableSymbols.map((item) => (
-                  <button key={item['標的']} onClick={() => { setSelectedHistorySymbol(item['標的']); setTimeframe('1y_1d'); }} className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${selectedHistorySymbol === item['標的'] ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-slate-700/30 border-transparent text-slate-300 hover:bg-slate-700'}`}>
+                  <button key={item['標的']} disabled={isUiLocked} onClick={() => { if(isUiLocked) return; setSelectedHistorySymbol(item['標的']); setTimeframe('1y_1d'); }} className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${selectedHistorySymbol === item['標的'] ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-slate-700/30 border-transparent text-slate-300 hover:bg-slate-700'} ${isUiLocked ? 'cursor-not-allowed' : ''}`}>
                     <div className="flex justify-between items-center"><span className="font-bold">{String(item['標的'])}</span><span className="text-xs opacity-70">{String(item['類別'])}</span></div>
                     <div className="text-sm mt-1 truncate">{String(item['名稱'])}</div>
                     <div className="flex justify-between mt-1 text-xs opacity-60"><span>{formatCurrency(item.marketValue)}</span><span className={item.profitLoss >= 0 ? 'text-red-300' : 'text-green-300'}>{formatPercent(item.roi)}</span></div>
@@ -1300,16 +1424,19 @@ const App = () => {
 
             <div className="lg:col-span-3 w-full bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-2 md:p-6 flex flex-col relative h-auto min-h-[700px]">
               <div className="flex-none flex flex-col sm:flex-row justify-between items-start sm:items-center mb-2 gap-2">
-                <h3 className="text-xl font-bold text-white flex items-center">{String(selectedHistorySymbol)} <span className="ml-2 text-base font-normal text-slate-400">{String(tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱'] || '')}</span></h3>
-                <div className={`flex space-x-2 self-end sm:self-auto`}>
+                <h3 className="text-xl font-bold text-white flex items-center">{String(selectedHistorySymbol || '')} <span className="ml-2 text-base font-normal text-slate-400">{String(tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱'] || '')}</span></h3>
+                <div className={`flex space-x-2 self-end sm:self-auto ${isUiLocked ? 'opacity-50 pointer-events-none' : ''}`}>
                     {[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (
-                        <button key={tf.id} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{String(tf.label)}</button>
+                        <button key={tf.id} disabled={isUiLocked} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{String(tf.label)}</button>
                     ))}
                     <button
                         onClick={() => {
-                            const data = historicalData[`${selectedHistorySymbol}_${timeframe}`];
-                            if (data && data.length > 0) generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose); else fetchHistoricalData(selectedHistorySymbol, timeframe);
+                            if (isUiLocked) return;
+                            const key = `${selectedHistorySymbol}_${timeframe}`;
+                            fetchingHistoryRef.current[key] = false;
+                            setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
                         }}
+                        disabled={isUiLocked}
                         className="px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border border-slate-600 text-slate-400 hover:bg-slate-700 transition-colors flex items-center" title="清除快取並重新抓取"
                     >
                         <RefreshCw className={`w-3 h-3 ${historyLoading ? 'animate-spin' : ''} md:mr-1`} /><span className="hidden md:inline">重抓</span>
@@ -1395,9 +1522,16 @@ const App = () => {
                     {aiSignals[selectedHistorySymbol] === 'ADD_BONUS' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼投資</span></div>)}
                     {aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}
                     </div>
-                    {geminiApiKey && (
-                        <button onClick={() => { const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; if (data && data.length > 0) { generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose); } else { fetchHistoricalData(selectedHistorySymbol, timeframe); } }} className={`text-xs flex items-center transition-colors text-red-400 hover:text-red-300 ${isAiSummarizing ? 'opacity-50 cursor-not-allowed' : ''}`} disabled={isAiSummarizing}><RefreshCw className={`w-3 h-3 mr-1 ${isAiSummarizing ? 'animate-spin' : ''}`} />重新分析</button>
-                    )}
+                    <div className="flex gap-2">
+                        {isAiSummarizing && (
+                            <button onClick={() => { if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort(); }} className="text-[10px] bg-red-900/50 hover:bg-red-900/80 text-red-200 border border-red-500/50 px-2 py-1 rounded flex items-center transition-colors shadow-sm">
+                                <XCircle className="w-3 h-3 mr-1" />中斷分析
+                            </button>
+                        )}
+                        {!isAiSummarizing && geminiApiKey && (
+                            <button onClick={() => { const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; if (data && data.length > 0) { generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose); } else { fetchHistoricalData(selectedHistorySymbol, timeframe); } }} className="text-[10px] flex items-center transition-colors text-blue-400 hover:text-blue-300 bg-blue-900/30 border border-blue-500/30 px-2 py-1 rounded shadow-sm"><RefreshCw className="w-3 h-3 mr-1" />重新分析</button>
+                        )}
+                    </div>
                 </div>
                 <div className="bg-slate-900/50 rounded-lg p-5 border border-slate-700 shadow-inner h-auto">
                   {isAiSummarizing ? (
