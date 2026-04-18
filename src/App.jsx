@@ -11,15 +11,16 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.87 (Stable Resilience Engine - Gross Profit Fix)
+ * Alpha 投資戰情室 v54.88 (Stable Resilience Engine - AI Prompt & UI Fix)
  * * [重大架構升級]
  * 1. 終極防禦緩存：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份。
  * 2. 週末與非交易日精準校正：自動判斷台灣市場國定假日與週末，避免在非交易日錯誤補齊 K 線。
  * 3. 徹底解決 UI 鎖定與錯位 (Lock-free UI & Instant Wipe)：重構歷史走勢的狀態機，廢除會卡死的 isLocked，點擊新標的瞬間自動清空舊 AI 分析。
  * 4. 深度 AI 追蹤日誌 (Deep AI Debug Logs)：在 Gemini API 呼叫與多數決分析的每個關鍵節點加入詳細的 Console 與系統 Logs 輸出，方便追蹤任何失敗原因。
  * 5. 修正 ReferenceError：補回 `isUiLocked` 的狀態變數宣告，徹底解決畫面切換與渲染時產生的崩潰錯誤。
- * 6. AI 助理對話框升級：改為支援多行文字輸入的 Textarea，提供 Shift+Enter 換行體驗，增強長問題提問能力。
- * 7. 修復帳面損益計算異常：補上持股明細加總時遺漏的 grossProfit 累加邏輯，確保滑鼠游標懸浮顯示的「帳面損益」數值正確。
+ * 6. 修復帳面損益計算異常：補上持股明細加總時遺漏的 grossProfit 累加邏輯。
+ * 7. AI 定期定額防呆分析：強化 Prompt 邏輯，若判斷當月已完成基礎投資，嚴格禁止 AI 給出基礎扣款建議，強制僅針對「加碼」進行評估。
+ * 8. 圖表標題補齊：在技術指標子圖表區域增加當下指標名稱的標題顯示。
  */
 
 const DEMO_DATA = [
@@ -774,7 +775,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.87 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v54.85 Fast-Fail Engine) ===");
     if (globalAbortRef.current) globalAbortRef.current.abort();
     globalAbortRef.current = new AbortController();
     const signal = globalAbortRef.current.signal;
@@ -1027,7 +1028,19 @@ const App = () => {
         if (assetType === 'BOND' || assetType === 'BOND_ETF' || (assetType === 'ETF' && etfData?.yield)) keyMetrics += `\n- 殖利率: ${etfData?.yield ? (etfData.yield < 1 ? etfData.yield*100 : etfData.yield).toFixed(2)+'%' : '無'}`;
         if (assetType === 'BOND' || assetType === 'BOND_ETF' || isUsAsset(symbol)) keyMetrics += `\n- 基準殖利率: ${benchmarkYield || '無'}`;
 
-        let dcaStrategy = isDCA ? (hasBoughtThisMonth ? `本月已扣款，僅評估加碼` : `尋找低點扣款。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}`) : `單筆投入`;
+        let dcaStrategy = "";
+        let signalRules = "";
+
+        if (isDCA && hasBoughtThisMonth) {
+            dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。目前**僅需**評估是否觸發加碼條件，不再產生基礎扣款訊號。`;
+            signalRules = `燈號規則 (本月已扣款，僅評估加碼)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
+        } else if (isDCA) {
+            dcaStrategy = `3. 【定期定額 (尋找買點)】：尋找低點扣款。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}。若強制扣款成立，請視為基礎扣款條件成立。`;
+            signalRules = `燈號規則：\n- REDUCE (轉空未跌)\n- ADD_ALL (基礎+加碼皆成立且未漲)\n- ADD_BASIC (僅基礎成立未漲)\n- ADD_BONUS (僅加碼成立未漲)\n- HOLD (其他或遭鐵律阻擋)`;
+        } else {
+            dcaStrategy = `3. 【單筆投入】：純粹依據加碼條件尋找買點。`;
+            signalRules = `燈號規則 (單筆投入)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
+        }
 
         const prompt = `角色：專業分析師。深度分析 ${symbol}(${stockName})(${assetType})。
 投資定位：${classLabel}。模式：${dcaStrategy}
@@ -1037,7 +1050,7 @@ const App = () => {
 鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。
 濾網：1.大波動(MACD綠柱收斂/DIF金叉) 2.小波動(布林下緣) 3.大盤ETF(KD<20) 4.科技ETF(折價/RSI<30) 5.債券ETF(殖利率創高)。
 策略要求：根據技術支撐提供【預估目標價】。
-燈號規則：REDUCE(轉空未跌), ADD_ALL(基礎+加碼成立未漲), ADD_BASIC(僅基礎成立未漲), ADD_BONUS(僅加碼成立未漲), HOLD(其他或遭鐵律阻擋)。
+${signalRules}
 嚴格格式輸出(無Markdown)：
 [SUMMARY] (50字簡評)
 [DETAIL] (詳細分析報告)
@@ -1470,9 +1483,13 @@ const App = () => {
               <div className="flex-none flex flex-col space-y-1 h-auto min-h-[450px] md:h-[450px]">
               {historyLoading ? <div className="flex-1 flex items-center justify-center h-full"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div> : currentChartData && currentChartData.length > 0 ? (
                 <>
-                  <div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip content={CustomChartTooltip} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} /><Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" /><Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Scatter name="買入點" dataKey="buyPricePoint" shape={CustomStrategyDot} legendType="none" /><Brush dataKey="date" height={25} stroke="#64748B" fill="#0F172A" travellerWidth={10} tickFormatter={(tick) => tick} /></ComposedChart></ResponsiveContainer></div>
+                  <div className="h-72 w-full relative">
+                    <span className="text-xs text-slate-400 absolute top-1 left-2 z-10">價格走勢</span>
+                    <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip content={CustomChartTooltip} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} /><Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" /><Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Scatter name="買入點" dataKey="buyPricePoint" shape={CustomStrategyDot} legendType="none" /><Brush dataKey="date" height={25} stroke="#64748B" fill="#0F172A" travellerWidth={10} tickFormatter={(tick) => tick} /></ComposedChart></ResponsiveContainer>
+                  </div>
                   
                   <div className="h-32 w-full border-t border-slate-700 pt-1 relative group">
+                      <span className="text-xs text-slate-400 absolute top-2 left-2 z-10">{INDICATOR_TYPES[selectedIndicator].label}</span>
                       <div className="md:hidden absolute top-1 right-2 z-10 flex space-x-1">
                           {Object.keys(INDICATOR_TYPES).map(key => (<button key={key} onClick={() => setSelectedIndicator(key)} className={`text-[10px] px-2 py-0.5 rounded border ${selectedIndicator === key ? 'bg-slate-700 text-white border-slate-500' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>{String(key)}</button>))}
                       </div>
