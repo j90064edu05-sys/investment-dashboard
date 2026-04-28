@@ -568,13 +568,22 @@ const App = () => {
       const evaluateLastTradingDay = (hols) => {
           const logicalToday = getTodayDate();
           const todayStr = logicalToday.replace(/-/g, '');
-          const [y, m, d] = logicalToday.split('-');
-          let dt = new Date(parseInt(y), parseInt(m) - 1, parseInt(d)); 
+          const [y, m] = logicalToday.split('-');
+          
+          // 修正點：將日期初始化為「當月的最後一天」 (下個月的第 0 天)
+          let dt = new Date(parseInt(y), parseInt(m), 0); 
           let foundDateStr = '';
+          
+          // 從當月月底開始往前推算，直到找到非假日與非週末的交易日
           while (true) {
               const day = dt.getDay(); 
               const dateStr = `${dt.getFullYear()}${String(dt.getMonth() + 1).padStart(2, '0')}${String(dt.getDate()).padStart(2, '0')}`;
-              if (day === 0 || day === 6 || hols.includes(dateStr)) { dt.setDate(dt.getDate() - 1); } else { foundDateStr = dateStr; break; }
+              if (day === 0 || day === 6 || hols.includes(dateStr)) { 
+                  dt.setDate(dt.getDate() - 1); 
+              } else { 
+                  foundDateStr = dateStr; 
+                  break; 
+              }
           }
           setIsLastTradingDay(foundDateStr === todayStr);
       };
