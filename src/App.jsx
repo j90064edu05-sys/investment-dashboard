@@ -515,6 +515,9 @@ const App = () => {
   const [isDragging, setIsDragging] = useState(false);
   const [startX, setStartX] = useState(0);
   const svgRef = useRef(null);
+  
+  // 記錄觸控狀態 (用於手機端滑動與縮放)
+  const touchRef = useRef({ startX: 0, startDist: 0, isPinching: false, isPanning: false });
 
   const globalAbortRef = useRef(null);
   const logsContainerRef = useRef(null);
@@ -1389,7 +1392,7 @@ ${signalRules}
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
 
-  // --- SVG 看板引擎與互動邏輯 ---
+  // --- SVG 看板引擎與互動邏輯 (支援滑鼠與手機觸控) ---
   const handleWheel = (e) => {
     if (!currentChartData.length || isUiLocked) return;
     setZoom(prev => {
@@ -1429,6 +1432,70 @@ ${signalRules}
          idx = Math.max(0, Math.min(displayedCount - 1, idx));
          setHoverIndex(idx); 
      }
+  };
+
+  // 觸控邏輯 (手機專用)
+  const updateHoverIndexFromTouch = useCallback((touch) => {
+      if (!svgRef.current || !currentChartData.length) return;
+      const rect = svgRef.current.getBoundingClientRect();
+      const x = touch.clientX - rect.left;
+      const endIdx = zoom.endIndex === null ? currentChartData.length : zoom.endIndex;
+      const startIdx = Math.max(0, endIdx - zoom.count);
+      const displayedCount = endIdx - startIdx;
+      const spacing = rect.width / displayedCount;
+      let idx = Math.floor(x / spacing);
+      idx = Math.max(0, Math.min(displayedCount - 1, idx));
+      setHoverIndex(idx);
+  }, [currentChartData, zoom]);
+
+  const handleTouchStart = (e) => {
+      if (isUiLocked) return;
+      if (e.touches.length === 2) {
+          // 雙指準備縮放
+          const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+          touchRef.current = { startX: 0, startDist: dist, isPinching: true, isPanning: false };
+      } else if (e.touches.length === 1) {
+          // 單指準備平移或點擊查價
+          touchRef.current = { startX: e.touches[0].clientX, startDist: 0, isPinching: false, isPanning: true };
+          updateHoverIndexFromTouch(e.touches[0]);
+      }
+  };
+
+  const handleTouchMove = (e) => {
+      if (!currentChartData.length || isUiLocked) return;
+      
+      if (touchRef.current.isPinching && e.touches.length === 2) {
+          const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+          const deltaDist = touchRef.current.startDist - dist;
+
+          if (Math.abs(deltaDist) > 5) {
+              setZoom(prev => {
+                  const shift = deltaDist > 0 ? 4 : -4; // 距離縮短(>0)代表縮小->放大K線範圍，反之拉大
+                  const newCount = Math.max(20, Math.min(currentChartData.length, prev.count + shift));
+                  return { ...prev, count: newCount };
+              });
+              touchRef.current.startDist = dist;
+              setHoverIndex(null);
+          }
+      } else if (touchRef.current.isPanning && e.touches.length === 1) {
+          const deltaX = e.touches[0].clientX - touchRef.current.startX;
+          if (Math.abs(deltaX) > 8) {
+              setZoom(prev => {
+                  const shift = deltaX > 0 ? -2 : 2; // 向右滑(>0)代表往歷史回看
+                  let currentEnd = prev.endIndex === null ? currentChartData.length : prev.endIndex;
+                  let newEnd = Math.max(prev.count, Math.min(currentChartData.length, currentEnd + shift));
+                  return { ...prev, endIndex: newEnd };
+              });
+              touchRef.current.startX = e.touches[0].clientX;
+              setHoverIndex(null);
+          } else {
+              updateHoverIndexFromTouch(e.touches[0]);
+          }
+      }
+  };
+
+  const handleTouchEnd = () => {
+      touchRef.current = { startX: 0, startDist: 0, isPinching: false, isPanning: false };
   };
 
   // --- 繪製前準備資料 ---
@@ -1736,13 +1803,17 @@ ${signalRules}
 
                         {/* 純前端 SVG 繪圖引擎 */}
                         <div 
-                           className="flex-1 relative bg-slate-900/30 overflow-hidden cursor-crosshair ml-1"
+                           className="flex-1 relative bg-slate-900/30 overflow-hidden cursor-crosshair ml-1 touch-none"
                            ref={svgRef}
                            onMouseDown={handleMouseDown}
                            onMouseUp={handleMouseUp}
                            onMouseLeave={handleMouseLeave}
                            onMouseMove={handleMouseMove}
                            onWheel={handleWheel}
+                           onTouchStart={handleTouchStart}
+                           onTouchMove={handleTouchMove}
+                           onTouchEnd={handleTouchEnd}
+                           onTouchCancel={handleTouchEnd}
                         >
                            <svg width="100%" height="100%" viewBox="0 0 800 520" preserveAspectRatio="none">
                               {/* 網格線 */}
