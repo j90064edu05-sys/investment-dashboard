@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { 
-  ComposedChart, Line, Area, Bar, BarChart, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, 
-  Tooltip as RechartsTooltip, Legend, ResponsiveContainer, ReferenceLine, Scatter, Brush
+  PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, 
+  Tooltip as RechartsTooltip, Legend, ResponsiveContainer
 } from 'recharts';
 import { 
   PieChart as PieIcon, ArrowUpCircle, ArrowDownCircle, RefreshCw, Settings, 
@@ -11,16 +11,12 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.88 (Stable Resilience Engine - AI Prompt & UI Fix)
- * * [重大架構升級]
- * 1. 終極防禦緩存：針對 all_etf.txt 等必備資料，若所有 Proxy 遭封鎖，將自動啟用最後一次成功的本地備份。
- * 2. 週末與非交易日精準校正：自動判斷台灣市場國定假日與週末，避免在非交易日錯誤補齊 K 線。
- * 3. 徹底解決 UI 鎖定與錯位 (Lock-free UI & Instant Wipe)：重構歷史走勢的狀態機，廢除會卡死的 isLocked，點擊新標的瞬間自動清空舊 AI 分析。
- * 4. 深度 AI 追蹤日誌 (Deep AI Debug Logs)：在 Gemini API 呼叫與多數決分析的每個關鍵節點加入詳細的 Console 與系統 Logs 輸出，方便追蹤任何失敗原因。
- * 5. 修正 ReferenceError：補回 `isUiLocked` 的狀態變數宣告，徹底解決畫面切換與渲染時產生的崩潰錯誤。
- * 6. 修復帳面損益計算異常：補上持股明細加總時遺漏的 grossProfit 累加邏輯。
- * 7. AI 定期定額防呆分析：強化 Prompt 邏輯，若判斷當月已完成基礎投資，嚴格禁止 AI 給出基礎扣款建議，強制僅針對「加碼」進行評估。
- * 8. 圖表標題補齊：在技術指標子圖表區域增加當下指標名稱的標題顯示。
+ * Alpha 投資戰情室 v54.88 (整合 SVG 即時個股看板與動態指標卡片)
+ * * [模組大整合]
+ * 1. 歷史走勢全面升級：導入個股看板模組的純前端 SVG 圖表引擎，支援無段縮放 (滾輪)、平移 (拖曳)、十字游標。
+ * 2. 動態卡片與籌碼模擬：整合布林通道狀態、籌碼動態模擬、主力出貨警示、短線勝率與動態操作劇本。
+ * 3. 完美兼容 AI 引擎：原本的多數決 AI (Master Sync) 邏輯完全保留，並放置於新看板的專屬區塊中。
+ * 4. 指標擴充：為配合新看板，底層技術指標擴充計算 MA5 與 RSI(14)。
  */
 
 const DEMO_DATA = [
@@ -62,16 +58,37 @@ const ASSET_TYPES = {
   'SATELLITE': { label: '衛星資產', color: 'text-orange-300', bg: 'bg-orange-900/50', border: 'border-orange-500/50' }
 };
 
-const ADDON_LOGICS = {
-    'NONE': { label: '無 (None)', icon: Minus },
-    'PYRAMID': { label: '跌幅金字塔', icon: TrendingDown },
-    'TECHNICAL': { label: '技術指標', icon: BarChart4 },
-    'YIELD_MACRO': { label: '殖利率/總經訊號', icon: Globe }
+// --- [新 UI 元件] ---
+const Card = ({ children, title, className = "", noPadding = false }) => (
+  <div className={`border border-slate-700 bg-slate-800 rounded-xl flex flex-col shadow-lg overflow-hidden ${className}`}>
+    {title && (
+      <div className="border-b border-slate-700 bg-slate-900/50 px-3 py-2 text-sm font-semibold text-slate-200 text-center flex-none">
+        {title}
+      </div>
+    )}
+    <div className={`flex-1 relative flex flex-col ${noPadding ? '' : 'p-3'}`}>
+      {children}
+    </div>
+  </div>
+);
+
+const TextRow = ({ label, value, valueColor = "text-white" }) => (
+  <div className="flex justify-between items-center py-0.5 text-xs">
+    <span className="text-slate-400">{label}</span>
+    <span className={`font-mono ${valueColor}`}>{value}</span>
+  </div>
+);
+
+const IndicatorDot = ({ color }) => {
+  const colorMap = {
+    green: "bg-green-500 shadow-[0_0_8px_#22c55e]",
+    red: "bg-red-500 shadow-[0_0_8px_#ef4444]",
+    yellow: "bg-yellow-500 shadow-[0_0_8px_#eab308]",
+    gray: "bg-slate-600"
+  };
+  return <div className={`w-3 h-3 md:w-4 md:h-4 rounded-full ${colorMap[color]}`}></div>;
 };
 
-const INDICATOR_TYPES = { 'KD': { label: 'KD指標' }, 'MACD': { label: 'MACD' }, 'RSI': { label: 'RSI相對強弱' } };
-
-const Minus = (props) => <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinelinejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>;
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
 const formatPercent = (value) => `${((value || 0) * 100).toFixed(2)}%`;
 const formatPrice = (value) => {
@@ -160,7 +177,8 @@ const savePriceCache = (newPrices, extraData) => {
     localStorage.setItem('investment_price_cache', JSON.stringify(updatedCache));
 };
 
-const renderShape = (shape, cx, cy, color, size = 6) => {
+// 繪製各式圖形
+const renderShape = (shape, cx, cy, color, size = 5) => {
   const stroke = "#fff";
   const strokeWidth = 1.5;
   switch (shape) {
@@ -171,14 +189,6 @@ const renderShape = (shape, cx, cy, color, size = 6) => {
     case 'square': return <rect x={cx-size} y={cy-size} width={size*2} height={size*2} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
     default: return <g stroke={color} strokeWidth={2}><line x1={cx-size} y1={cy-size} x2={cx+size} y2={cy+size} /><line x1={cx-size} y1={cy+size} x2={cx+size} y2={cy-size} /></g>;
   }
-};
-
-const CustomStrategyDot = (props) => {
-  const { cx, cy, payload } = props;
-  if (!payload || !payload.buyAction) return null;
-  const strategy = payload.buyAction['策略'];
-  const config = STRATEGY_CONFIG[strategy] || STRATEGY_CONFIG['default'];
-  return renderShape(config.shape, cx, cy, config.color, 6);
 };
 
 const detectAssetType = (symbol, name, category) => {
@@ -333,7 +343,7 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, pare
     }
     
     if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
-    console.error(`[Network] ❌ 所有 Proxy 皆失敗: ${targetUrl}`);
+    console.warn(`[Network] ❌ 所有 Proxy 皆失敗: ${targetUrl}`);
     return null;
 };
 
@@ -406,7 +416,20 @@ const calculateRSI = (data, period) => { let rsiArray = new Array(data.length).f
 const calculateBollingerBands = (data, period = 20, multiplier = 2) => { const sma = calculateSMA(data, period); return data.map((item, i) => { if (i < period - 1) return { ...item, BBU: null, BBL: null, BBM: null }; const slice = data.slice(i - period + 1, i + 1); const mean = sma[i][`MA${period}`]; const variance = slice.map(d => Math.pow(d.close - mean, 2)).reduce((a, b) => a + b, 0) / period; const stdDev = Math.sqrt(variance); return { ...item, BBM: mean, BBU: mean + (multiplier * stdDev), BBL: mean - (multiplier * stdDev) }; }); };
 const calculateKD = (data, period = 9) => { let k = 50; let d = 50; return data.map((item, index, arr) => { if (index < period - 1) return { ...item, K: null, D: null }; const slice = arr.slice(index - period + 1, index + 1); const highestHigh = Math.max(...slice.map(d => d.high)); const lowestLow = Math.min(...slice.map(d => d.low)); let rsv = 50; if (highestHigh !== lowestLow) { rsv = ((item.close - lowestLow) / (highestHigh - lowestLow)) * 100; } k = (2/3) * k + (1/3) * rsv; d = (2/3) * d + (1/3) * k; return { ...item, K: k, D: d }; }); };
 const calculateMACD = (data) => { const ema12 = calculateEMA(data, 12, 'close'); const ema26 = calculateEMA(data, 26, 'close'); const difArray = data.map((d, i) => ({ ...d, DIF: (ema12[i] === null || ema26[i] === null) ? null : ema12[i] - ema26[i] })); const signalArray = calculateEMA(difArray, 9, 'DIF'); return difArray.map((d, i) => ({ ...d, Signal: signalArray[i], OSC: (d.DIF !== null && signalArray[i] !== null) ? d.DIF - signalArray[i] : null })); };
-const processTechnicalData = (rawData) => { if (!rawData || rawData.length === 0) return []; let d = calculateSMA(rawData, 20); d = calculateSMA(d, 60); d = calculateSMA(d, 120); d = calculateKD(d, 9); d = calculateMACD(d); const rsi6 = calculateRSI(d, 6); const rsi12 = calculateRSI(d, 12); const bbData = calculateBollingerBands(d, 20, 2); return d.map((item, i) => ({ ...item, ...bbData[i], RSI6: rsi6[i], RSI12: rsi12[i], BB_Range: [bbData[i].BBL, bbData[i].BBU] })); };
+const processTechnicalData = (rawData) => { 
+  if (!rawData || rawData.length === 0) return []; 
+  let d = calculateSMA(rawData, 5); 
+  d = calculateSMA(d, 20); 
+  d = calculateSMA(d, 60); 
+  d = calculateSMA(d, 120); 
+  d = calculateKD(d, 9); 
+  d = calculateMACD(d); 
+  const rsi6 = calculateRSI(d, 6); 
+  const rsi12 = calculateRSI(d, 12); 
+  const rsi14 = calculateRSI(d, 14);
+  const bbData = calculateBollingerBands(d, 20, 2); 
+  return d.map((item, i) => ({ ...item, ...bbData[i], RSI6: rsi6[i], RSI12: rsi12[i], RSI14: rsi14[i], BB_Range: [bbData[i].BBL, bbData[i].BBU] })); 
+};
 
 const loadPapaParse = () => {
   return new Promise((resolve, reject) => {
@@ -425,35 +448,6 @@ const Toast = ({ message, onClose }) => {
   return (<div className="fixed bottom-20 md:bottom-10 left-1/2 transform -translate-x-1/2 bg-green-600 text-white px-6 py-3 rounded-lg shadow-lg flex items-center z-[100] animate-fade-in-up"><CheckCircle className="w-5 h-5 mr-2" /><span>{String(message)}</span></div>);
 };
 
-const CustomChartTooltip = ({ active, payload, label }) => {
-  if (active && payload && payload.length) {
-    const dataPoint = payload[0].payload; 
-    return (
-      <div className="p-3 border border-slate-700 rounded-lg shadow-xl bg-slate-800/95 backdrop-blur-sm text-slate-100 text-xs z-50">
-        <p className="mb-2 font-bold text-slate-300 flex items-center">
-            {`日期: ${String(label)}`}
-            {dataPoint.isPatched && <span className="ml-2 text-[10px] bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded border border-blue-500/30">官方現價補齊</span>}
-            {dataPoint.isManual && <span className="ml-2 text-[10px] bg-purple-900/50 text-purple-300 px-1.5 py-0.5 rounded border border-purple-500/30">使用者自訂</span>}
-        </p>
-        {payload.filter(p => p.dataKey !== 'BB_Range' && p.dataKey !== 'buyPricePoint').map((entry, index) => (
-          <div key={index} className="flex items-center justify-between gap-4 mb-1">
-            <span style={{ color: entry.color }}>{String(entry.name)}</span>
-            <span className="font-mono font-medium">{formatPrice(entry.value)}</span>
-          </div>
-        ))}
-        {dataPoint && dataPoint.buyAction && (
-          <div className="mt-2 pt-2 border-t border-slate-600 border-dashed">
-            <div className="text-yellow-400 font-bold mb-1 flex items-center"><Target className="w-3 h-3 mr-1" /> 買入紀錄</div>
-            <div className="flex items-center justify-between gap-4 mb-1"><span className="text-slate-400">買入價</span><span className="font-mono font-medium text-yellow-400">{formatPrice(dataPoint.buyAction['價格'])}</span></div>
-            <div className="flex items-center justify-between gap-4 mb-1"><span className="text-slate-400">股數</span><span className="font-mono text-slate-200">{dataPoint.buyAction['股數']}</span></div>
-            <div className="flex items-center justify-between gap-4"><span className="text-slate-400">策略</span><span className="text-slate-200">{dataPoint.buyAction['策略']}</span></div>
-          </div>
-        )}
-      </div>
-    );
-  }
-  return null;
-};
 
 // --- 主應用程式 ---
 const App = () => {
@@ -479,7 +473,6 @@ const App = () => {
   const [historyError, setHistoryError] = useState(null); 
   const [timeframe, setTimeframe] = useState('1y_1d'); 
   const [isLastTradingDay, setIsLastTradingDay] = useState(false);
-  const [selectedIndicator, setSelectedIndicator] = useState('KD'); 
   const [twseHolidays, setTwseHolidays] = useState(['20240228', '20250228', '20260227', '20260403', '20260406', '20260501', '20261231']); 
     
   const [sortConfig, setSortConfig] = useState({ key: 'manual', direction: 'asc' });
@@ -515,12 +508,21 @@ const App = () => {
   const [patchPrice, setPatchPrice] = useState('');
   const [manualKLinesState, setManualKLinesState] = useState({});
   
+  // 新看板的狀態
+  const [zoom, setZoom] = useState({ endIndex: null, count: 80 }); 
+  const [activeSubChart, setActiveSubChart] = useState('MACD'); 
+  const [hoverIndex, setHoverIndex] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [startX, setStartX] = useState(0);
+  const svgRef = useRef(null);
+
   const globalAbortRef = useRef(null);
   const logsContainerRef = useRef(null);
   const activeHistorySymbolRef = useRef(null); 
   const fetchingHistoryRef = useRef({});
   const aiAbortControllerRef = useRef(null); 
 
+  // 加入 isAiSummarizing 到 UI 鎖定判斷中
   const isUiLocked = historyLoading || isAiSummarizing;
 
   useEffect(() => {
@@ -570,11 +572,9 @@ const App = () => {
           const todayStr = logicalToday.replace(/-/g, '');
           const [y, m] = logicalToday.split('-');
           
-          // 修正點：將日期初始化為「當月的最後一天」 (下個月的第 0 天)
           let dt = new Date(parseInt(y), parseInt(m), 0); 
           let foundDateStr = '';
           
-          // 從當月月底開始往前推算，直到找到非假日與非週末的交易日
           while (true) {
               const day = dt.getDay(); 
               const dateStr = `${dt.getFullYear()}${String(dt.getMonth() + 1).padStart(2, '0')}${String(dt.getDate()).padStart(2, '0')}`;
@@ -684,6 +684,12 @@ const App = () => {
     }
     prevDataHashRef.current = currentDataHash;
   }, [sortConfig, customOrder, tradableSymbols, selectedHistorySymbol]);
+  
+  // 新看板的 Zoom Reset 重置邏輯
+  useEffect(() => {
+    setZoom({ endIndex: null, count: timeframe === '1y_1d' ? 80 : 120 });
+    setHoverIndex(null);
+  }, [selectedHistorySymbol, timeframe]);
    
   const currentChartData = useMemo(() => {
     const baseData = historicalData[`${selectedHistorySymbol}_${timeframe}`];
@@ -720,8 +726,19 @@ const App = () => {
         latestDateStr = `${formatY}-${formatM}-${formatD}`;
         
         const lastPoint = merged[merged.length - 1];
-        if (lastPoint.date < latestDateStr) { merged.push({ ...lastPoint, date: latestDateStr, close: currentPrice, isPatched: true });
-        } else if (lastPoint.date === latestDateStr && !lastPoint.isManual) { merged[merged.length - 1] = { ...lastPoint, close: currentPrice }; }
+        if (lastPoint.date < latestDateStr) { 
+             merged.push({ 
+                ...lastPoint, date: latestDateStr, 
+                close: currentPrice, open: currentPrice, high: currentPrice, low: currentPrice, volume: 0, 
+                isPatched: true, ts: patchDateObj.getTime()
+             });
+        } else if (lastPoint.date === latestDateStr && !lastPoint.isManual) { 
+             merged[merged.length - 1] = { 
+                ...lastPoint, close: currentPrice, 
+                high: Math.max(lastPoint.high, currentPrice), 
+                low: Math.min(lastPoint.low, currentPrice) 
+             }; 
+        }
     }
 
     const buys = portfolioData.filter(p => p['標的'] === selectedHistorySymbol);
@@ -739,6 +756,16 @@ const App = () => {
     });
     return merged;
   }, [historicalData, selectedHistorySymbol, timeframe, portfolioData, realTimePrices, etfExtraData, twseHolidays]);
+
+  // 新看板的滾動防捲動事件
+  useEffect(() => {
+    const svgEl = svgRef.current;
+    if (svgEl) {
+      const preventScroll = (e) => e.preventDefault();
+      svgEl.addEventListener('wheel', preventScroll, { passive: false });
+      return () => svgEl.removeEventListener('wheel', preventScroll);
+    }
+  }, [currentChartData, activeTab]);
 
   const processData = (data, pricesMap, extraMap = {}) => {
     const currentUsdRate = pricesMap['TWD=X'] || 30; 
@@ -795,7 +822,6 @@ const App = () => {
     const symbolsToFetchList = uniqueSymbols.filter(s => s !== '定存' && !s.includes('-TD'));
     if (!symbolsToFetchList.includes('TWD=X')) symbolsToFetchList.push('TWD=X');
     if (!symbolsToFetchList.includes('^TNX')) symbolsToFetchList.push('^TNX');
-    if (!symbolsToFetchList.includes('^TVC')) symbolsToFetchList.push('^TVC'); 
     if (!symbolsToFetchList.includes('^TYX')) symbolsToFetchList.push('^TYX'); 
     
     const fetchTEWithTimer = async () => { const start = performance.now(); const res = await fetchTradingEconomicsYields(signal); console.log(`[Timer] TradingEconomics: ${(performance.now() - start).toFixed(2)} ms`); return res; };
@@ -889,12 +915,12 @@ const App = () => {
         }
         
         const teYields = await tePromise;
-        setUsBondYields({ '10Y': teYields['10Y'] || newPrices['^TNX'] || null, '20Y': teYields['20Y'] || newPrices['^TVC'] || null, '30Y': teYields['30Y'] || newPrices['^TYX'] || null });
+        setUsBondYields({ '10Y': teYields['10Y'] || newPrices['^TNX'] || null, '20Y': teYields['20Y'] || newPrices['^TYX'] || null, '30Y': teYields['30Y'] || newPrices['^TYX'] || null });
 
         symbolsToFetchList.forEach(symbol => {
              const extra = newEtfData[symbol] || {}; const name = symbolToName[symbol] || '';
              if (!extra.yield && (name.includes('美債') || name.includes('債'))) {
-                 if (name.includes('20年')) { extra.yield = teYields['20Y'] || newPrices['^TVC'] || newPrices['^TYX']; extra.yieldSource = "BM(20Y)"; } 
+                 if (name.includes('20年')) { extra.yield = teYields['20Y'] || newPrices['^TYX']; extra.yieldSource = "BM(20Y)"; } 
                  else { extra.yield = teYields['10Y'] || newPrices['^TNX']; extra.yieldSource = "BM(10Y)"; }
              }
              newEtfData[symbol] = extra;
@@ -919,45 +945,54 @@ const App = () => {
       throw new Error("請先設定 API Key");
     }
     const models = [...new Set([selectedModel, ...AVAILABLE_MODELS.map(m => m.id)])];
+    const backoffDelays = [1000, 2000, 4000, 8000, 16000];
+
     for (const model of models) {
         if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
-        const controller = new AbortController(); const timeoutId = setTimeout(() => controller.abort(), 45000); 
-        const abortHandler = () => controller.abort();
-        if (parentSignal) parentSignal.addEventListener('abort', abortHandler);
-        try {
-          console.log(`[AI Analysis] 嘗試模型 ${model}...`);
-          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 8192, temperature: customTemperature } }),
-              signal: controller.signal
-          });
-          clearTimeout(timeoutId);
-          if (!response.ok) {
-              let errMsg = await response.text(); try { const errData = JSON.parse(errMsg); if (errData.error?.message) errMsg = errData.error.message; } catch (e) {}
-              if ((response.status === 400 && errMsg.toLowerCase().includes('api key')) || response.status === 403) throw new Error(`API Key 無效 (${errMsg})`);
-              console.error(`[AI Analysis] 模型 ${model} 失敗: HTTP ${response.status}`);
-              continue; 
-          }
-          const data = await response.json(); 
-          const parts = data.candidates?.[0]?.content?.parts;
-          const text = parts ? parts.map(p => p.text || '').join('') : '';
-          
-          if (text) {
-              console.log(`[AI Analysis] 模型 ${model} 成功回傳。`);
-              return { text, model }; 
-          }
-        } catch (err) {
-          clearTimeout(timeoutId);
-          if (err.name === 'AbortError' || String(err.message).includes('AbortError')) {
-              if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
-          }
-          if (String(err.message).includes('API Key 無效')) throw err;
-          console.error(`[AI Analysis] 模型 ${model} 例外錯誤:`, err.message);
-        } finally {
-          if (parentSignal) parentSignal.removeEventListener('abort', abortHandler);
+        let lastErr = null;
+
+        for (let retry = 0; retry <= 5; retry++) {
+            if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
+            if (retry > 0) await new Promise(res => setTimeout(res, backoffDelays[retry - 1]));
+
+            const controller = new AbortController(); const timeoutId = setTimeout(() => controller.abort(), 45000); 
+            const abortHandler = () => controller.abort();
+            if (parentSignal) parentSignal.addEventListener('abort', abortHandler);
+            
+            try {
+              const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 8192, temperature: customTemperature } }),
+                  signal: controller.signal
+              });
+              clearTimeout(timeoutId);
+              
+              if (!response.ok) {
+                  let errMsg = await response.text(); try { const errData = JSON.parse(errMsg); if (errData.error?.message) errMsg = errData.error.message; } catch (e) {}
+                  if ((response.status === 400 && errMsg.toLowerCase().includes('api key')) || response.status === 403) throw new Error(`API Key 無效 (${errMsg})`);
+                  throw new Error(`HTTP ${response.status} - ${errMsg}`);
+              }
+              const data = await response.json(); 
+              const parts = data.candidates?.[0]?.content?.parts;
+              const text = parts ? parts.map(p => p.text || '').join('') : '';
+              
+              if (text) {
+                  return { text, model }; 
+              }
+            } catch (err) {
+              clearTimeout(timeoutId);
+              if (err.name === 'AbortError' || String(err.message).includes('AbortError')) {
+                  if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
+              }
+              if (String(err.message).includes('API Key 無效')) throw err;
+              lastErr = err;
+            } finally {
+              if (parentSignal) parentSignal.removeEventListener('abort', abortHandler);
+            }
         }
+        console.error(`[AI Analysis] 模型 ${model} 失敗: ${lastErr?.message}`);
     }
-    throw new Error(`AI 連線失敗，請檢查 API Key 或網路狀態`);
+    throw new Error(`AI 連線失敗 (已達嘗試上限)，請稍後再試或檢查額度狀態`);
   };
 
   const generatePortfolioHealthCheck = async () => {
@@ -1080,7 +1115,7 @@ ${signalRules}
                     if (String(err.message).includes('AbortError')) throw err;
                     console.error(`[AI Master] 解析錯誤 (${symbol} - 第 ${i} 次):`, err.message);
                 }
-                if (i < MAX_VOTES && !signal.aborted) await delay(1000);
+                if (i < MAX_VOTES && !signal.aborted) await delay(3000);
             }
             
             if (signal.aborted) throw new Error('AbortError: 手動中止');
@@ -1142,7 +1177,15 @@ ${signalRules}
       
       if (chartData && chartData.timestamp) {
         const timestamps = chartData.timestamp; const quote = chartData.indicators.quote[0];
-        let rawPoints = timestamps.map((ts, i) => ({ date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date(ts * 1000)), close: quote.close[i], high: quote.high[i], low: quote.low[i], open: quote.open[i] })).filter(d => d.close != null && d.high != null);
+        let rawPoints = timestamps.map((ts, i) => ({ 
+            date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date(ts * 1000)), 
+            close: quote.close[i], 
+            high: quote.high[i], 
+            low: quote.low[i], 
+            open: quote.open[i],
+            volume: quote.volume[i] || 0,
+            ts: ts * 1000
+        })).filter(d => d.close != null && d.high != null);
         
         const manualKLines = JSON.parse(localStorage.getItem('investment_manual_klines') || '{}');
         const symbolManualData = manualKLines[symbol] || {};
@@ -1346,6 +1389,133 @@ ${signalRules}
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
 
+  // --- SVG 看板引擎與互動邏輯 ---
+  const handleWheel = (e) => {
+    if (!currentChartData.length || isUiLocked) return;
+    setZoom(prev => {
+       const delta = e.deltaY > 0 ? 5 : -5;
+       const newCount = Math.max(20, Math.min(currentChartData.length, prev.count + delta));
+       return { ...prev, count: newCount };
+    });
+    setHoverIndex(null); 
+  };
+
+  const handleMouseDown = (e) => { if(!isUiLocked) { setIsDragging(true); setStartX(e.clientX); } };
+  const handleMouseUp = () => setIsDragging(false);
+  const handleMouseLeave = () => { setIsDragging(false); setHoverIndex(null); }; 
+ 
+  const handleMouseMove = (e) => {
+     if (!currentChartData.length || isUiLocked) return;
+     if (isDragging) {
+         const deltaX = e.clientX - startX;
+         if (Math.abs(deltaX) > 8) {
+             setZoom(prev => {
+                 const shift = deltaX > 0 ? -1 : 1; 
+                 let currentEnd = prev.endIndex === null ? currentChartData.length : prev.endIndex;
+                 let newEnd = Math.max(prev.count, Math.min(currentChartData.length, currentEnd + shift));
+                 return { ...prev, endIndex: newEnd };
+             });
+             setStartX(e.clientX);
+         }
+         setHoverIndex(null); 
+     } else {
+         const rect = e.currentTarget.getBoundingClientRect();
+         const x = e.clientX - rect.left;
+         const endIdx = zoom.endIndex === null ? currentChartData.length : zoom.endIndex;
+         const startIdx = Math.max(0, endIdx - zoom.count);
+         const displayedCount = endIdx - startIdx;
+         const spacing = rect.width / displayedCount;
+         let idx = Math.floor(x / spacing);
+         idx = Math.max(0, Math.min(displayedCount - 1, idx));
+         setHoverIndex(idx); 
+     }
+  };
+
+  // --- 繪製前準備資料 ---
+  const endIdx = zoom.endIndex === null ? currentChartData.length : zoom.endIndex;
+  const startIdx = Math.max(0, endIdx - zoom.count);
+  const displayChartData = currentChartData.slice(startIdx, endIdx);
+
+  const activeIdx = hoverIndex !== null ? hoverIndex : (displayChartData.length - 1);
+  const activeCandle = displayChartData[activeIdx] || { open: 0, high: 0, low: 0, close: 0, volume: 0, ts: Date.now() };
+  const prevC = activeIdx > 0 ? displayChartData[activeIdx-1].close : activeCandle.open;
+  
+  const activeChange = activeCandle.close - prevC;
+  const activeChangePercent = prevC > 0 ? (activeChange / prevC) * 100 : 0;
+  const activeColorClass = activeChange > 0 ? 'text-red-500' : activeChange < 0 ? 'text-green-500' : 'text-white';
+  const activeSign = activeChange > 0 ? '▲ ' : activeChange < 0 ? '▼ ' : '';
+  
+  const dateObj = activeCandle.ts ? new Date(activeCandle.ts) : new Date();
+  const dateStr = hoverIndex !== null ? `日期: ${dateObj.getFullYear()}/${dateObj.getMonth()+1}/${dateObj.getDate()}` : '今日動態';
+
+  const currentMA5 = activeCandle.MA5 || 0;
+  const currentMA20 = activeCandle.MA20 || 0;
+  const currentMA60 = activeCandle.MA60 || 0;
+  const currentBBUpper = activeCandle.BBU || 0;
+  const currentBBLower = activeCandle.BBL || 0;
+  const currentMACD = activeCandle.OSC || 0;
+  const currentK = activeCandle.K || 50;
+  const currentD = activeCandle.D || 50;
+  const currentRSI = activeCandle.RSI14 || 50;
+
+  const bias20 = currentMA20 > 0 ? ((activeCandle.close - currentMA20) / currentMA20) * 100 : 0;
+  const stockPrice = currentChartData.length > 0 ? currentChartData[currentChartData.length - 1].close : 0;
+
+  let bbStatus = "區間內震盪";
+  let bbColor = "text-yellow-400";
+  if (stockPrice > activeCandle.BBU && activeCandle.BBU > 0) {
+      bbStatus = "突破上軌 (強勢)";
+      bbColor = "text-red-500";
+  } else if (stockPrice < activeCandle.BBL && activeCandle.BBL > 0) {
+      bbStatus = "跌破下軌 (弱勢)";
+      bbColor = "text-green-500";
+  } else if (stockPrice > currentMA20) {
+      bbStatus = "中軌之上 (偏多)";
+      bbColor = "text-red-400";
+  } else if (stockPrice < currentMA20) {
+      bbStatus = "中軌之下 (偏空)";
+      bbColor = "text-green-400";
+  }
+
+  const latestChangePercent = currentChartData.length > 1 ? ((currentChartData[currentChartData.length - 1].close - currentChartData[currentChartData.length - 2].close) / currentChartData[currentChartData.length - 2].close) * 100 : 0;
+  const extRatio = Math.min(Math.max(Math.round(50 + latestChangePercent * 3), 20), 80);
+  const intRatio = 100 - extRatio;
+  
+  const bodySize = Math.abs(activeCandle.close - activeCandle.open);
+  const upperShadow = activeCandle.high - Math.max(activeCandle.close, activeCandle.open);
+  const lowerShadow = Math.min(activeCandle.close, activeCandle.open) - activeCandle.low;
+  
+  const isRedK = activeCandle.close >= activeCandle.open;
+  const isLongRed = isRedK && (activeCandle.close - activeCandle.open) / activeCandle.open > 0.03;
+  const isLongBlack = !isRedK && (activeCandle.open - activeCandle.close) / activeCandle.open > 0.03;
+  const hasUpperShadow = upperShadow > bodySize * 2 && upperShadow > (activeCandle.open * 0.01);
+  const hasLowerShadow = lowerShadow > bodySize * 2 && lowerShadow > (activeCandle.open * 0.01);
+
+  const last10 = displayChartData.slice(-10);
+  const winDays = last10.filter(d => d.close >= d.open).length;
+  const winRate = last10.length > 0 ? Math.round((winDays / last10.length) * 100) : 50;
+
+  const volMA5 = displayChartData.length >= 5 ? displayChartData.slice(-5).reduce((acc, curr) => acc + (curr.volume || 0), 0) / 5 : activeCandle.volume;
+  const isVolUp = (activeCandle.volume) > volMA5;
+
+  let paddedMin = 0, paddedMax = 0, mapPriceY = () => 0;
+  if (displayChartData.length > 0) {
+      const allLows = displayChartData.map(d => d.low);
+      const allHighs = displayChartData.map(d => d.high);
+      const validMAs = displayChartData.map(d => [d.MA5, d.MA20, d.MA60, d.BBU, d.BBL]).flat().filter(v => v !== null && v !== undefined);
+      
+      const minPrice = Math.min(...allLows, ...validMAs);
+      const maxPrice = Math.max(...allHighs, ...validMAs);
+      const priceRange = maxPrice - minPrice || 1;
+      
+      paddedMin = minPrice - priceRange * 0.05;
+      paddedMax = maxPrice + priceRange * 0.05;
+      const paddedRange = paddedMax - paddedMin;
+      
+      mapPriceY = (val) => 280 - ((val - paddedMin) / paddedRange) * 260;
+  }
+
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20 md:pb-0">
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
@@ -1451,8 +1621,12 @@ ${signalRules}
             </div>
         )}
 
+        {/* ======================================================== */}
+        {/* =================   整合 SVG 歷史走勢看板   ================ */}
+        {/* ======================================================== */}
         {activeTab === 'history' && (
           <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6 h-full pb-20 md:pb-0 items-start">
+            {/* 左側持股列表 */}
             <div className={`lg:col-span-1 w-full bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[calc(100vh-7rem)] lg:sticky lg:top-20 flex-none transition-opacity duration-300 ${isUiLocked ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
               <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center sticky top-0 z-10"><h3 className="font-semibold text-white flex items-center"><LineIcon className="w-5 h-5 mr-2 text-blue-400" /> 持股列表</h3></div>
               <div className="overflow-y-auto flex-1 p-2 space-y-2">
@@ -1466,133 +1640,517 @@ ${signalRules}
               </div>
             </div>
 
-            <div className="lg:col-span-3 w-full bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-2 md:p-6 flex flex-col relative h-auto min-h-[700px]">
-              <div className="flex-none flex flex-col sm:flex-row justify-between items-start sm:items-center mb-2 gap-2">
-                <h3 className="text-xl font-bold text-white flex items-center">{String(selectedHistorySymbol || '')} <span className="ml-2 text-base font-normal text-slate-400">{String(tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱'] || '')}</span></h3>
-                <div className={`flex space-x-2 self-end sm:self-auto ${isUiLocked ? 'opacity-50 pointer-events-none' : ''}`}>
-                    {[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (
-                        <button key={tf.id} disabled={isUiLocked} onClick={() => setTimeframe(tf.id)} className={`px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border ${timeframe === tf.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400 hover:bg-slate-700'}`}>{String(tf.label)}</button>
-                    ))}
-                    <button
-                        onClick={() => {
-                            if (isUiLocked) return;
-                            const key = `${selectedHistorySymbol}_${timeframe}`;
-                            fetchingHistoryRef.current[key] = false;
-                            setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
-                            fetchHistoricalData(selectedHistorySymbol, timeframe).finally(() => { fetchingHistoryRef.current[key] = false; });
-                        }}
-                        disabled={isUiLocked}
-                        className="px-2 py-1 md:px-3 md:py-1 rounded text-xs font-medium border border-slate-600 text-slate-400 hover:bg-slate-700 transition-colors flex items-center" title="清除快取並重新抓取"
-                    >
-                        <RefreshCw className={`w-3 h-3 ${historyLoading ? 'animate-spin' : ''} md:mr-1`} /><span className="hidden md:inline">重抓</span>
-                    </button>
+            {/* 右側新版儀表板 */}
+            <div className="lg:col-span-3 w-full flex flex-col relative h-auto gap-4">
+              
+              {/* Header 資訊與操作區 */}
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center border border-slate-700 bg-slate-800 rounded-xl p-3 shadow-lg gap-4">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <h1 className="text-2xl font-bold text-white tracking-wider">{String(selectedHistorySymbol || '')}</h1>
+                  <h2 className="text-lg font-bold text-slate-300">{String(tradableSymbols.find(t => t['標的'] === selectedHistorySymbol)?.['名稱'] || '')}</h2>
+                  <div className={`text-2xl font-mono ${activeColorClass} font-bold ml-2 md:ml-4`}>{formatPrice(stockPrice)}</div>
+                  <div className={`flex flex-col ${activeColorClass} text-xs md:text-sm font-mono`}>
+                    <span>{activeSign}{Math.abs(activeChange).toFixed(2)}</span>
+                    <span>({Math.abs(activeChangePercent).toFixed(2)}%)</span>
+                  </div>
+                  {historyError && <span className="ml-2 text-[10px] text-red-400 bg-red-950/30 px-1.5 py-0.5 rounded border border-red-900/50">{String(historyError)}</span>}
+                </div>
+                
+                <div className={`flex items-center gap-4 flex-wrap ${isUiLocked ? 'opacity-50 pointer-events-none' : ''}`}>
+                   <div className="flex bg-slate-900 rounded-lg border border-slate-700 p-0.5">
+                      {[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (
+                         <button key={tf.id} disabled={isUiLocked} onClick={() => setTimeframe(tf.id)} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${timeframe === tf.id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}>{String(tf.label)}</button>
+                      ))}
+                   </div>
+                   <button
+                       onClick={() => {
+                           if (isUiLocked) return;
+                           const key = `${selectedHistorySymbol}_${timeframe}`;
+                           fetchingHistoryRef.current[key] = false;
+                           setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
+                           fetchHistoricalData(selectedHistorySymbol, timeframe).finally(() => { fetchingHistoryRef.current[key] = false; });
+                       }}
+                       disabled={isUiLocked}
+                       className="px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors flex items-center bg-slate-800" title="清除快取並重新抓取"
+                   >
+                       <RefreshCw className={`w-3 h-3 ${historyLoading ? 'animate-spin' : ''} md:mr-1`} /><span className="hidden md:inline">重抓</span>
+                   </button>
                 </div>
               </div>
-              
-              <div className="flex-none flex flex-col space-y-1 h-auto min-h-[450px] md:h-[450px]">
-              {historyLoading ? <div className="flex-1 flex items-center justify-center h-full"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div> : currentChartData && currentChartData.length > 0 ? (
+
+              {historyLoading ? (
+                 <div className="flex-1 flex items-center justify-center min-h-[400px] bg-slate-800 border border-slate-700 rounded-xl"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div>
+              ) : currentChartData && currentChartData.length > 0 ? (
                 <>
-                  <div className="h-72 w-full relative">
-                    <span className="text-xs text-slate-400 absolute top-1 left-2 z-10">價格走勢</span>
-                    <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}><ComposedChart data={currentChartData} syncId="anyId"><defs><linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} /><XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} minTickGap={50} /><YAxis stroke="#94a3b8" domain={['auto', 'auto']} tickFormatter={formatPrice} /><RechartsTooltip content={CustomChartTooltip} /><Legend verticalAlign="top" height={36}/><Area type="monotone" dataKey="close" name="股價" stroke="#3B82F6" fillOpacity={1} fill="url(#colorPrice)" strokeWidth={2} /><Line type="monotone" dataKey="MA20" name="MA20" stroke="#EAB308" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA60" name="MA60" stroke="#F97316" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="MA120" name="MA120" stroke="#EF4444" dot={false} strokeWidth={1} /><Area type="monotone" dataKey="BB_Range" stroke="none" fill="#8B5CF6" fillOpacity={0.1} legendType="none" /><Line type="monotone" dataKey="BBU" name="布林上軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="BBL" name="布林下軌" stroke="#8B5CF6" strokeDasharray="3 3" dot={false} strokeWidth={1} /><Scatter name="買入點" dataKey="buyPricePoint" shape={CustomStrategyDot} legendType="none" /><Brush dataKey="date" height={25} stroke="#64748B" fill="#0F172A" travellerWidth={10} tickFormatter={(tick) => tick} /></ComposedChart></ResponsiveContainer>
+                  {/* --- SVG 圖表引擎 --- */}
+                  <Card className="h-[450px] md:h-[500px]" noPadding>
+                     <div className="flex justify-between items-center p-2 border-b border-slate-700 text-xs bg-slate-900/50 z-10 relative">
+                        <div className="flex gap-4 flex-wrap">
+                           <span className="bg-blue-900/50 px-2 py-0.5 border border-blue-700/50 rounded flex items-center gap-1 text-blue-200 shadow-sm">主圖指標</span>
+                           <span className="text-yellow-500 font-mono flex items-center">MA5: {currentMA5 > 0 ? currentMA5.toFixed(2) : '--'}</span>
+                           <span className="text-cyan-400 font-mono flex items-center">MA20: {currentMA20 > 0 ? currentMA20.toFixed(2) : '--'}</span>
+                           <span className="text-purple-400 font-mono flex items-center">MA60: {currentMA60 > 0 ? currentMA60.toFixed(2) : '--'}</span>
+                        </div>
+                        <div className="hidden md:flex text-slate-400 items-center gap-2">
+                           <span className="animate-pulse text-blue-400 opacity-70">💡 在圖表上滾動可縮放，拖曳可平移</span>
+                        </div>
+                     </div>
+                     
+                     <div className="relative flex-1 p-2 flex h-full overflow-hidden">
+                        {/* 懸停資訊面板 (左側) */}
+                        <div className="w-24 border-r border-slate-700/50 pr-2 flex flex-col gap-1 text-[11px] font-mono shrink-0 z-10 bg-slate-800">
+                           <div className={`border-b border-slate-700 pb-1 mb-1 truncate ${hoverIndex !== null ? 'text-blue-400 font-bold' : 'text-slate-400'}`}>
+                              {dateStr}
+                           </div>
+                           <TextRow label="開" value={activeCandle.open.toFixed(2)} />
+                           <TextRow label="高" value={activeCandle.high.toFixed(2)} valueColor="text-red-500" />
+                           <TextRow label="低" value={activeCandle.low.toFixed(2)} valueColor="text-green-500" />
+                           <TextRow label="收" value={activeCandle.close.toFixed(2)} valueColor={activeColorClass} />
+                           <TextRow label="量" value={Math.floor((activeCandle.volume||0)/1000).toLocaleString()} valueColor="text-yellow-500" />
+                           <div className={`py-1 ${activeColorClass} border-b border-slate-700 mb-1`}>{activeSign}{Math.abs(activeChange).toFixed(2)}</div>
+                           
+                           <div className="text-slate-400 border-b border-slate-700 pb-1 mt-2 flex justify-between items-center">
+                              <span>通道/副圖</span>
+                           </div>
+                           <TextRow label="布林上" value={currentBBUpper > 0 ? currentBBUpper.toFixed(2) : '--'} valueColor="text-slate-300" />
+                           <TextRow label="布林下" value={currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'} valueColor="text-slate-300" />
+                           
+                           <div className="flex gap-1 mb-1 mt-2">
+                              <button onClick={() => setActiveSubChart('MACD')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'MACD' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>MACD</button>
+                              <button onClick={() => setActiveSubChart('KD')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'KD' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>KD</button>
+                              <button onClick={() => setActiveSubChart('RSI')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'RSI' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>RSI</button>
+                           </div>
+                           {activeSubChart === 'MACD' && (
+                              <TextRow label="MACD" value={currentMACD.toFixed(2)} valueColor={currentMACD > 0 ? "text-red-500" : "text-green-500"} />
+                           )}
+                           {activeSubChart === 'KD' && (
+                              <>
+                                 <TextRow label="K(9)" value={currentK.toFixed(1)} valueColor="text-yellow-400" />
+                                 <TextRow label="D(9)" value={currentD.toFixed(1)} valueColor="text-blue-400" />
+                              </>
+                           )}
+                           {activeSubChart === 'RSI' && (
+                              <TextRow label="RSI(14)" value={currentRSI.toFixed(1)} valueColor="text-purple-400" />
+                           )}
+                        </div>
+
+                        {/* 純前端 SVG 繪圖引擎 */}
+                        <div 
+                           className="flex-1 relative bg-slate-900/30 overflow-hidden cursor-crosshair ml-1"
+                           ref={svgRef}
+                           onMouseDown={handleMouseDown}
+                           onMouseUp={handleMouseUp}
+                           onMouseLeave={handleMouseLeave}
+                           onMouseMove={handleMouseMove}
+                           onWheel={handleWheel}
+                        >
+                           <svg width="100%" height="100%" viewBox="0 0 800 520" preserveAspectRatio="none">
+                              {/* 網格線 */}
+                              <g stroke="#334155" strokeWidth="0.5" strokeDasharray="4 4" opacity="0.5">
+                                 <line x1="0" y1="50" x2="800" y2="50" />
+                                 <line x1="0" y1="150" x2="800" y2="150" />
+                                 <line x1="0" y1="250" x2="800" y2="250" />
+                                 
+                                 {activeSubChart === 'MACD' && <line x1="0" y1="470" x2="800" y2="470" stroke="#64748b" opacity="0.3" strokeDasharray="0"/>}
+                                 {activeSubChart === 'KD' && (
+                                    <><line x1="0" y1="440" x2="800" y2="440" stroke="#ef4444" opacity="0.5" /><line x1="0" y1="500" x2="800" y2="500" stroke="#22c55e" opacity="0.5" /></>
+                                 )}
+                                 {activeSubChart === 'RSI' && (
+                                    <><line x1="0" y1="450" x2="800" y2="450" stroke="#ef4444" opacity="0.5" /><line x1="0" y1="490" x2="800" y2="490" stroke="#22c55e" opacity="0.5" /></>
+                                 )}
+                              </g>
+
+                              {/* 繪製 K線與副圖 */}
+                              {(() => {
+                                 const maxV = Math.max(...displayChartData.map(d => d.volume)) || 1;
+                                 const mapVolH = (val) => (val / maxV) * 70;
+
+                                 const maxMacdAbs = Math.max(
+                                    ...displayChartData.map(d => Math.abs(d.OSC || 0)), 
+                                    ...displayChartData.map(d => Math.abs(d.DIF || 0)), 
+                                    ...displayChartData.map(d => Math.abs(d.Signal || 0)), 
+                                    0.01
+                                 );
+                                 const mapMacdY = (val) => 470 - (val / maxMacdAbs) * 45; 
+
+                                 const spacing = 800 / Math.max(displayChartData.length, 1);
+                                 const barW = Math.max(1, spacing * 0.7);
+
+                                 return displayChartData.map((d, i) => {
+                                    const x = spacing * 0.5 + i * spacing;
+                                    const isUpK = d.close >= d.open;
+                                    const kColor = isUpK ? "#ef4444" : "#22c55e";
+                                    const osc = d.OSC || 0;
+                                    const oscColor = osc >= 0 ? "#ef4444" : "#22c55e";
+
+                                    return (
+                                      <g key={i}>
+                                        <line x1={x} y1={mapPriceY(d.high)} x2={x} y2={mapPriceY(d.low)} stroke={kColor} strokeWidth={barW>3?1.5:1} />
+                                        <rect x={x-barW/2} y={mapPriceY(Math.max(d.open, d.close))} width={barW} height={Math.max(1, Math.abs(mapPriceY(d.open) - mapPriceY(d.close)))} fill={kColor} />
+                                        <rect x={x-barW/2} y={400 - mapVolH(d.volume)} width={barW} height={mapVolH(d.volume)} fill={kColor} opacity="0.5" />
+                                        {activeSubChart === 'MACD' && (
+                                           <rect x={x-barW/2} y={osc >= 0 ? mapMacdY(osc) : 470} width={barW} height={Math.max(1, Math.abs(mapMacdY(osc) - 470))} fill={oscColor} opacity="0.7" />
+                                        )}
+                                      </g>
+                                    );
+                                 });
+                              })()}
+
+                              {/* 繪製折線 (布林軌道, 均線, MACD, KD, RSI) */}
+                              {(() => {
+                                 const maxMacdAbs = Math.max(
+                                    ...displayChartData.map(d => Math.abs(d.OSC || 0)), 
+                                    ...displayChartData.map(d => Math.abs(d.DIF || 0)), 
+                                    ...displayChartData.map(d => Math.abs(d.Signal || 0)), 
+                                    0.01
+                                 );
+                                 const mapMacdY = (val) => 470 - (val / maxMacdAbs) * 45;
+                                 const mapKdY = (val) => 520 - (val / 100) * 100;
+                                 const mapRsiY = (val) => 520 - (val / 100) * 100;
+                                 const spacing = 800 / Math.max(displayChartData.length, 1);
+                                 
+                                 const buildPath = (dataKey, mapFn) => {
+                                    return displayChartData.map((d, i) => {
+                                       const val = d[dataKey];
+                                       if (val === null || val === undefined) return '';
+                                       const x = spacing * 0.5 + i * spacing;
+                                       return `${i===0?'M':'L'} ${x},${mapFn(val)}`;
+                                    }).join(' ');
+                                 };
+
+                                 return (
+                                    <g fill="none" strokeWidth="1.5">
+                                       <path d={buildPath('BBU', mapPriceY)} stroke="#8b5cf6" strokeWidth="1" strokeDasharray="3 3" opacity="0.6" />
+                                       <path d={buildPath('BBL', mapPriceY)} stroke="#8b5cf6" strokeWidth="1" strokeDasharray="3 3" opacity="0.6" />
+
+                                       <path d={buildPath('MA5', mapPriceY)} stroke="#eab308" />
+                                       <path d={buildPath('MA20', mapPriceY)} stroke="#22d3ee" />
+                                       <path d={buildPath('MA60', mapPriceY)} stroke="#c084fc" />
+                                       
+                                       {activeSubChart === 'MACD' && (
+                                          <>
+                                             <path d={buildPath('DIF', mapMacdY)} stroke="#f59e0b" strokeWidth="1" />
+                                             <path d={buildPath('Signal', mapMacdY)} stroke="#3b82f6" strokeWidth="1" />
+                                          </>
+                                       )}
+                                       {activeSubChart === 'KD' && (
+                                          <>
+                                             <path d={buildPath('K', mapKdY)} stroke="#facc15" strokeWidth="1.2" />
+                                             <path d={buildPath('D', mapKdY)} stroke="#60a5fa" strokeWidth="1.2" />
+                                          </>
+                                       )}
+                                       {activeSubChart === 'RSI' && (
+                                          <path d={buildPath('RSI14', mapRsiY)} stroke="#c084fc" strokeWidth="1.2" />
+                                       )}
+                                    </g>
+                                 );
+                              })()}
+
+                              {/* 繪製買入點圖示 (Scatter) */}
+                              {(() => {
+                                 const spacing = 800 / Math.max(displayChartData.length, 1);
+                                 return displayChartData.map((d, i) => {
+                                    if (!d.buyAction) return null;
+                                    const x = spacing * 0.5 + i * spacing;
+                                    const buyPrice = d.buyPricePoint || d.close;
+                                    const y = mapPriceY(buyPrice);
+                                    const strategy = d.buyAction['策略'] || 'default';
+                                    const config = STRATEGY_CONFIG[strategy] || STRATEGY_CONFIG['default'];
+                                    return (
+                                       <g key={`buy-${i}`}>
+                                          {renderShape(config.shape, x, y, config.color, 5)}
+                                       </g>
+                                    );
+                                 });
+                              })()}
+
+                              {/* 十字游標 (Crosshair) */}
+                              {hoverIndex !== null && (() => {
+                                  const spacing = 800 / displayChartData.length;
+                                  const x = spacing * 0.5 + hoverIndex * spacing;
+                                  const y = mapPriceY(displayChartData[hoverIndex].close);
+                                  return (
+                                     <g>
+                                        <line x1={x} y1="0" x2={x} y2="520" stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
+                                        <line x1="0" y1={y} x2="800" y2={y} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
+                                        <circle cx={x} cy={y} r="3" fill={displayChartData[hoverIndex].close >= displayChartData[hoverIndex].open ? "#ef4444" : "#22c55e"} />
+                                     </g>
+                                  );
+                              })()}
+                           </svg>
+                        </div>
+                        
+                        {/* 比例尺面板 (右側) */}
+                        <div className="w-10 border-l border-slate-700/50 pl-1 py-1 flex flex-col text-[10px] text-slate-500 font-mono relative shrink-0 bg-slate-800">
+                           {displayChartData.length > 0 && (
+                              <div className="absolute top-0 bottom-0 w-full flex flex-col py-0">
+                                 <div className="flex flex-col justify-between" style={{ height: '57.69%' }}>
+                                    <span>{paddedMax.toFixed(0)}</span>
+                                    <span>{((paddedMax+paddedMin)/2).toFixed(0)}</span>
+                                    <span>{paddedMin.toFixed(0)}</span>
+                                 </div>
+                                 <div style={{ height: '3.85%' }}></div>
+                                 <div className="flex flex-col justify-end text-yellow-500 pb-1" style={{ height: '15.38%' }}>
+                                    Vol
+                                 </div>
+                                 <div style={{ height: '3.85%' }}></div>
+                                 <div className="flex flex-col justify-between pt-1 pb-1" style={{ height: '19.23%' }}>
+                                    {activeSubChart === 'MACD' && <div className="h-full flex items-center text-blue-400">MACD</div>}
+                                    {activeSubChart === 'KD' && (
+                                       <><span className="text-yellow-400">80</span><span className="text-slate-600">KD</span><span className="text-yellow-400">20</span></>
+                                    )}
+                                    {activeSubChart === 'RSI' && (
+                                       <><span className="text-purple-400">70</span><span className="text-slate-600">RSI</span><span className="text-purple-400">30</span></>
+                                    )}
+                                 </div>
+                              </div>
+                           )}
+                        </div>
+                     </div>
+
+                     {/* 買入點圖例說明區塊 */}
+                     <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 px-2 py-1.5 border-t border-slate-700/50 text-[10px] text-slate-400 bg-slate-900/50">
+                        <span className="font-semibold text-slate-300">圖例說明:</span>
+                        {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
+                           <div key={key} className="flex items-center">
+                              <svg width="14" height="14" className="mr-1 overflow-visible">{renderShape(config.shape, 7, 7, config.color, 4)}</svg>
+                              {String(config.label)}
+                           </div>
+                        ))}
+                     </div>
+                  </Card>
+
+                  {/* --- 動態指標卡片區 (10 張卡片) --- */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-2">
+                     <Card title="動態技術分析">
+                        <div className="flex flex-col gap-1.5 mt-1">
+                           <TextRow label="布林軌道" value={bbStatus} valueColor={bbColor} />
+                           <TextRow label="多空排列" value={stockPrice > currentMA20 ? "站上月線" : "跌破月線"} valueColor={stockPrice > currentMA20 ? "text-red-500" : "text-green-500"} />
+                           <TextRow label="月線乖離" value={`${bias20.toFixed(2)}%`} valueColor={Math.abs(bias20) > 8 ? "text-yellow-400" : "text-white"} />
+                           <TextRow label="KD 狀態" value={currentK > 80 ? "高檔鈍化" : currentK < 20 ? "低檔超跌" : "中性區間"} valueColor={currentK > 80 ? "text-red-400" : currentK < 20 ? "text-green-400" : "text-white"} />
+                        </div>
+                     </Card>
+                     <Card title="籌碼動態模擬">
+                        <div className="flex flex-col gap-1.5 mt-1">
+                           <TextRow label="當前力道" value={activeChangePercent > 0 ? "買盤轉強" : "賣壓湧現"} valueColor={activeColorClass} />
+                           <TextRow label="量能狀態" value={isVolUp ? "爆量攻擊" : "量縮整理"} valueColor={isVolUp ? "text-yellow-400" : "text-slate-400"} />
+                           <TextRow label="RSI 強弱" value={currentRSI > 70 ? "強勢區" : currentRSI < 30 ? "弱勢區" : "整理區"} valueColor={currentRSI > 70 ? "text-red-400" : currentRSI < 30 ? "text-green-400" : "text-white"} />
+                        </div>
+                     </Card>
+                     <Card title="關鍵參考價位 (動態計算)" className="md:col-span-2">
+                        <div className="flex flex-col gap-2 mt-2 px-2">
+                           <div className="bg-red-900/20 border border-red-500/30 p-2 rounded flex justify-between items-center">
+                              <span className="text-xs text-red-400 font-bold">上檔壓力 (布林上軌)</span>
+                              <span className="text-lg font-mono text-white">{currentBBUpper > 0 ? currentBBUpper.toFixed(2) : '--'}</span>
+                           </div>
+                           <div className="bg-green-900/20 border border-green-500/30 p-2 rounded flex justify-between items-center mt-2">
+                              <span className="text-xs text-green-400 font-bold">下檔支撐 (布林下軌)</span>
+                              <span className="text-lg font-mono text-white">{currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'}</span>
+                           </div>
+                        </div>
+                     </Card>
                   </div>
-                  
-                  <div className="h-32 w-full border-t border-slate-700 pt-1 relative group">
-                      <span className="text-xs text-slate-400 absolute top-2 left-2 z-10">{INDICATOR_TYPES[selectedIndicator].label}</span>
-                      <div className="md:hidden absolute top-1 right-2 z-10 flex space-x-1">
-                          {Object.keys(INDICATOR_TYPES).map(key => (<button key={key} onClick={() => setSelectedIndicator(key)} className={`text-[10px] px-2 py-0.5 rounded border ${selectedIndicator === key ? 'bg-slate-700 text-white border-slate-500' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>{String(key)}</button>))}
-                      </div>
-                      <div className="hidden md:flex absolute top-1 right-2 z-10 space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            {Object.keys(INDICATOR_TYPES).map(key => (<button key={key} onClick={() => setSelectedIndicator(key)} className={`text-[10px] px-2 py-0.5 rounded border ${selectedIndicator === key ? 'bg-slate-700 text-white border-slate-500' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>{String(key)}</button>))}
-                      </div>
-                      
-                      <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                        <ComposedChart data={currentChartData} syncId="anyId">
-                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
-                            <XAxis dataKey="date" hide />
-                            {selectedIndicator === 'KD' && <YAxis stroke="#94a3b8" domain={[0, 100]} ticks={[20, 50, 80]} tick={{fontSize: 10}} tickFormatter={formatPrice} />}
-                            {selectedIndicator !== 'KD' && <YAxis stroke="#94a3b8" domain={['auto', 'auto']} tick={{fontSize: 10}} />}
-                            <RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(val) => formatPrice(val)} />
-                            
-                            {selectedIndicator === 'KD' && (<><ReferenceLine y={80} stroke="#EF4444" strokeDasharray="3 3" /><ReferenceLine y={20} stroke="#10B981" strokeDasharray="3 3" /><Line type="monotone" dataKey="K" stroke="#F59E0B" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="D" stroke="#3B82F6" dot={false} strokeWidth={1} /></>)}
-                            {selectedIndicator === 'MACD' && (<><ReferenceLine y={0} stroke="#94a3b8" /><Bar dataKey="OSC" fill="#8B5CF6" /><Line type="monotone" dataKey="DIF" stroke="#F59E0B" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="Signal" stroke="#3B82F6" dot={false} strokeWidth={1} /></>)}
-                            {selectedIndicator === 'RSI' && (<><ReferenceLine y={70} stroke="#EF4444" strokeDasharray="3 3" /><ReferenceLine y={30} stroke="#10B981" strokeDasharray="3 3" /><Line type="monotone" dataKey="RSI6" stroke="#F59E0B" dot={false} strokeWidth={1} /><Line type="monotone" dataKey="RSI12" stroke="#3B82F6" dot={false} strokeWidth={1} /></>)}
-                        </ComposedChart>
-                      </ResponsiveContainer>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 mt-2">
+                     <Card title="主力出貨警示" className="items-center justify-center py-2 lg:col-span-2">
+                        <div className="flex justify-around w-full px-4 mb-3 mt-1">
+                           <div className="flex flex-col items-center gap-1">
+                              <span className="text-[10px] text-slate-400">主力動向</span>
+                              <IndicatorDot color={extRatio > 55 ? "red" : extRatio < 45 ? "green" : "yellow"} />
+                           </div>
+                           <div className="flex flex-col items-center gap-1">
+                              <span className="text-[10px] text-slate-400">量價穩定度</span>
+                              <IndicatorDot color={isVolUp && !isRedK ? "green" : isVolUp && isRedK ? "red" : "yellow"} />
+                           </div>
+                           <div className="flex flex-col items-center gap-1">
+                              <span className="text-[10px] text-slate-400">乖離警示</span>
+                              <IndicatorDot color={bias20 > 8 ? "green" : bias20 < -8 ? "red" : "yellow"} />
+                           </div>
+                        </div>
+                        <div className="flex items-center gap-2 mt-1">
+                           <span className={`bg-slate-900/80 px-2 py-0.5 text-xs rounded border ${extRatio > 55 ? 'text-red-400 border-red-500/50' : extRatio < 45 ? 'text-green-400 border-green-500/50' : 'text-yellow-400 border-yellow-500/50'}`}>
+                             {extRatio > 55 ? "偏多" : extRatio < 45 ? "偏空" : "中性"}
+                           </span>
+                           <span className="text-xs text-slate-400 truncate">依內外盤與乖離綜合判定</span>
+                        </div>
+                     </Card>
+
+                     <Card title="短線勝率 (近10日)" className="items-center justify-center relative overflow-hidden">
+                        <div className="w-24 h-12 relative mt-3">
+                           <svg viewBox="0 0 100 50" className="w-full h-full overflow-visible">
+                               <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="#334155" strokeWidth="12" strokeLinecap="round" />
+                               <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="url(#grad)" strokeWidth="12" strokeLinecap="round" pathLength="100" strokeDasharray="100" strokeDashoffset={100 - winRate} className="transition-all duration-1000 ease-out" />
+                               <defs>
+                                  <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                    <stop offset="0%" stopColor="#22c55e" />
+                                    <stop offset="50%" stopColor="#eab308" />
+                                    <stop offset="100%" stopColor="#ef4444" />
+                                  </linearGradient>
+                               </defs>
+                            </svg>
+                            <div className="absolute bottom-0 left-0 right-0 text-center flex flex-col">
+                               <span className="text-xl font-bold text-white">{winRate}%</span>
+                            </div>
+                         </div>
+                         <div className="flex justify-between w-full px-6 text-[10px] text-slate-500 mt-2">
+                            <span>低</span>
+                            <span className="text-yellow-400">紅K佔比</span>
+                            <span>高</span>
+                         </div>
+                      </Card>
+
+                      <Card title="內外盤氣勢分析" className="lg:col-span-2">
+                         <div className="flex flex-col gap-2 mt-2 px-2">
+                            <div className="flex justify-between text-sm">
+                               <span className="text-slate-400">內盤 (賣)</span>
+                               <span className="text-green-500 font-mono">{intRatio}%</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                               <span className="text-slate-400">外盤 (買)</span>
+                               <span className="text-red-500 font-mono">{extRatio}%</span>
+                            </div>
+                            <div className="h-2.5 w-full flex bg-slate-700 rounded-full mt-1 overflow-hidden">
+                               <div className="h-full bg-green-500 transition-all duration-500" style={{ width: `${intRatio}%` }}></div>
+                               <div className="h-full bg-red-500 transition-all duration-500" style={{ width: `${extRatio}%` }}></div>
+                            </div>
+                            <div className="text-center text-xs text-slate-400 mt-1.5">
+                               {extRatio > intRatio ? "買盤氣勢較強" : extRatio < intRatio ? "賣壓較為沉重" : "勢均力敵"}
+                            </div>
+                         </div>
+                      </Card>
                   </div>
-                  
-                  <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 mt-3 pt-2 border-t border-slate-700/50 text-[10px] text-slate-400">
-                      <span className="font-semibold text-slate-300">圖例說明:</span>
-                      {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (<div key={key} className="flex items-center"><svg width="14" height="14" className="mr-1 overflow-visible">{renderShape(config.shape, 7, 7, config.color, 4)}</svg>{String(config.label)}</div>))}
+
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-2">
+                     <Card title="今日 K 線型態辨識">
+                        <div className="grid grid-cols-[1fr_auto_2fr] gap-x-2 gap-y-2.5 text-[11px] md:text-xs mt-2 px-2">
+                           <span className="text-slate-400">型態</span>
+                           <span className="text-slate-400">狀態</span>
+                           <span className="text-slate-400">說明</span>
+
+                           <span className="text-white">紅黑K</span>
+                           <span className={isRedK ? "text-red-500" : "text-green-500"}>{isRedK ? "收紅" : "收黑"}</span>
+                           <span className="text-slate-400 truncate">目前收盤價關係</span>
+
+                           <span className="text-white">長實體K</span>
+                           <span className={isLongRed || isLongBlack ? "text-yellow-400" : "text-slate-500"}>{isLongRed || isLongBlack ? "成立" : "未成"}</span>
+                           <span className="text-slate-400 truncate">實體大於3%</span>
+
+                           <span className="text-white">帶上影線</span>
+                           <span className={hasUpperShadow ? "text-yellow-400" : "text-slate-500"}>{hasUpperShadow ? "成立" : "未成"}</span>
+                           <span className="text-slate-400 truncate">上影線&gt;實體2倍</span>
+
+                           <span className="text-white">帶下影線</span>
+                           <span className={hasLowerShadow ? "text-yellow-400" : "text-slate-500"}>{hasLowerShadow ? "成立" : "未成"}</span>
+                           <span className="text-slate-400 truncate">下影線&gt;實體2倍</span>
+                        </div>
+                     </Card>
+
+                     <Card title="動態操作劇本 (以現價推算)" className="lg:col-span-2">
+                        <div className="grid grid-cols-3 gap-2 h-full">
+                           <div className="border border-red-500/30 bg-red-900/10 rounded flex flex-col">
+                              <div className="text-center text-[10px] md:text-xs font-bold text-red-500 py-1.5 border-b border-red-500/30 bg-red-900/20">
+                                 ① 強勢突破腳本
+                              </div>
+                              <div className="flex-1 p-2 flex flex-col justify-around text-[10px] md:text-xs">
+                                 <div className="flex justify-between"><span className="text-slate-400">進場</span><span className="font-mono text-white">{(stockPrice * 1.01).toFixed(2)}</span></div>
+                                 <div className="flex justify-between"><span className="text-slate-400">停損</span><span className="font-mono text-green-400">{(stockPrice * 0.98).toFixed(2)}</span></div>
+                                 <div className="flex justify-between"><span className="text-slate-400">目標</span><span className="font-mono text-red-400">{(stockPrice * 1.05).toFixed(2)}</span></div>
+                              </div>
+                           </div>
+
+                           <div className="border border-yellow-500/30 bg-yellow-900/10 rounded flex flex-col">
+                              <div className="text-center text-[10px] md:text-xs font-bold text-yellow-500 py-1.5 border-b border-yellow-500/30 bg-yellow-900/20">
+                                 ② 區間震盪腳本
+                              </div>
+                              <div className="flex-1 p-2 flex flex-col justify-around text-[10px] md:text-xs">
+                                 <div className="flex justify-between"><span className="text-slate-400">進場</span><span className="font-mono text-white">{(stockPrice * 0.98).toFixed(2)}</span></div>
+                                 <div className="flex justify-between"><span className="text-slate-400">停損</span><span className="font-mono text-green-400">{(stockPrice * 0.95).toFixed(2)}</span></div>
+                                 <div className="flex justify-between"><span className="text-slate-400">目標</span><span className="font-mono text-red-400">{(stockPrice * 1.02).toFixed(2)}</span></div>
+                              </div>
+                           </div>
+
+                           <div className="border border-green-500/30 bg-green-900/10 rounded flex flex-col">
+                              <div className="text-center text-[10px] md:text-xs font-bold text-green-500 py-1.5 border-b border-green-500/30 bg-green-900/20">
+                                 ③ 弱勢回測腳本
+                              </div>
+                              <div className="flex-1 p-2 flex flex-col justify-around text-[10px] md:text-xs">
+                                 <div className="flex justify-between"><span className="text-slate-400">進場</span><span className="font-mono text-white">{(stockPrice * 0.93).toFixed(2)}</span></div>
+                                 <div className="flex justify-between"><span className="text-slate-400">停損</span><span className="font-mono text-green-400">{(stockPrice * 0.90).toFixed(2)}</span></div>
+                                 <div className="flex justify-between"><span className="text-slate-400">目標</span><span className="font-mono text-red-400">{(stockPrice * 0.97).toFixed(2)}</span></div>
+                              </div>
+                           </div>
+                        </div>
+                     </Card>
+                  </div>
+
+                  {/* ========================================================== */}
+                  {/* ====== 完美保留原始系統的 AI 核心模組 (Master Sync) ====== */}
+                  {/* ========================================================== */}
+                  <div className="flex flex-col mt-4 relative z-10 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-4">
+                    <div className="flex-none flex items-center justify-between mb-4 flex-wrap gap-2">
+                        <div className="flex items-center flex-wrap gap-2">
+                            <Sparkles className="w-5 h-5 text-purple-400 mr-2 flex-none" />
+                            <h4 className="text-white font-semibold">AI 智能分析與決策</h4>
+                            {usedModel && <span className="hidden lg:inline ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{String(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符)</span>} {selectedModel !== usedModel && !isCachedResult && <span className="text-yellow-400 ml-1 text-[10px]">(自動切換)</span>}</span>}
+                            {aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center lg:ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
+                            {aiSignals[selectedHistorySymbol] === 'ADD_ALL' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
+                            {aiSignals[selectedHistorySymbol] === 'ADD_BASIC' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎投資</span></div>)}
+                            {aiSignals[selectedHistorySymbol] === 'ADD_BONUS' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼投資</span></div>)}
+                            {aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center lg:ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}
+                        </div>
+                        <div className="flex gap-2">
+                            {isAiSummarizing && (
+                                <button onClick={() => { if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort(); }} className="text-[10px] md:text-xs bg-red-900/50 hover:bg-red-900/80 text-red-200 border border-red-500/50 px-2 md:px-3 py-1.5 rounded flex items-center transition-colors shadow-sm">
+                                    <XCircle className="w-3 h-3 mr-1" />中斷分析
+                                </button>
+                            )}
+                            {!isAiSummarizing && geminiApiKey && (
+                                <button onClick={() => { const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; if (data && data.length > 0) { generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose); } else { fetchHistoricalData(selectedHistorySymbol, timeframe); } }} className="text-[10px] md:text-xs flex items-center transition-colors text-blue-400 hover:text-blue-300 bg-blue-900/30 border border-blue-500/30 px-2 md:px-3 py-1.5 rounded shadow-sm"><RefreshCw className="w-3 h-3 mr-1" />重新分析</button>
+                            )}
+                        </div>
+                    </div>
+                    <div className="bg-slate-900/50 rounded-lg p-4 md:p-5 border border-slate-700 shadow-inner min-h-[100px]">
+                      {isAiSummarizing ? (
+                        <div className="flex items-center text-slate-400 text-sm py-4"><Loader2 className="w-5 h-5 animate-spin mr-2" />{String(aiProgressMsg || 'AI 正在分析中...')}</div>
+                      ) : (
+                        <>
+                          {aiSummary ? <div className="mb-4"><p className="text-slate-200 text-sm md:text-base font-medium leading-relaxed border-l-4 border-purple-500 pl-4">{String(aiSummary)}</p></div> : <div className="text-slate-500 text-sm py-4">暫無 AI 分析數據 (請點擊重新分析)</div>}
+                          {aiDetail && (<div className={`pt-4 border-t border-slate-700/50 transition-all duration-300 ${isDetailExpanded ? 'block' : 'hidden'}`}><div className="prose prose-invert max-w-none text-slate-300 whitespace-pre-wrap leading-relaxed text-sm md:text-base">{String(aiDetail)}</div></div>)}
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 手動補齊歷史 K 線 UI */}
+                  <div className="mt-4 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-4">
+                      <div className="flex items-center justify-between cursor-pointer" onClick={() => setShowManualPatch(!showManualPatch)}>
+                        <h4 className="text-sm font-semibold text-slate-300 flex items-center"><Edit className="w-4 h-4 mr-2 text-purple-400" /> 手動補齊 / 修正歷史 K 線</h4>
+                        {showManualPatch ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+                      </div>
+                      {showManualPatch && (
+                          <div className="mt-4 pt-4 border-t border-slate-700 space-y-4 animate-fade-in">
+                              <p className="text-xs text-slate-400 leading-relaxed">若發現 Yahoo Finance 漏給特定日期的股價，可在此手動新增或覆寫。系統將自動重新計算技術指標與 AI 分析基準。</p>
+                              <div className="flex flex-wrap gap-3 items-end">
+                                  <div><label className="block text-[10px] text-slate-500 mb-1">日期 (YYYY-MM-DD)</label><input type="date" value={patchDate} onChange={(e)=>setPatchDate(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-3 py-1.5 rounded text-sm focus:ring-blue-500 focus:border-blue-500" /></div>
+                                  <div><label className="block text-[10px] text-slate-500 mb-1">收盤價</label><input type="number" step="0.01" value={patchPrice} onChange={(e)=>setPatchPrice(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-3 py-1.5 rounded text-sm focus:ring-blue-500 focus:border-blue-500 w-28" placeholder="例如: 150.5" /></div>
+                                  <button onClick={handleAddPatch} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded text-sm transition-colors shadow-lg">新增 / 覆寫</button>
+                              </div>
+                              {Object.keys(manualKLinesState[selectedHistorySymbol] || {}).length > 0 && (
+                                  <div className="mt-3 bg-slate-900 rounded-lg p-3 border border-slate-700/50">
+                                      <h5 className="text-[10px] text-slate-500 mb-2">已儲存的自訂資料：</h5>
+                                      <div className="flex flex-wrap gap-2">
+                                          {Object.entries(manualKLinesState[selectedHistorySymbol]).map(([d, p]) => (
+                                              <div key={d} className="flex items-center bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs shadow-sm"><span className="text-slate-300 mr-2">{String(d)}</span><span className="text-yellow-400 font-mono mr-2">{String(p)}</span><button onClick={() => handleDeletePatch(d)} className="text-red-400 hover:text-red-300 transition-colors" title="移除"><XCircle className="w-3 h-3" /></button></div>
+                                          ))}
+                                      </div>
+                                  </div>
+                              )}
+                          </div>
+                      )}
                   </div>
                 </>
-              ) : <div className="flex-1 flex items-center justify-center h-full text-slate-500">{historyError ? <span className="text-red-400">{String(historyError)}</span> : "請選擇左側標的以查看走勢"}</div>}
-              </div>
-
-              <div className="mt-4 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-4">
-                  <div className="flex items-center justify-between cursor-pointer" onClick={() => setShowManualPatch(!showManualPatch)}>
-                    <h4 className="text-sm font-semibold text-slate-300 flex items-center"><Edit className="w-4 h-4 mr-2 text-purple-400" /> 手動補齊 / 修正歷史 K 線</h4>
-                    {showManualPatch ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
-                  </div>
-                  {showManualPatch && (
-                      <div className="mt-4 pt-4 border-t border-slate-700 space-y-4 animate-fade-in">
-                          <p className="text-xs text-slate-400 leading-relaxed">若發現 Yahoo Finance 漏給特定日期的股價，可在此手動新增或覆寫。系統將自動重新計算技術指標與 AI 分析基準。</p>
-                          <div className="flex flex-wrap gap-3 items-end">
-                              <div><label className="block text-[10px] text-slate-500 mb-1">日期 (YYYY-MM-DD)</label><input type="date" value={patchDate} onChange={(e)=>setPatchDate(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-3 py-1.5 rounded text-sm focus:ring-blue-500 focus:border-blue-500" /></div>
-                              <div><label className="block text-[10px] text-slate-500 mb-1">收盤價</label><input type="number" step="0.01" value={patchPrice} onChange={(e)=>setPatchPrice(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-3 py-1.5 rounded text-sm focus:ring-blue-500 focus:border-blue-500 w-28" placeholder="例如: 150.5" /></div>
-                              <button onClick={handleAddPatch} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded text-sm transition-colors shadow-lg">新增 / 覆寫</button>
-                          </div>
-                          {Object.keys(manualKLinesState[selectedHistorySymbol] || {}).length > 0 && (
-                              <div className="mt-3 bg-slate-900 rounded-lg p-3 border border-slate-700/50">
-                                  <h5 className="text-[10px] text-slate-500 mb-2">已儲存的自訂資料：</h5>
-                                  <div className="flex flex-wrap gap-2">
-                                      {Object.entries(manualKLinesState[selectedHistorySymbol]).map(([d, p]) => (
-                                          <div key={d} className="flex items-center bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs shadow-sm"><span className="text-slate-300 mr-2">{String(d)}</span><span className="text-yellow-400 font-mono mr-2">{String(p)}</span><button onClick={() => handleDeletePatch(d)} className="text-red-400 hover:text-red-300 transition-colors" title="移除"><XCircle className="w-3 h-3" /></button></div>
-                                      ))}
-                                  </div>
-                              </div>
-                          )}
-                      </div>
-                  )}
-              </div>
-
-              <div className="flex-none px-2 py-1 mt-2 text-[10px] text-slate-500 flex items-center space-x-3 border-t border-dashed border-slate-700/50">
-                  <span className="flex items-center"><DollarSign className="w-3 h-3 mr-1" /> 價: {etfExtraData[selectedHistorySymbol]?.priceSource ? String(etfExtraData[selectedHistorySymbol]?.priceSource) : 'Yahoo'}</span>
-                  <span className="flex items-center"><Layers className="w-3 h-3 mr-1" /> 淨: {etfExtraData[selectedHistorySymbol]?.navSource ? String(etfExtraData[selectedHistorySymbol]?.navSource) : '-'}</span>
-                  <span className="flex items-center"><Percent className="w-3 h-3 mr-1" /> 殖: {etfExtraData[selectedHistorySymbol]?.yieldSource ? String(etfExtraData[selectedHistorySymbol]?.yieldSource) : '-'}</span>
-              </div>
-
-              <div className="flex flex-col mt-6 pt-4 border-t-2 border-dashed border-slate-600/50 relative z-10 bg-slate-800">
-                <div className="flex-none flex items-center justify-between mb-4">
-                    <div className="flex items-center"><Sparkles className="w-5 h-5 text-purple-400 mr-2" /><h4 className="text-white font-semibold">AI 智能觀點</h4>{usedModel && <span className="hidden md:inline ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">{String(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} {isCachedResult ? <span className="text-slate-500">(歷史紀錄)</span> : <span className="text-green-400">(本次生成)</span>} {selectedModel !== usedModel && isCachedResult && <span className="text-orange-400 ml-1 text-[10px]">(與設定不符)</span>} {selectedModel !== usedModel && !isCachedResult && <span className="text-yellow-400 ml-1 text-[10px]">(自動切換)</span>}</span>}
-                    {aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
-                    {aiSignals[selectedHistorySymbol] === 'ADD_ALL' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
-                    {aiSignals[selectedHistorySymbol] === 'ADD_BASIC' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎投資</span></div>)}
-                    {aiSignals[selectedHistorySymbol] === 'ADD_BONUS' && (<div className="flex items-center ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼投資</span></div>)}
-                    {aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}
-                    </div>
-                    <div className="flex gap-2">
-                        {isAiSummarizing && (
-                            <button onClick={() => { if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort(); }} className="text-[10px] bg-red-900/50 hover:bg-red-900/80 text-red-200 border border-red-500/50 px-2 py-1 rounded flex items-center transition-colors shadow-sm">
-                                <XCircle className="w-3 h-3 mr-1" />中斷分析
-                            </button>
-                        )}
-                        {!isAiSummarizing && geminiApiKey && (
-                            <button onClick={() => { const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; if (data && data.length > 0) { generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose); } else { fetchHistoricalData(selectedHistorySymbol, timeframe); } }} className="text-[10px] flex items-center transition-colors text-blue-400 hover:text-blue-300 bg-blue-900/30 border border-blue-500/30 px-2 py-1 rounded shadow-sm"><RefreshCw className="w-3 h-3 mr-1" />重新分析</button>
-                        )}
-                    </div>
-                </div>
-                <div className="bg-slate-900/50 rounded-lg p-5 border border-slate-700 shadow-inner h-auto">
-                  {isAiSummarizing ? (
-                    <div className="flex items-center text-slate-400 text-sm py-4"><Loader2 className="w-5 h-5 animate-spin mr-2" />{String(aiProgressMsg || 'AI 正在分析中...')}</div>
-                  ) : (
-                    <>
-                      {aiSummary ? <div className="mb-4"><p className="text-slate-200 text-base font-medium leading-relaxed border-l-4 border-purple-500 pl-4">{String(aiSummary)}</p></div> : <div className="text-slate-500 text-sm py-4">暫無 AI 分析數據 (請點擊重新分析)</div>}
-                      {aiDetail && (<div className={`pt-4 border-t border-slate-700/50 transition-all duration-300 ${isDetailExpanded ? 'block' : 'hidden'}`}><div className="prose prose-invert max-w-none text-slate-300 whitespace-pre-wrap leading-relaxed text-sm md:text-base">{String(aiDetail)}</div></div>)}
-                    </>
-                  )}
-                </div>
-              </div>
+              ) : <div className="flex-1 flex items-center justify-center min-h-[400px] text-slate-500 bg-slate-800 border border-slate-700 rounded-xl">{historyError ? <span className="text-red-400">{String(historyError)}</span> : "請選擇左側標的以查看走勢"}</div>}
+              
             </div>
           </div>
         )}
