@@ -484,7 +484,7 @@ const App = () => {
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
-  const [selectedModel, setSelectedModel] = useState('gemini-3-flash-preview'); 
+  const [selectedModel, setSelectedModel] = useState('gemini-3.5-flash'); 
   const [aiSignals, setAiSignals] = useState({}); 
 
   const [portfolioHealth, setPortfolioHealth] = useState(null);
@@ -1210,11 +1210,9 @@ ${signalRules}
                 setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
                 if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
                 setUsedModel(cache[symbol].model); setIsCachedResult(true); setIsDetailExpanded(true); 
-            } else if (geminiApiKey) { 
-                setIsAiSummarizing(true); 
-                await generateFullAnalysis(symbol, processedData, false, metaPrevClose); 
             } else { 
-                if(!aiSummary) setAiSummary("請設定 API Key 以啟用 AI 分析。"); 
+                if(!geminiApiKey) setAiSummary("請設定 API Key 以啟用 AI 分析。"); 
+                else setAiSummary("點擊「重新分析」按鈕以取得最新 AI 智能觀點。");
             }
         }
       } else { throw new Error('解析不到圖表數據'); }
@@ -1249,10 +1247,10 @@ ${signalRules}
           const cache = getAiCache();
           const today = getTodayDate();
           if (!cache[selectedHistorySymbol] || cache[selectedHistorySymbol].date !== today) {
-              if (!isAiSummarizing && timeframe === '1y_1d') {
-                  if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort();
-                  setIsAiSummarizing(true);
-                  generateFullAnalysis(selectedHistorySymbol, historicalData[key], false, etfExtraData[selectedHistorySymbol]?.prevClose);
+              if (activeHistorySymbolRef.current === selectedHistorySymbol) {
+                  setAiSummary(geminiApiKey ? "點擊「重新分析」按鈕以取得最新 AI 智能觀點。" : "請設定 API Key 以啟用 AI 分析。");
+                  setAiDetail(null);
+                  setUsedModel(null);
               }
           } else {
               if (activeHistorySymbolRef.current === selectedHistorySymbol) {
