@@ -11,11 +11,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.88 (整合 SVG 即時個股看板與動態指標卡片)
+ * Alpha 投資戰情室 v54.88 (手動 AI 分析版)
  * * [模組大整合]
  * 1. 歷史走勢全面升級：導入個股看板模組的純前端 SVG 圖表引擎，支援無段縮放 (滾輪)、平移 (拖曳)、十字游標。
  * 2. 動態卡片與籌碼模擬：整合布林通道狀態、籌碼動態模擬、主力出貨警示、短線勝率與動態操作劇本。
- * 3. 完美兼容 AI 引擎：原本的多數決 AI (Master Sync) 邏輯完全保留，並放置於新看板的專屬區塊中。
+ * 3. 完美兼容 AI 引擎：原本的多數決 AI (Master Sync) 邏輯完全保留，並改為純手動觸發，節省額度。
  * 4. 指標擴充：為配合新看板，底層技術指標擴充計算 MA5 與 RSI(14)。
  */
 
@@ -1163,6 +1163,7 @@ ${signalRules}
     
     if (activeHistorySymbolRef.current === symbol) {
         setHistoryLoading(true); setHistoryError(null); setAiSummary(null); setAiDetail(null); setUsedModel(null); setIsAiSummarizing(false); setIsCachedResult(false);
+        setAiSignals(prev => { const next = {...prev}; delete next[symbol]; return next; });
     }
 
     try {
@@ -1175,7 +1176,6 @@ ${signalRules}
       if (result.chart && result.chart.error) throw new Error(`Yahoo API 錯誤: ${result.chart.error.description || result.chart.error.code}`);
 
       const chartData = result?.chart?.result?.[0];
-      const metaPrevClose = chartData?.meta?.previousClose; 
       
       if (chartData && chartData.timestamp) {
         const timestamps = chartData.timestamp; const quote = chartData.indicators.quote[0];
@@ -1212,7 +1212,7 @@ ${signalRules}
                 setUsedModel(cache[symbol].model); setIsCachedResult(true); setIsDetailExpanded(true); 
             } else { 
                 if(!geminiApiKey) setAiSummary("請設定 API Key 以啟用 AI 分析。"); 
-                else setAiSummary("點擊「重新分析」按鈕以取得最新 AI 智能觀點。");
+                else setAiSummary("請點擊「開始 AI 分析」按鈕以取得 AI 智能觀點與操作建議。");
             }
         }
       } else { throw new Error('解析不到圖表數據'); }
@@ -1248,9 +1248,10 @@ ${signalRules}
           const today = getTodayDate();
           if (!cache[selectedHistorySymbol] || cache[selectedHistorySymbol].date !== today) {
               if (activeHistorySymbolRef.current === selectedHistorySymbol) {
-                  setAiSummary(geminiApiKey ? "點擊「重新分析」按鈕以取得最新 AI 智能觀點。" : "請設定 API Key 以啟用 AI 分析。");
+                  setAiSummary(geminiApiKey ? "請點擊「開始 AI 分析」按鈕以取得 AI 智能觀點與操作建議。" : "請設定 API Key 以啟用 AI 分析。");
                   setAiDetail(null);
                   setUsedModel(null);
+                  setAiSignals(prev => { const next = {...prev}; delete next[selectedHistorySymbol]; return next; });
               }
           } else {
               if (activeHistorySymbolRef.current === selectedHistorySymbol) {
@@ -1579,6 +1580,8 @@ ${signalRules}
       mapPriceY = (val) => 280 - ((val - paddedMin) / paddedRange) * 260;
   }
 
+  // 檢查是否已經有 AI 分析資料 (或正在載入快取)
+  const hasAiData = !!aiDetail;
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20 md:pb-0">
@@ -1756,7 +1759,7 @@ ${signalRules}
                            <span className="text-purple-400 font-mono flex items-center">MA60: {currentMA60 > 0 ? currentMA60.toFixed(2) : '--'}</span>
                         </div>
                         <div className="hidden md:flex text-slate-400 items-center gap-2">
-                           <span className="animate-pulse text-blue-400 opacity-70">💡 在圖表上滾動可縮放，拖曳可平移</span>
+                           <span className="animate-pulse text-blue-400 opacity-70">💡 在圖表上滾動/捏合可縮放，拖曳可平移</span>
                         </div>
                      </div>
                      
@@ -1942,6 +1945,16 @@ ${signalRules}
                                         <line x1={x} y1="0" x2={x} y2="520" stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
                                         <line x1="0" y1={y} x2="800" y2={y} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
                                         <circle cx={x} cy={y} r="3" fill={displayChartData[hoverIndex].close >= displayChartData[hoverIndex].open ? "#ef4444" : "#22c55e"} />
+                                        
+                                        {/* 當游標指向有買入動作的 K 線時，顯示提示框 */}
+                                        {displayChartData[hoverIndex].buyAction && (
+                                            <g transform={`translate(${x < 400 ? x + 10 : x - 130}, ${y < 260 ? y + 10 : y - 60})`}>
+                                                <rect width="120" height="45" fill="#1e293b" fillOpacity="0.9" stroke="#334155" rx="4" />
+                                                <text x="5" y="15" fill="#facc15" fontSize="10" fontWeight="bold">📌 歷史買點</text>
+                                                <text x="5" y="28" fill="#cbd5e1" fontSize="10">價格: {formatPrice(displayChartData[hoverIndex].buyAction['價格'])}</text>
+                                                <text x="5" y="40" fill="#94a3b8" fontSize="10">策略: {displayChartData[hoverIndex].buyAction['策略']}</text>
+                                            </g>
+                                        )}
                                      </g>
                                   );
                               })()}
@@ -2173,7 +2186,10 @@ ${signalRules}
                                 </button>
                             )}
                             {!isAiSummarizing && geminiApiKey && (
-                                <button onClick={() => { const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; if (data && data.length > 0) { generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose); } else { fetchHistoricalData(selectedHistorySymbol, timeframe); } }} className="text-[10px] md:text-xs flex items-center transition-colors text-blue-400 hover:text-blue-300 bg-blue-900/30 border border-blue-500/30 px-2 md:px-3 py-1.5 rounded shadow-sm"><RefreshCw className="w-3 h-3 mr-1" />重新分析</button>
+                                <button onClick={() => { const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; if (data && data.length > 0) { generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose); } else { fetchHistoricalData(selectedHistorySymbol, timeframe); } }} className="text-[10px] md:text-xs flex items-center transition-colors text-blue-400 hover:text-blue-300 bg-blue-900/30 border border-blue-500/30 px-2 md:px-3 py-1.5 rounded shadow-sm">
+                                    {hasAiData ? <RefreshCw className="w-3 h-3 mr-1" /> : <Bot className="w-3 h-3 mr-1" />}
+                                    {hasAiData ? '重新分析' : '開始 AI 分析'}
+                                </button>
                             )}
                         </div>
                     </div>
@@ -2182,7 +2198,7 @@ ${signalRules}
                         <div className="flex items-center text-slate-400 text-sm py-4"><Loader2 className="w-5 h-5 animate-spin mr-2" />{String(aiProgressMsg || 'AI 正在分析中...')}</div>
                       ) : (
                         <>
-                          {aiSummary ? <div className="mb-4"><p className="text-slate-200 text-sm md:text-base font-medium leading-relaxed border-l-4 border-purple-500 pl-4">{String(aiSummary)}</p></div> : <div className="text-slate-500 text-sm py-4">暫無 AI 分析數據 (請點擊重新分析)</div>}
+                          {aiSummary ? <div className="mb-4"><p className="text-slate-200 text-sm md:text-base font-medium leading-relaxed border-l-4 border-purple-500 pl-4">{String(aiSummary)}</p></div> : <div className="text-slate-500 text-sm py-4">暫無 AI 分析數據 (請點擊開始 AI 分析)</div>}
                           {aiDetail && (<div className={`pt-4 border-t border-slate-700/50 transition-all duration-300 ${isDetailExpanded ? 'block' : 'hidden'}`}><div className="prose prose-invert max-w-none text-slate-300 whitespace-pre-wrap leading-relaxed text-sm md:text-base">{String(aiDetail)}</div></div>)}
                         </>
                       )}
