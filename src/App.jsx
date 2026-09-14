@@ -48,9 +48,9 @@ const CATEGORY_STYLES = {
 };
 
 const AVAILABLE_MODELS = [
-  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview (最強大)' },
-  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash (預設推薦)' },
-  { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite (最快速)' },
+   { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash (最新穩定版)' },
+  { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash (穩定)' },
+  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite (快速穩定)' }
 ];
 
 const ASSET_TYPES = {
