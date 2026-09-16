@@ -506,6 +506,10 @@ const App = () => {
   const [showManualPatch, setShowManualPatch] = useState(false);
   const [patchDate, setPatchDate] = useState('');
   const [patchPrice, setPatchPrice] = useState('');
+  const [patchOpen, setPatchOpen] = useState('');
+  const [patchHigh, setPatchHigh] = useState('');
+  const [patchLow, setPatchLow] = useState('');
+  const [patchVolume, setPatchVolume] = useState('');
   const [manualKLinesState, setManualKLinesState] = useState({});
   
   // 新看板的狀態
@@ -1193,18 +1197,47 @@ ${signalRules}
         const manualKLines = JSON.parse(localStorage.getItem('investment_manual_klines') || '{}');
         const symbolManualData = manualKLines[symbol] || {};
         Object.keys(symbolManualData).forEach(date => {
-            const price = parseFloat(symbolManualData[date]); const existingIdx = rawPoints.findIndex(p => p.date === date);
-            if (existingIdx >= 0) {
-                const oldP = rawPoints[existingIdx];
-                rawPoints[existingIdx] = { 
-                    ...oldP, 
-                    close: price, 
-                    high: Math.max(oldP.high, price), 
-                    low: Math.min(oldP.low, price), 
-                    isManual: true 
-                };
+            const mData = symbolManualData[date];
+            const existingIdx = rawPoints.findIndex(p => p.date === date);
+            
+            if (typeof mData === 'object' && mData !== null) {
+                const mClose = mData.close;
+                if (existingIdx >= 0) {
+                    const oldP = rawPoints[existingIdx];
+                    rawPoints[existingIdx] = { 
+                        ...oldP, 
+                        close: mClose, 
+                        open: mData.open !== null ? mData.open : oldP.open,
+                        high: mData.high !== null ? mData.high : Math.max(oldP.high, mClose),
+                        low: mData.low !== null ? mData.low : Math.min(oldP.low, mClose),
+                        volume: mData.volume !== null ? mData.volume : oldP.volume,
+                        isManual: true 
+                    };
+                } else {
+                    rawPoints.push({ 
+                        date, 
+                        close: mClose, 
+                        open: mData.open !== null ? mData.open : mClose, 
+                        high: mData.high !== null ? mData.high : mClose, 
+                        low: mData.low !== null ? mData.low : mClose, 
+                        volume: mData.volume !== null ? mData.volume : 0, 
+                        isManual: true 
+                    });
+                }
             } else {
-                rawPoints.push({ date, close: price, open: price, high: price, low: price, volume: 0, isManual: true });
+                const price = parseFloat(mData);
+                if (existingIdx >= 0) {
+                    const oldP = rawPoints[existingIdx];
+                    rawPoints[existingIdx] = { 
+                        ...oldP, 
+                        close: price, 
+                        high: Math.max(oldP.high, price), 
+                        low: Math.min(oldP.low, price), 
+                        isManual: true 
+                    };
+                } else {
+                    rawPoints.push({ date, close: price, open: price, high: price, low: price, volume: 0, isManual: true });
+                }
             }
         });
         rawPoints.sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -1364,10 +1397,20 @@ ${signalRules}
     if (!patchDate || !patchPrice || !selectedHistorySymbol) return;
     const currentObj = JSON.parse(localStorage.getItem('investment_manual_klines') || '{}');
     if (!currentObj[selectedHistorySymbol]) currentObj[selectedHistorySymbol] = {};
-    currentObj[selectedHistorySymbol][patchDate] = parseFloat(patchPrice);
-    localStorage.setItem('investment_manual_klines', JSON.stringify(currentObj)); setManualKLinesState(currentObj); setPatchDate(''); setPatchPrice(''); setToast(`已新增 ${selectedHistorySymbol} 點位，重新繪製中...`);
     
-    // 關鍵修正：不僅是刪除快取，而是強制設定 fetching 狀態為 false，讓 useEffect 能重新抓取並"重新計算所有技術指標"
+    currentObj[selectedHistorySymbol][patchDate] = {
+        close: parseFloat(patchPrice),
+        open: patchOpen ? parseFloat(patchOpen) : null,
+        high: patchHigh ? parseFloat(patchHigh) : null,
+        low: patchLow ? parseFloat(patchLow) : null,
+        volume: patchVolume ? parseFloat(patchVolume) : null
+    };
+    
+    localStorage.setItem('investment_manual_klines', JSON.stringify(currentObj)); 
+    setManualKLinesState(currentObj); 
+    setPatchDate(''); setPatchPrice(''); setPatchOpen(''); setPatchHigh(''); setPatchLow(''); setPatchVolume('');
+    setToast(`已新增 ${selectedHistorySymbol} 點位，重新繪製中...`);
+    
     const key = `${selectedHistorySymbol}_${timeframe}`;
     fetchingHistoryRef.current[key] = false;
     setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
@@ -1791,9 +1834,9 @@ ${signalRules}
                      
                      <div className="relative flex-1 p-2 flex h-full overflow-hidden">
                         {/* 懸停資訊面板 (左側) */}
-                        <div className="w-24 border-r border-slate-700/50 pr-2 flex flex-col gap-1 text-[11px] font-mono shrink-0 z-10 bg-slate-800">
-                           <div className={`border-b border-slate-700 pb-1 mb-1 truncate ${safeHoverIndex !== null ? 'text-blue-400 font-bold' : 'text-slate-400'}`}>
-                              {dateStr}
+                        <div className="w-28 border-r border-slate-700/50 pr-2 flex flex-col gap-1 text-[11px] font-mono shrink-0 z-10 bg-slate-800">
+                           <div className={`border-b border-slate-700 pb-1 mb-1 whitespace-nowrap overflow-hidden ${safeHoverIndex !== null ? 'text-blue-400 font-bold' : 'text-slate-400'}`}>
+                              {safeHoverIndex !== null ? `${dateObj.getFullYear()}/${dateObj.getMonth()+1}/${dateObj.getDate()}` : '今日動態'}
                            </div>
                            <TextRow label="開" value={activeCandle.open.toFixed(2)} />
                            <TextRow label="高" value={activeCandle.high.toFixed(2)} valueColor="text-red-500" />
@@ -2240,19 +2283,29 @@ ${signalRules}
                       </div>
                       {showManualPatch && (
                           <div className="mt-4 pt-4 border-t border-slate-700 space-y-4 animate-fade-in">
-                              <p className="text-xs text-slate-400 leading-relaxed">若發現 Yahoo Finance 漏給特定日期的股價，可在此手動新增或覆寫。系統將自動重新計算技術指標與 AI 分析基準。</p>
-                              <div className="flex flex-wrap gap-3 items-end">
-                                  <div><label className="block text-[10px] text-slate-500 mb-1">日期 (YYYY-MM-DD)</label><input type="date" value={patchDate} onChange={(e)=>setPatchDate(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-3 py-1.5 rounded text-sm focus:ring-blue-500 focus:border-blue-500" /></div>
-                                  <div><label className="block text-[10px] text-slate-500 mb-1">收盤價</label><input type="number" step="0.01" value={patchPrice} onChange={(e)=>setPatchPrice(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-3 py-1.5 rounded text-sm focus:ring-blue-500 focus:border-blue-500 w-28" placeholder="例如: 150.5" /></div>
-                                  <button onClick={handleAddPatch} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded text-sm transition-colors shadow-lg">新增 / 覆寫</button>
+                              <p className="text-xs text-slate-400 leading-relaxed">若發現 Yahoo Finance 漏給特定日期的股價，可在此手動新增或覆寫。您可僅輸入收盤價，其他留白系統將自動補齊。</p>
+                              <div className="grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
+                                  <div className="col-span-2 md:col-span-1"><label className="block text-[10px] text-slate-500 mb-1">日期 (必填)</label><input type="date" value={patchDate} onChange={(e)=>setPatchDate(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-2 py-1.5 rounded text-sm w-full focus:ring-blue-500 focus:border-blue-500" /></div>
+                                  <div className="col-span-1"><label className="block text-[10px] text-slate-500 mb-1">開盤 (選填)</label><input type="number" step="0.01" value={patchOpen} onChange={(e)=>setPatchOpen(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-2 py-1.5 rounded text-sm w-full focus:ring-blue-500 focus:border-blue-500" /></div>
+                                  <div className="col-span-1"><label className="block text-[10px] text-slate-500 mb-1">最高 (選填)</label><input type="number" step="0.01" value={patchHigh} onChange={(e)=>setPatchHigh(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-2 py-1.5 rounded text-sm w-full focus:ring-blue-500 focus:border-blue-500" /></div>
+                                  <div className="col-span-1"><label className="block text-[10px] text-slate-500 mb-1">最低 (選填)</label><input type="number" step="0.01" value={patchLow} onChange={(e)=>setPatchLow(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-2 py-1.5 rounded text-sm w-full focus:ring-blue-500 focus:border-blue-500" /></div>
+                                  <div className="col-span-1"><label className="block text-[10px] text-slate-500 mb-1">收盤 (必填)</label><input type="number" step="0.01" value={patchPrice} onChange={(e)=>setPatchPrice(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-2 py-1.5 rounded text-sm w-full focus:ring-blue-500 focus:border-blue-500" /></div>
+                                  <div className="col-span-1"><label className="block text-[10px] text-slate-500 mb-1">成交量 (選填)</label><input type="number" value={patchVolume} onChange={(e)=>setPatchVolume(e.target.value)} className="bg-slate-900 border border-slate-600 text-white px-2 py-1.5 rounded text-sm w-full focus:ring-blue-500 focus:border-blue-500" /></div>
+                                  <div className="col-span-2 md:col-span-6 flex justify-end">
+                                      <button onClick={handleAddPatch} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded text-sm transition-colors shadow-lg">新增 / 覆寫</button>
+                                  </div>
                               </div>
                               {Object.keys(manualKLinesState[selectedHistorySymbol] || {}).length > 0 && (
                                   <div className="mt-3 bg-slate-900 rounded-lg p-3 border border-slate-700/50">
                                       <h5 className="text-[10px] text-slate-500 mb-2">已儲存的自訂資料：</h5>
                                       <div className="flex flex-wrap gap-2">
-                                          {Object.entries(manualKLinesState[selectedHistorySymbol]).map(([d, p]) => (
-                                              <div key={d} className="flex items-center bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs shadow-sm"><span className="text-slate-300 mr-2">{String(d)}</span><span className="text-yellow-400 font-mono mr-2">{String(p)}</span><button onClick={() => handleDeletePatch(d)} className="text-red-400 hover:text-red-300 transition-colors" title="移除"><XCircle className="w-3 h-3" /></button></div>
-                                          ))}
+                                          {Object.entries(manualKLinesState[selectedHistorySymbol]).map(([d, p]) => {
+                                              const isObj = typeof p === 'object' && p !== null;
+                                              const displayPrice = isObj ? p.close : p;
+                                              return (
+                                                  <div key={d} className="flex items-center bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs shadow-sm"><span className="text-slate-300 mr-2">{String(d)}</span><span className="text-yellow-400 font-mono mr-2">{String(displayPrice)}</span><button onClick={() => handleDeletePatch(d)} className="text-red-400 hover:text-red-300 transition-colors" title="移除"><XCircle className="w-3 h-3" /></button></div>
+                                              )
+                                          })}
                                       </div>
                                   </div>
                               )}
