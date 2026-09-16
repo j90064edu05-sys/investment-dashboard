@@ -48,9 +48,9 @@ const CATEGORY_STYLES = {
 };
 
 const AVAILABLE_MODELS = [
-   { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash (最新穩定版)' },
+  { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash (最新穩定版)' },
   { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash (穩定)' },
-  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite (快速穩定)' }
+  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite (快速穩定)' },
 ];
 
 const ASSET_TYPES = {
@@ -485,7 +485,7 @@ const App = () => {
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
-  const [selectedModel, setSelectedModel] = useState('gemini-3.5-flash'); 
+  const [selectedModel, setSelectedModel] = useState('gemini-3.7-flash'); 
   const [aiSignals, setAiSignals] = useState({}); 
 
   const [portfolioHealth, setPortfolioHealth] = useState(null);
@@ -1194,8 +1194,18 @@ ${signalRules}
         const symbolManualData = manualKLines[symbol] || {};
         Object.keys(symbolManualData).forEach(date => {
             const price = parseFloat(symbolManualData[date]); const existingIdx = rawPoints.findIndex(p => p.date === date);
-            const newData = { date, close: price, open: price, high: price, low: price, isManual: true };
-            if (existingIdx >= 0) rawPoints[existingIdx] = { ...rawPoints[existingIdx], ...newData }; else rawPoints.push(newData);
+            if (existingIdx >= 0) {
+                const oldP = rawPoints[existingIdx];
+                rawPoints[existingIdx] = { 
+                    ...oldP, 
+                    close: price, 
+                    high: Math.max(oldP.high, price), 
+                    low: Math.min(oldP.low, price), 
+                    isManual: true 
+                };
+            } else {
+                rawPoints.push({ date, close: price, open: price, high: price, low: price, volume: 0, isManual: true });
+            }
         });
         rawPoints.sort((a, b) => new Date(a.date) - new Date(b.date));
 
@@ -1386,7 +1396,7 @@ ${signalRules}
   useEffect(() => {
     const savedUrl = localStorage.getItem('investment_sheet_url'); const savedKey = localStorage.getItem('gemini_api_key'); const savedModel = localStorage.getItem('gemini_model'); const savedDiscount = localStorage.getItem('fee_discount'); const savedSort = localStorage.getItem('investment_sort_config'); const savedOrder = localStorage.getItem('investment_custom_order'); const savedSettings = localStorage.getItem('investment_settings'); const savedClassifications = localStorage.getItem('investment_asset_classifications'); const savedProxyUrl = localStorage.getItem('custom_proxy_url'); const savedManualKLines = localStorage.getItem('investment_manual_klines');
     if (savedKey) setGeminiApiKey(savedKey);
-    const isValidModel = AVAILABLE_MODELS.some(m => m.id === savedModel); if (savedModel && isValidModel) { setSelectedModel(savedModel); } else { setSelectedModel(AVAILABLE_MODELS[1].id); } // 預設改為 3.5 flash
+    const isValidModel = AVAILABLE_MODELS.some(m => m.id === savedModel); if (savedModel && isValidModel) { setSelectedModel(savedModel); } else { setSelectedModel(AVAILABLE_MODELS[0].id); }
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount)); if (savedSort) setSortConfig(JSON.parse(savedSort)); if (savedOrder) setCustomOrder(JSON.parse(savedOrder)); if (savedProxyUrl) setCustomProxyUrl(savedProxyUrl); if (savedManualKLines) setManualKLinesState(JSON.parse(savedManualKLines));
 
     let initialSettings = {};
