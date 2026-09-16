@@ -1356,7 +1356,12 @@ ${signalRules}
     if (!currentObj[selectedHistorySymbol]) currentObj[selectedHistorySymbol] = {};
     currentObj[selectedHistorySymbol][patchDate] = parseFloat(patchPrice);
     localStorage.setItem('investment_manual_klines', JSON.stringify(currentObj)); setManualKLinesState(currentObj); setPatchDate(''); setPatchPrice(''); setToast(`已新增 ${selectedHistorySymbol} 點位，重新繪製中...`);
-    setHistoricalData(prev => { const next = { ...prev }; delete next[`${selectedHistorySymbol}_${timeframe}`]; return next; });
+    
+    // 關鍵修正：不僅是刪除快取，而是強制設定 fetching 狀態為 false，讓 useEffect 能重新抓取並"重新計算所有技術指標"
+    const key = `${selectedHistorySymbol}_${timeframe}`;
+    fetchingHistoryRef.current[key] = false;
+    setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
+    fetchHistoricalData(selectedHistorySymbol, timeframe);
   };
 
   const handleDeletePatch = (date) => {
@@ -1364,7 +1369,12 @@ ${signalRules}
     const currentObj = JSON.parse(localStorage.getItem('investment_manual_klines') || '{}');
     if (currentObj[selectedHistorySymbol] && currentObj[selectedHistorySymbol][date]) {
         delete currentObj[selectedHistorySymbol][date]; localStorage.setItem('investment_manual_klines', JSON.stringify(currentObj)); setManualKLinesState(currentObj); setToast(`已移除 ${date} 的點位...`);
-        setHistoricalData(prev => { const next = { ...prev }; delete next[`${selectedHistorySymbol}_${timeframe}`]; return next; });
+        
+        // 關鍵修正：同上，強制重新抓取與計算
+        const key = `${selectedHistorySymbol}_${timeframe}`;
+        fetchingHistoryRef.current[key] = false;
+        setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
+        fetchHistoricalData(selectedHistorySymbol, timeframe);
     }
   };
 
