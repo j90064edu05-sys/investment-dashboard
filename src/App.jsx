@@ -114,24 +114,39 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const getTaipeiTime = () => {
     const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Taipei', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: false }).formatToParts(new Date());
     let hash = {};
-    parts.forEach(p => { hash[p.type] = p.value; });
-    return { y: parseInt(hash.year), m: parseInt(hash.month), d: parseInt(hash.day), h: parseInt(hash.hour) % 24, min: parseInt(hash.minute) };
+    parts.forEach(p => { hash[p.type] = parseInt(p.value); });
+    const dateObj = new Date(hash.year, hash.month - 1, hash.day);
+    return { y: hash.year, m: hash.month, d: hash.day, h: hash.hour % 24, min: hash.minute, dayOfWeek: dateObj.getDay() };
 };
 
-const getTodayDate = () => {
+const getLogicalTradingDate = (holidays = [], isEodApi = false) => {
     let { y, m, d, h } = getTaipeiTime();
-    if (h < 9) {
-        const tempDate = new Date(y, m - 1, d - 1);
-        y = tempDate.getFullYear(); m = tempDate.getMonth() + 1; d = tempDate.getDate();
+    let dt = new Date(y, m - 1, d);
+    
+    // 如果是抓取官方盤後(EOD)資料，下午 15:00 前通常還沒更新，算前一個交易日
+    if (isEodApi && h < 15) dt.setDate(dt.getDate() - 1);
+    // 否則正常邏輯：早上 9 點前，算前一個交易日
+    else if (!isEodApi && h < 9) dt.setDate(dt.getDate() - 1);
+
+    // 往前尋找非週末、非假日的真實交易日
+    while (true) {
+        const day = dt.getDay();
+        const dateStr = `${dt.getFullYear()}${String(dt.getMonth() + 1).padStart(2, '0')}${String(dt.getDate()).padStart(2, '0')}`;
+        if (day === 0 || day === 6 || holidays.includes(dateStr)) {
+            dt.setDate(dt.getDate() - 1);
+        } else {
+            break;
+        }
     }
-    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const yStr = dt.getFullYear(); 
+    const mStr = String(dt.getMonth() + 1).padStart(2, '0'); 
+    const dStr = String(dt.getDate()).padStart(2, '0');
+    return { full: `${yStr}-${mStr}-${dStr}`, short: `${mStr}/${dStr}` };
 };
 
 const isTaiwanTradingHours = () => {
-    const { h, min } = getTaipeiTime();
-    const now = new Date();
-    const day = now.getDay(); 
-    if (day >= 1 && day <= 5) {
+    const { h, min, dayOfWeek } = getTaipeiTime();
+    if (dayOfWeek >= 1 && dayOfWeek <= 5) {
         const currentMinutes = h * 60 + min;
         return currentMinutes >= 540 && currentMinutes <= 825; 
     }
@@ -145,25 +160,25 @@ const getPureCode = (symbol) => {
 
 const getAiCache = () => { try { return JSON.parse(localStorage.getItem('gemini_analysis_cache') || '{}'); } catch { return {}; } };
 const updateAiCache = (symbol, data, dataDate) => { 
-  const today = getTodayDate();
   const cache = getAiCache();
   const existing = cache[symbol] || {};
-  const newEntry = { date: today, ...existing, ...data, dataDate }; 
+  // AI Cache 現在精準綁定圖表最後一根 K 線的日期 (dataDate)，而非籠統的 "today"
+  const newEntry = { date: dataDate, ...existing, ...data, dataDate }; 
   const newCache = { ...cache, [symbol]: newEntry };
   localStorage.setItem('gemini_analysis_cache', JSON.stringify(newCache));
 };
 
 const getPriceCache = () => { try { return JSON.parse(localStorage.getItem('investment_price_cache') || '{}'); } catch { return {}; } };
-const savePriceCache = (newPrices, extraData) => {
+const savePriceCache = (newPrices, extraData, holidays) => {
     const cache = getPriceCache();
-    const today = getTodayDate();
+    const logicalDate = getLogicalTradingDate(holidays, false).full;
     const updatedCache = { ...cache };
     Object.keys(newPrices).forEach(symbol => { 
         const existing = updatedCache[symbol] || {};
         updatedCache[symbol] = { 
             ...existing,
             price: newPrices[symbol], 
-            date: today, 
+            date: logicalDate, 
             timestamp: Date.now(),
             nav: extraData[symbol]?.nav || existing.nav,
             navSource: extraData[symbol]?.navSource || existing.navSource,
@@ -575,7 +590,7 @@ const App = () => {
       };
       
       const evaluateLastTradingDay = (hols) => {
-          const logicalToday = getTodayDate();
+          const logicalToday = getLogicalTradingDate(hols, false).full;
           const todayStr = logicalToday.replace(/-/g, '');
           const [y, m] = logicalToday.split('-');
           
@@ -707,37 +722,37 @@ const App = () => {
     const extraData = etfExtraData[selectedHistorySymbol];
     
     if (currentPrice && merged.length > 0) {
-        let latestDateStr = getTodayDate(); 
+        let latestDateStr = getLogicalTradingDate(twseHolidays, false).full; 
         if (extraData && extraData.dateStr) {
             const dStr = extraData.dateStr.split(' ')[0]; const parts = dStr.split('/'); const today = new Date();
-            if (parts.length === 2) { latestDateStr = `${today.getFullYear()}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+            if (parts.length === 2) { 
+                latestDateStr = `${today.getFullYear()}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
             } else if (parts.length === 3) {
                 let year = parseInt(parts[0]); if (year < 1911) year += 1911; 
                 latestDateStr = `${year}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
             }
         }
         
-        const [y, m, d] = latestDateStr.split('-');
-        let patchDateObj = new Date(parseInt(y), parseInt(m) - 1, parseInt(d));
         const isTwAsset = selectedHistorySymbol?.includes('.TW') || selectedHistorySymbol?.includes('.TWO');
-
-        while (true) {
-            const dayOfWeek = patchDateObj.getDay();
-            const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-            const formattedDateStr = `${patchDateObj.getFullYear()}${String(patchDateObj.getMonth() + 1).padStart(2, '0')}${String(patchDateObj.getDate()).padStart(2, '0')}`;
-            const isHoliday = isTwAsset && twseHolidays.includes(formattedDateStr);
-            if (isWeekend || isHoliday) { patchDateObj.setDate(patchDateObj.getDate() - 1); } else { break; }
+        if (isTwAsset) {
+            const [y, m, d] = latestDateStr.split('-');
+            let patchDateObj = new Date(parseInt(y), parseInt(m) - 1, parseInt(d));
+            while (true) {
+                const dayOfWeek = patchDateObj.getDay();
+                const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+                const formattedDateStr = `${patchDateObj.getFullYear()}${String(patchDateObj.getMonth() + 1).padStart(2, '0')}${String(patchDateObj.getDate()).padStart(2, '0')}`;
+                const isHoliday = twseHolidays.includes(formattedDateStr);
+                if (isWeekend || isHoliday) { patchDateObj.setDate(patchDateObj.getDate() - 1); } else { break; }
+            }
+            latestDateStr = `${patchDateObj.getFullYear()}-${String(patchDateObj.getMonth() + 1).padStart(2, '0')}-${String(patchDateObj.getDate()).padStart(2, '0')}`;
         }
 
-        const formatY = patchDateObj.getFullYear(); const formatM = String(patchDateObj.getMonth() + 1).padStart(2, '0'); const formatD = String(patchDateObj.getDate()).padStart(2, '0');
-        latestDateStr = `${formatY}-${formatM}-${formatD}`;
-        
         const lastPoint = merged[merged.length - 1];
         if (lastPoint.date < latestDateStr) { 
              merged.push({ 
                 ...lastPoint, date: latestDateStr, 
                 close: currentPrice, open: currentPrice, high: currentPrice, low: currentPrice, volume: 0, 
-                isPatched: true, ts: patchDateObj.getTime()
+                isPatched: true, ts: new Date(latestDateStr).getTime()
              });
         } else if (lastPoint.date === latestDateStr && !lastPoint.isManual) { 
              merged[merged.length - 1] = { 
@@ -835,10 +850,14 @@ const App = () => {
     const tePromise = fetchTEWithTimer();
 
     const symbolToName = {}; data.forEach(item => { symbolToName[item['標的']] = item['名稱']; });
-    const today = getTodayDate(); const cache = getPriceCache();
+    const cache = getPriceCache();
     const newPrices = { ...realTimePrices }; const newEtfData = { ...etfExtraData }; 
     const misPriceMap = {}; const misPrevPriceMap = {}; const misTimeMap = {}; const misEtfNavMap = {}; const misEtfPriceMap = {};
     const twseEtfMap = {}; const tpexEtfMap = {}; 
+
+    const logicalTodayStr = getLogicalTradingDate(twseHolidays, false).full;
+    const eodLogicalShort = getLogicalTradingDate(twseHolidays, true).short;
+    const liveLogicalShort = getLogicalTradingDate(twseHolidays, false).short;
 
     try {
         if (signal.aborted) throw new Error('AbortError');
@@ -853,7 +872,7 @@ const App = () => {
         if (signal.aborted) throw new Error('AbortError');
         const etfSymbols = symbolsToFetchList.filter(s => symbolToName[s]?.includes('ETF') || s.startsWith('00'));
         if (etfSymbols.length > 0) {
-            const misCacheBuster = isTaiwanTradingHours() ? Date.now() : getTodayDate().replace(/-/g, '');
+            const misCacheBuster = isTaiwanTradingHours() ? Date.now() : logicalTodayStr.replace(/-/g, '');
             const misEtfText = await withTimer("MIS_ETF", () => smartFetch(`https://mis.twse.com.tw/stock/data/all_etf.txt?_=${misCacheBuster}`, 'text', 6000, signal));
             let misEtfRes = null;
             if (misEtfText) { try { misEtfRes = JSON.parse(misEtfText); localStorage.setItem('ALPHA_ETF_BACKUP', misEtfText); } catch (e) {} } 
@@ -892,9 +911,10 @@ const App = () => {
             const pureCode = getPureCode(symbol); const extra = newEtfData[symbol] || {}; const isEtf = symbolToName[symbol]?.includes('ETF') || symbol.startsWith('00');
             if (isEtf && misEtfPriceMap[pureCode]) {
                 newPrices[symbol] = misEtfPriceMap[pureCode]; extra.priceSource = "MIS(e)現價";
-                const d = new Date(); extra.dateStr = `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+                const { h, min } = getTaipeiTime();
+                extra.dateStr = `${liveLogicalShort} ${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
             } else if (misPriceMap[pureCode]) {
-                newPrices[symbol] = misPriceMap[pureCode]; extra.dateStr = misTimeMap[pureCode] || getTodayDate().substring(5).replace('-', '/'); extra.priceSource = misTimeMap[pureCode] ? "MIS個股" : "官方收盤";
+                newPrices[symbol] = misPriceMap[pureCode]; extra.dateStr = misTimeMap[pureCode] || eodLogicalShort; extra.priceSource = misTimeMap[pureCode] ? "MIS個股" : "官方收盤";
             }
             if (misPrevPriceMap[pureCode]) extra.prevClose = misPrevPriceMap[pureCode];
             if (isEtf && misEtfNavMap[pureCode]) { extra.nav = misEtfNavMap[pureCode]; extra.navSource = "MIS(f)淨值"; 
@@ -933,7 +953,7 @@ const App = () => {
              newEtfData[symbol] = extra;
         });
 
-        savePriceCache(newPrices, newEtfData);
+        savePriceCache(newPrices, newEtfData, twseHolidays);
         setRealTimePrices(newPrices); setEtfExtraData(newEtfData); setHistoricalData({});
         localStorage.removeItem('gemini_analysis_cache');
         setAiSignals({}); setAiSummary(null); setAiDetail(null); setUsedModel(null); setPortfolioHealth(null); 
@@ -1040,9 +1060,9 @@ const App = () => {
 
     try {
         const latest = data[data.length - 1]; const prevDay = data.length > 1 ? data[data.length - 2] : null; const dataDate = latest.date;
-        const today = getTodayDate(); const cache = getAiCache();
+        const cache = getAiCache();
 
-        if (!forceUpdate && cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
+        if (!forceUpdate && cache[symbol] && cache[symbol].date === dataDate && cache[symbol].summary && cache[symbol].detail) {
           console.log(`[AI Master] 🟢 命中本地快取: ${symbol}`);
           if (activeHistorySymbolRef.current === symbol) {
               setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
@@ -1062,7 +1082,11 @@ const App = () => {
 
         const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
         const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票'; const assetType = detectAssetType(symbol, stockName, category);
-        const currentMonthPrefix = today.substring(0, 7); const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && item['策略'] === '基礎買入');
+        
+        const todayStr = getLogicalTradingDate(twseHolidays, false).full;
+        const currentMonthPrefix = todayStr.substring(0, 7); 
+        const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && item['策略'] === '基礎買入');
+        
         const isLongBond = isLongTermBond(stockName); const benchmarkYield = isLongBond ? (usBondYields['20Y'] || usBondYields['30Y']) : usBondYields['10Y'];
         
         const etfData = etfExtraData[symbol];
@@ -1248,16 +1272,16 @@ ${signalRules}
         if (activeHistorySymbolRef.current === symbol) {
             setHistoryLoading(false);
             
-            const today = getTodayDate();
+            const dataDate = processedData[processedData.length - 1].date;
             const cache = getAiCache();
-            if (cache[symbol] && cache[symbol].date === today && (cache[symbol].summary || cache[symbol].detail)) {
+            if (cache[symbol] && cache[symbol].date === dataDate && (cache[symbol].summary || cache[symbol].detail)) {
                 setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
                 if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
                 setUsedModel(cache[symbol].model); setIsCachedResult(true); setIsDetailExpanded(true); 
             } else if (geminiApiKey) { 
-                setAiSummary("請點擊「開始 AI 分析」按鈕以取得最新 AI 智能觀點與操作建議。");
+                if(!aiSummary) setAiSummary("請點擊「開始 AI 分析」按鈕以取得最新 AI 智能觀點與操作建議。"); 
             } else { 
-                setAiSummary("請設定 API Key 以啟用 AI 分析。"); 
+                if(!aiSummary) setAiSummary("請設定 API Key 以啟用 AI 分析。"); 
             }
         }
       } else { throw new Error('解析不到圖表數據'); }
@@ -1289,9 +1313,9 @@ ${signalRules}
               });
           }
       } else {
+          const dataDate = historicalData[key][historicalData[key].length - 1].date;
           const cache = getAiCache();
-          const today = getTodayDate();
-          if (!cache[selectedHistorySymbol] || cache[selectedHistorySymbol].date !== today) {
+          if (!cache[selectedHistorySymbol] || cache[selectedHistorySymbol].date !== dataDate) {
               if (!isAiSummarizing && timeframe === '1y_1d') {
                   if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort();
                   setAiSummary(geminiApiKey ? "請點擊「開始 AI 分析」按鈕以取得最新 AI 智能觀點與操作建議。" : "請設定 API Key 以啟用 AI 分析。");
@@ -1448,8 +1472,9 @@ ${signalRules}
     setInvestmentSettings(initialSettings);
     const flatClass = {}; Object.keys(initialSettings).forEach(key => { flatClass[key] = initialSettings[key].type; }); setAssetClassifications(flatClass);
 
-    const cache = getAiCache(); const signals = {}; Object.keys(cache).forEach(key => { if (cache[key].signal) signals[key] = cache[key].signal; }); setAiSignals(signals);
-    const today = new Date().toISOString().split('T')[0]; let cacheModified = false; Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } }); if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
+    const cache = getAiCache(); const signals = {}; 
+    Object.keys(cache).forEach(key => { if (cache[key].signal) signals[key] = cache[key].signal; }); 
+    setAiSignals(signals);
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
