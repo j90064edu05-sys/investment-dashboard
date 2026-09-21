@@ -18,7 +18,7 @@ import {
  * 3. 手機版白屏修復：導入 safeHoverIndex 邊界防護，解決切換標的時因游標殘留導致的崩潰。
  * 4. 手機端互動支援：加入雙指縮放 (Pinch-to-Zoom)、單指平移 (Swipe-to-Pan)。
  * 5. 連線防護：強化 callGeminiWithFallback，加入指數退避 (Exponential Backoff) 重試機制。
- * 6. 多維度 AI 分析：新增市場定價、新聞影響、壓力測試、策略回測等專業提示詞腳本選擇與綜合趨勢分析。
+ * 6. 多維度 AI 分析：新增綜合趨勢分析 (涵蓋市場定價、新聞影響)、與策略回測等專業提示詞腳本選擇。
  */
 
 const DEMO_DATA = [
@@ -1136,24 +1136,6 @@ const App = () => {
 
         let prompt = "";
         switch (customAnalysisType) {
-            case 'MARKET_PRICING': {
-                prompt = `角色：股票研究分析師。\n分析標的：${symbol}(${stockName})。\n\n任務：看懂市場正在定價什麼。\n請以股票研究分析師角度，分析此公司/股票代號/產業。\n檢視最新財報、財測、估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。\n請區分哪些資訊可能已反映在股價中，哪些仍可能讓市場意外。\n最後整理3個最大利多催化因素、3個最大風險，以及接下來應關注的關鍵發展。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
-                break;
-            }
-            case 'CHART_EXPERT': {
-                const tfLabel = timeframe === '1y_1d' ? '日線' : timeframe.includes('wk') ? '週線' : '月線';
-                prompt = `角色：技術分析專家。\n分析標的：${symbol}(${stockName})(${assetType})。\n\n任務：像專家一樣看懂圖表。\n分析此標定的${tfLabel}技術型態。找出目前趨勢、主要支撐與壓力區、移動平均線、動能、成交量變化，以及重要突破或跌破價位。\n接著提供多頭、中性與空頭情境，並列出每種情境成立或失效的條件。\n不要把任何情境視為必然結果。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
-                break;
-            }
-            case 'NEWS_IMPACT': {
-                prompt = `角色：財經市場分析師。\n分析標的：${symbol}(${stockName})。\n\n任務：把新聞轉化為市場影響。\n整理近期影響此公司/產業的重要新聞。\n針對每項發展說明：\n1. 實際發生什麼事\n2. 投資人為何需要關注\n3. 影響偏短期或長期\n4. 哪些財務指標可能受影響\n5. 市場可能隱含哪些假設\n依重要性由高至低排序，並說明哪些因素可能改變目前的市場反應。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
-                break;
-            }
-            case 'PORTFOLIO_STRESS': {
-                const portfolioString = sortedHoldings.map(h => `${h['標的']}(${formatPercent(h.marketValue/(summary.totalValue||1))})`).join(', ');
-                prompt = `角色：風險管理專家。\n\n任務：對投資組合進行壓力測試。\n分析這個投資組合配置：${portfolioString}。\n找出集中風險、產業曝險、地區曝險、重複押注、隱藏關聯，以及市場拋售時可能同步反應的部位。\n接著模擬：\n- 市場修正10%\n- 熊市下跌20%\n- 利率上升\n- 經濟衰退\n提出可行的分散或避險方式，並說明各自取捨。請特別著墨 ${symbol}(${stockName}) 在此組合中的避險或拖累作用。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
-                break;
-            }
             case 'STRATEGY_BACKTEST': {
                 const addonLogic = investmentSettings[symbol]?.addon || 'PYRAMID';
                 const strategyName = isDCA ? `定期定額 + 加碼(${addonLogic})` : `單筆加碼(${addonLogic})`;
@@ -1172,9 +1154,9 @@ ${rulesAndFormat}`;
                 break;
             }
             default:
-                prompt = `角色：專業分析師。對 ${symbol}(${stockName})(${assetType}) 產生新的綜合趨勢分析。
+                prompt = `角色：專業分析師。對 ${symbol}(${stockName})(${assetType}) 產生綜合趨勢分析與決策建議。
 
-除了依據原本邏輯分析外，請務必涵蓋以下兩大重點進行綜合趨勢研判：
+除了依據原本的技術分析與籌碼邏輯外，請務必涵蓋以下兩大重點進行深度綜合研判：
 
 1. 看懂市場正在定價什麼：
 請以股票研究分析師角度，分析此公司/股票代號/產業。
@@ -1189,7 +1171,7 @@ ${rulesAndFormat}`;
 
 原本分析邏輯與現況資料參考：
 ${baseContext}
-策略要求：根據技術支撐提供【預估目標價】。
+策略要求：綜合以上所有觀點，給出最終的操作燈號，並根據技術支撐提供【預估目標價】。
 
 ${rulesAndFormat}`;
         }
@@ -2351,11 +2333,7 @@ ${rulesAndFormat}`;
                                         className="text-[10px] md:text-xs bg-slate-900 border border-slate-600 text-slate-300 rounded px-2 py-1.5 outline-none focus:border-blue-500 max-w-[140px] md:max-w-xs"
                                     >
                                         <option value="DEFAULT">綜合趨勢分析 (預設)</option>
-                                        <option value="MARKET_PRICING">1. 看懂市場正在定價什麼</option>
-                                        <option value="CHART_EXPERT">2. 像專家一樣看懂圖表</option>
-                                        <option value="NEWS_IMPACT">3. 把新聞轉化為市場影響</option>
-                                        <option value="PORTFOLIO_STRESS">4. 投資組合壓力測試</option>
-                                        <option value="STRATEGY_BACKTEST">5. 回測你的交易策略</option>
+                                        <option value="STRATEGY_BACKTEST">回測交易策略</option>
                                     </select>
                                     <button onClick={() => { const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; if (data && data.length > 0) { generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose, aiAnalysisType); } else { fetchHistoricalData(selectedHistorySymbol, timeframe); } }} className="text-[10px] md:text-xs flex items-center transition-colors text-blue-400 hover:text-blue-300 bg-blue-900/30 border border-blue-500/30 px-2 md:px-3 py-1.5 rounded shadow-sm">
                                         <RefreshCw className="w-3 h-3 mr-1" />
