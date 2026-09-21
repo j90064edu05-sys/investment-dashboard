@@ -13,12 +13,12 @@ import {
 /**
  * Alpha 投資戰情室 v55.00 (Stable Resilience Engine - UX & AI Opt)
  * * [重大更新 v55.00]
- * 1. AI 模型升級：導入 gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash-lite。
+ * 1. AI 模型升級：導入 gemini-3.7-flash, gemini-3.6-flash, gemini-3.7-flash-lite。
  * 2. 效能與節流：取消歷史走勢切換時的自動 AI 分析，將控制權交還給使用者手動觸發。
  * 3. 手機版白屏修復：導入 safeHoverIndex 邊界防護，解決切換標的時因游標殘留導致的崩潰。
  * 4. 手機端互動支援：加入雙指縮放 (Pinch-to-Zoom)、單指平移 (Swipe-to-Pan)。
  * 5. 連線防護：強化 callGeminiWithFallback，加入指數退避 (Exponential Backoff) 重試機制。
- * 6. 多維度 AI 分析：新增市場定價、技術圖表、新聞影響、壓力測試、策略回測等五大專業提示詞腳本選擇。
+ * 6. 多維度 AI 分析：新增市場定價、新聞影響、壓力測試、策略回測等專業提示詞腳本選擇與綜合趨勢分析。
  */
 
 const DEMO_DATA = [
@@ -51,7 +51,7 @@ const CATEGORY_STYLES = {
 const AVAILABLE_MODELS = [
   { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash (最新穩定版)' },
   { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash (穩定)' },
-  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite (快速穩定)' },
+  { id: 'gemini-3.7-flash-lite', name: 'Gemini 3.7 Flash-Lite (快速穩定)' },
 ];
 
 const ASSET_TYPES = {
@@ -1034,11 +1034,15 @@ const App = () => {
     const portfolioString = sortedHoldings.map(h => `${h['標的']}(${formatPercent(h.marketValue/(summary.totalValue||1))})`).join(', ');
     const prompt = `角色：風險管理專家。評估投資組合：總資產${formatCurrency(summary.totalValue)}, 總損益${formatCurrency(summary.totalPL)}, 配置：${allocationStr}, 前五大持股：${topHoldings.join(', ')}。
 
-綜合以下邏輯進行分析與壓力測試：
-1. 分析這個投資組合：${portfolioString}。
-2. 找出集中風險、產業曝險、地區曝險、重複押注、隱藏關聯，以及市場拋售時可能同步反應的部位。
-3. 模擬以下情境：市場修正10%、熊市下跌20%、利率上升、經濟衰退。
-4. 提出可行的分散或避險方式，並說明各自取捨。
+除了原本分析邏輯外，請綜合以下分析對投資組合進行壓力測試：
+分析這個投資組合：${portfolioString}。
+找出集中風險、產業曝險、地區曝險、重複押注、隱藏關聯，以及市場拋售時可能同步反應的部位。
+接著模擬：
+- 市場修正10%
+- 熊市下跌20%
+- 利率上升
+- 經濟衰退
+提出可行的分散或避險方式，並說明各自取捨。
 
 嚴格格式輸出(無Markdown代碼)：
 [SCORE] 0-100分數
@@ -1127,6 +1131,9 @@ const App = () => {
             signalRules = `燈號規則 (單筆投入)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
         }
 
+        let rulesAndFormat = `嚴格格式輸出(無Markdown)：\n[SUMMARY] (50字簡評)\n[DETAIL] (詳細分析報告)\n[SIGNAL] (僅輸出 ADD_ALL/ADD_BASIC/ADD_BONUS/REDUCE/HOLD 之一)`;
+        let baseContext = `投資定位：${classLabel}。模式：${dcaStrategy}\n最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}\n數據：${keyMetrics}\n指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}\n鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。\n濾網：1.大波動(MACD綠柱收斂/DIF金叉) 2.小波動(布林下緣) 3.大盤ETF(KD<20) 4.科技ETF(折價/RSI<30) 5.債券ETF(殖利率創高)。\n${signalRules}`;
+
         let prompt = "";
         switch (customAnalysisType) {
             case 'MARKET_PRICING': {
@@ -1150,11 +1157,40 @@ const App = () => {
             case 'STRATEGY_BACKTEST': {
                 const strategyName = isDCA ? `定期定額 + 加碼(${addonLogic})` : `單筆加碼(${addonLogic})`;
                 const tfLabel = timeframe === '1y_1d' ? '近1年' : timeframe.includes('wk') ? '近5年' : '近10年';
-                prompt = `角色：量化交易員。\n\n任務：回測交易策略。\n使用可取得的歷史資料，評估「${strategyName}」策略在 ${symbol}(${stockName}) 於「${tfLabel}」期間內的表現。\n計算交易次數、勝率、平均獲利、平均虧損、最大回撤、獲利因子，以及不同市場環境下的績效。\n接著找出策略最有效與失效的情況，並提出下一步可測試、但不過度擬合歷史資料的規則。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
+                prompt = `角色：量化交易員。
+
+任務：回測交易策略。
+使用可取得的歷史資料，評估「${strategyName}」策略在 ${symbol}(${stockName}) 於「${tfLabel}」期間內的表現。
+計算交易次數、勝率、平均獲利、平均虧損、最大回撤、獲利因子，以及不同市場環境下的績效。
+接著找出策略最有效與失效的情況，並提出下一步可測試、但不過度擬合歷史資料的規則。
+
+現況資料參考：
+${baseContext}
+
+${rulesAndFormat}`;
                 break;
             }
             default:
-                prompt = `角色：專業分析師。深度分析 ${symbol}(${stockName})(${assetType})。\n投資定位：${classLabel}。模式：${dcaStrategy}\n最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}\n數據：${keyMetrics}\n指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}\n鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。\n濾網：1.大波動(MACD綠柱收斂/DIF金叉) 2.小波動(布林下緣) 3.大盤ETF(KD<20) 4.科技ETF(折價/RSI<30) 5.債券ETF(殖利率創高)。\n策略要求：根據技術支撐提供【預估目標價】。\n${rulesAndFormat}`;
+                prompt = `角色：專業分析師。對 ${symbol}(${stockName})(${assetType}) 產生新的綜合趨勢分析。
+
+除了依據原本邏輯分析外，請務必涵蓋以下兩大重點進行綜合趨勢研判：
+
+1. 看懂市場正在定價什麼：
+請以股票研究分析師角度，分析此公司/股票代號/產業。
+檢視最新財報、財測、估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。
+請區分哪些資訊可能已反映在股價中，哪些仍可能讓市場意外。
+最後整理3個最大利多催化因素、3個最大風險，以及接下來應關注的關鍵發展。
+
+2. 把新聞轉化為市場影響：
+整理近期影響此公司/產業的重要新聞。
+針對每項發展說明：實際發生什麼事、投資人為何需要關注、影響偏短期或長期、哪些財務指標可能受影響、市場可能隱含哪些假設。
+依重要性由高至低排序，並說明哪些因素可能改變目前的市場反應。
+
+原本分析邏輯與現況資料參考：
+${baseContext}
+策略要求：根據技術支撐提供【預估目標價】。
+
+${rulesAndFormat}`;
         }
 
         try {
