@@ -1031,12 +1031,20 @@ const App = () => {
     const totalAsset = summary.totalValue;
     const topHoldings = sortedHoldings.slice(0, 5).map(h => `${h['名稱']}(${h['標的']}): ${formatPercent(h.marketValue / totalAsset)}`);
     const allocationStr = allocationData.map(d => `${d.name} ${formatPercent(d.percentage)}`).join(', ');
-    const prompt = `角色：風險經理。評估投資組合：總資產${formatCurrency(summary.totalValue)}, 總損益${formatCurrency(summary.totalPL)}, 配置：${allocationStr}, 前五大持股：${topHoldings.join(', ')}。
+    const portfolioString = sortedHoldings.map(h => `${h['標的']}(${formatPercent(h.marketValue/(summary.totalValue||1))})`).join(', ');
+    const prompt = `角色：風險管理專家。評估投資組合：總資產${formatCurrency(summary.totalValue)}, 總損益${formatCurrency(summary.totalPL)}, 配置：${allocationStr}, 前五大持股：${topHoldings.join(', ')}。
+
+綜合以下邏輯進行分析與壓力測試：
+1. 分析這個投資組合：${portfolioString}。
+2. 找出集中風險、產業曝險、地區曝險、重複押注、隱藏關聯，以及市場拋售時可能同步反應的部位。
+3. 模擬以下情境：市場修正10%、熊市下跌20%、利率上升、經濟衰退。
+4. 提出可行的分散或避險方式，並說明各自取捨。
+
 嚴格格式輸出(無Markdown代碼)：
 [SCORE] 0-100分數
 [RISK] 低風險/中低風險/中風險/中高風險/高風險
-[COMMENT] 200字總評
-[SUGGESTION] 列3點建議，每點一行`;
+[COMMENT] 綜合總評與壓力測試結果(約300字)
+[SUGGESTION] 列3點具體的避險或調整建議，每點一行`;
     try {
         const { text } = await callGeminiWithFallback(prompt);
         const scoreMatch = text.match(/\[SCORE\]\s*(\d+)/i); const riskMatch = text.match(/\[RISK\]\s*(.+)/i); const commentMatch = text.match(/\[COMMENT\]\s*([\s\S]*?)\s*(?=\[SUGGESTION\]|$)/i); const suggestionMatch = text.match(/\[SUGGESTION\]\s*([\s\S]*)/i);
@@ -1119,29 +1127,32 @@ const App = () => {
             signalRules = `燈號規則 (單筆投入)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
         }
 
-        const baseContext = `最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}\n數據：${keyMetrics}\n指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}`;
-        const rulesAndFormat = `${signalRules}\n嚴格格式輸出(無Markdown)：\n[SUMMARY] (50字簡評)\n[DETAIL] (詳細分析報告)\n[SIGNAL] (僅輸出 ADD_ALL/ADD_BASIC/ADD_BONUS/REDUCE/HOLD 之一)`;
-
         let prompt = "";
         switch (customAnalysisType) {
-            case 'MARKET_PRICING':
-                prompt = `角色：股票研究分析師。\n分析標的：${symbol}(${stockName})(${assetType})。\n\n任務：看懂市場正在定價什麼。\n請檢視最新財報、財測、估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。\n請區分哪些資訊可能已反映在股價中，哪些仍可能讓市場意外。\n最後整理3個最大利多催化因素、3個最大風險，以及接下來應關注的關鍵發展。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
+            case 'MARKET_PRICING': {
+                prompt = `角色：股票研究分析師。\n分析標的：${symbol}(${stockName})。\n\n任務：看懂市場正在定價什麼。\n請以股票研究分析師角度，分析此公司/股票代號/產業。\n檢視最新財報、財測、估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。\n請區分哪些資訊可能已反映在股價中，哪些仍可能讓市場意外。\n最後整理3個最大利多催化因素、3個最大風險，以及接下來應關注的關鍵發展。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
                 break;
-            case 'CHART_EXPERT':
+            }
+            case 'CHART_EXPERT': {
                 const tfLabel = timeframe === '1y_1d' ? '日線' : timeframe.includes('wk') ? '週線' : '月線';
                 prompt = `角色：技術分析專家。\n分析標的：${symbol}(${stockName})(${assetType})。\n\n任務：像專家一樣看懂圖表。\n分析此標定的${tfLabel}技術型態。找出目前趨勢、主要支撐與壓力區、移動平均線、動能、成交量變化，以及重要突破或跌破價位。\n接著提供多頭、中性與空頭情境，並列出每種情境成立或失效的條件。\n不要把任何情境視為必然結果。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
                 break;
-            case 'NEWS_IMPACT':
-                prompt = `角色：財經市場分析師。\n分析標的：${symbol}(${stockName})(${assetType})。\n\n任務：把新聞轉化為市場影響。\n整理近期影響此公司或產業的重要新聞。\n針對每項發展說明：\n1. 實際發生什麼事\n2. 投資人為何需要關注\n3. 影響偏短期或長期\n4. 哪些財務指標可能受影響\n5. 市場可能隱含哪些假設\n依重要性由高至低排序，並說明哪些因素可能改變目前的市場反應。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
+            }
+            case 'NEWS_IMPACT': {
+                prompt = `角色：財經市場分析師。\n分析標的：${symbol}(${stockName})。\n\n任務：把新聞轉化為市場影響。\n整理近期影響此公司/產業的重要新聞。\n針對每項發展說明：\n1. 實際發生什麼事\n2. 投資人為何需要關注\n3. 影響偏短期或長期\n4. 哪些財務指標可能受影響\n5. 市場可能隱含哪些假設\n依重要性由高至低排序，並說明哪些因素可能改變目前的市場反應。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
                 break;
-            case 'PORTFOLIO_STRESS':
+            }
+            case 'PORTFOLIO_STRESS': {
                 const portfolioString = sortedHoldings.map(h => `${h['標的']}(${formatPercent(h.marketValue/(summary.totalValue||1))})`).join(', ');
                 prompt = `角色：風險管理專家。\n\n任務：對投資組合進行壓力測試。\n分析這個投資組合配置：${portfolioString}。\n找出集中風險、產業曝險、地區曝險、重複押注、隱藏關聯，以及市場拋售時可能同步反應的部位。\n接著模擬：\n- 市場修正10%\n- 熊市下跌20%\n- 利率上升\n- 經濟衰退\n提出可行的分散或避險方式，並說明各自取捨。請特別著墨 ${symbol}(${stockName}) 在此組合中的避險或拖累作用。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
                 break;
-            case 'STRATEGY_BACKTEST':
+            }
+            case 'STRATEGY_BACKTEST': {
                 const strategyName = isDCA ? `定期定額 + 加碼(${addonLogic})` : `單筆加碼(${addonLogic})`;
-                prompt = `角色：量化交易員。\n\n任務：回測你的交易策略。\n使用可取得的歷史資料與以下技術指標，評估「${strategyName}」策略在 ${symbol}(${stockName}) 於近期的理論表現。\n試著推算交易次數、勝率、平均獲利、平均虧損、最大回撤、獲利因子，以及不同市場環境下的績效。\n接著找出策略最有效與失效的情況，並提出下一步可測試、但不過度擬合歷史資料的規則。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
+                const tfLabel = timeframe === '1y_1d' ? '近1年' : timeframe.includes('wk') ? '近5年' : '近10年';
+                prompt = `角色：量化交易員。\n\n任務：回測交易策略。\n使用可取得的歷史資料，評估「${strategyName}」策略在 ${symbol}(${stockName}) 於「${tfLabel}」期間內的表現。\n計算交易次數、勝率、平均獲利、平均虧損、最大回撤、獲利因子，以及不同市場環境下的績效。\n接著找出策略最有效與失效的情況，並提出下一步可測試、但不過度擬合歷史資料的規則。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
                 break;
+            }
             default:
                 prompt = `角色：專業分析師。深度分析 ${symbol}(${stockName})(${assetType})。\n投資定位：${classLabel}。模式：${dcaStrategy}\n最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}\n數據：${keyMetrics}\n指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}\n鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。\n濾網：1.大波動(MACD綠柱收斂/DIF金叉) 2.小波動(布林下緣) 3.大盤ETF(KD<20) 4.科技ETF(折價/RSI<30) 5.債券ETF(殖利率創高)。\n策略要求：根據技術支撐提供【預估目標價】。\n${rulesAndFormat}`;
         }
