@@ -1155,6 +1155,7 @@ const App = () => {
                 break;
             }
             case 'STRATEGY_BACKTEST': {
+                const addonLogic = investmentSettings[symbol]?.addon || 'PYRAMID';
                 const strategyName = isDCA ? `定期定額 + 加碼(${addonLogic})` : `單筆加碼(${addonLogic})`;
                 const tfLabel = timeframe === '1y_1d' ? '近1年' : timeframe.includes('wk') ? '近5年' : '近10年';
                 prompt = `角色：量化交易員。
