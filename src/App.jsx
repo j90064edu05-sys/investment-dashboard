@@ -11,13 +11,14 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v54.89 (Stable Resilience Engine - UX & AI Opt)
- * * [重大更新 v54.89]
- * 1. AI 模型升級：導入 gemini-3.1-pro-preview, gemini-3.5-flash, gemini-3.1-flash-lite。
+ * Alpha 投資戰情室 v55.00 (Stable Resilience Engine - UX & AI Opt)
+ * * [重大更新 v55.00]
+ * 1. AI 模型升級：導入 gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash-lite。
  * 2. 效能與節流：取消歷史走勢切換時的自動 AI 分析，將控制權交還給使用者手動觸發。
  * 3. 手機版白屏修復：導入 safeHoverIndex 邊界防護，解決切換標的時因游標殘留導致的崩潰。
  * 4. 手機端互動支援：加入雙指縮放 (Pinch-to-Zoom)、單指平移 (Swipe-to-Pan)。
  * 5. 連線防護：強化 callGeminiWithFallback，加入指數退避 (Exponential Backoff) 重試機制。
+ * 6. 多維度 AI 分析：新增市場定價、技術圖表、新聞影響、壓力測試、策略回測等五大專業提示詞腳本選擇。
  */
 
 const DEMO_DATA = [
@@ -502,6 +503,7 @@ const App = () => {
   const [isCachedResult, setIsCachedResult] = useState(false); 
   const [selectedModel, setSelectedModel] = useState('gemini-3.7-flash'); 
   const [aiSignals, setAiSignals] = useState({}); 
+  const [aiAnalysisType, setAiAnalysisType] = useState('DEFAULT'); // 新增分析模式狀態
 
   const [portfolioHealth, setPortfolioHealth] = useState(null);
   const [isHealthChecking, setIsHealthChecking] = useState(false);
@@ -833,7 +835,7 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v54.89 Fast-Fail Engine) ===");
+    console.log("=== 開始更新股價與數據 (v55.00 Fast-Fail Engine) ===");
     if (globalAbortRef.current) globalAbortRef.current.abort();
     globalAbortRef.current = new AbortController();
     const signal = globalAbortRef.current.signal;
@@ -1042,8 +1044,8 @@ const App = () => {
     } catch (err) { setPortfolioHealth({ score: 0, risk: "Error", comment: String(err.message), suggestions: [] }); } finally { setIsHealthChecking(false); }
   };
 
-  const generateFullAnalysis = async (symbol, data, forceUpdate = false, metaPrevCloseOverride = null) => {
-    console.log(`[AI Master] 🟢 啟動分析流程: ${symbol}, forceUpdate: ${forceUpdate}`);
+  const generateFullAnalysis = async (symbol, data, forceUpdate = false, metaPrevCloseOverride = null, customAnalysisType = 'DEFAULT') => {
+    console.log(`[AI Master] 🟢 啟動分析流程: ${symbol}, forceUpdate: ${forceUpdate}, Type: ${customAnalysisType}`);
     if (!data || data.length === 0) { 
         console.warn(`[AI Master] 🟡 取消分析: 無圖表資料 (${symbol})`); 
         setIsAiSummarizing(false); 
@@ -1117,19 +1119,32 @@ const App = () => {
             signalRules = `燈號規則 (單筆投入)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
         }
 
-        const prompt = `角色：專業分析師。深度分析 ${symbol}(${stockName})(${assetType})。
-投資定位：${classLabel}。模式：${dcaStrategy}
-最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}
-數據：${keyMetrics}
-指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}
-鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。
-濾網：1.大波動(MACD綠柱收斂/DIF金叉) 2.小波動(布林下緣) 3.大盤ETF(KD<20) 4.科技ETF(折價/RSI<30) 5.債券ETF(殖利率創高)。
-策略要求：根據技術支撐提供【預估目標價】。
-${signalRules}
-嚴格格式輸出(無Markdown)：
-[SUMMARY] (50字簡評)
-[DETAIL] (詳細分析報告)
-[SIGNAL] (僅輸出 ADD_ALL/ADD_BASIC/ADD_BONUS/REDUCE/HOLD 之一)`;
+        const baseContext = `最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}\n數據：${keyMetrics}\n指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}`;
+        const rulesAndFormat = `${signalRules}\n嚴格格式輸出(無Markdown)：\n[SUMMARY] (50字簡評)\n[DETAIL] (詳細分析報告)\n[SIGNAL] (僅輸出 ADD_ALL/ADD_BASIC/ADD_BONUS/REDUCE/HOLD 之一)`;
+
+        let prompt = "";
+        switch (customAnalysisType) {
+            case 'MARKET_PRICING':
+                prompt = `角色：股票研究分析師。\n分析標的：${symbol}(${stockName})(${assetType})。\n\n任務：看懂市場正在定價什麼。\n請檢視最新財報、財測、估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。\n請區分哪些資訊可能已反映在股價中，哪些仍可能讓市場意外。\n最後整理3個最大利多催化因素、3個最大風險，以及接下來應關注的關鍵發展。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
+                break;
+            case 'CHART_EXPERT':
+                const tfLabel = timeframe === '1y_1d' ? '日線' : timeframe.includes('wk') ? '週線' : '月線';
+                prompt = `角色：技術分析專家。\n分析標的：${symbol}(${stockName})(${assetType})。\n\n任務：像專家一樣看懂圖表。\n分析此標定的${tfLabel}技術型態。找出目前趨勢、主要支撐與壓力區、移動平均線、動能、成交量變化，以及重要突破或跌破價位。\n接著提供多頭、中性與空頭情境，並列出每種情境成立或失效的條件。\n不要把任何情境視為必然結果。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
+                break;
+            case 'NEWS_IMPACT':
+                prompt = `角色：財經市場分析師。\n分析標的：${symbol}(${stockName})(${assetType})。\n\n任務：把新聞轉化為市場影響。\n整理近期影響此公司或產業的重要新聞。\n針對每項發展說明：\n1. 實際發生什麼事\n2. 投資人為何需要關注\n3. 影響偏短期或長期\n4. 哪些財務指標可能受影響\n5. 市場可能隱含哪些假設\n依重要性由高至低排序，並說明哪些因素可能改變目前的市場反應。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
+                break;
+            case 'PORTFOLIO_STRESS':
+                const portfolioString = sortedHoldings.map(h => `${h['標的']}(${formatPercent(h.marketValue/(summary.totalValue||1))})`).join(', ');
+                prompt = `角色：風險管理專家。\n\n任務：對投資組合進行壓力測試。\n分析這個投資組合配置：${portfolioString}。\n找出集中風險、產業曝險、地區曝險、重複押注、隱藏關聯，以及市場拋售時可能同步反應的部位。\n接著模擬：\n- 市場修正10%\n- 熊市下跌20%\n- 利率上升\n- 經濟衰退\n提出可行的分散或避險方式，並說明各自取捨。請特別著墨 ${symbol}(${stockName}) 在此組合中的避險或拖累作用。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
+                break;
+            case 'STRATEGY_BACKTEST':
+                const strategyName = isDCA ? `定期定額 + 加碼(${addonLogic})` : `單筆加碼(${addonLogic})`;
+                prompt = `角色：量化交易員。\n\n任務：回測你的交易策略。\n使用可取得的歷史資料與以下技術指標，評估「${strategyName}」策略在 ${symbol}(${stockName}) 於近期的理論表現。\n試著推算交易次數、勝率、平均獲利、平均虧損、最大回撤、獲利因子，以及不同市場環境下的績效。\n接著找出策略最有效與失效的情況，並提出下一步可測試、但不過度擬合歷史資料的規則。\n\n現況資料參考：\n${baseContext}\n\n${rulesAndFormat}`;
+                break;
+            default:
+                prompt = `角色：專業分析師。深度分析 ${symbol}(${stockName})(${assetType})。\n投資定位：${classLabel}。模式：${dcaStrategy}\n最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}\n數據：${keyMetrics}\n指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}\n鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。\n濾網：1.大波動(MACD綠柱收斂/DIF金叉) 2.小波動(布林下緣) 3.大盤ETF(KD<20) 4.科技ETF(折價/RSI<30) 5.債券ETF(殖利率創高)。\n策略要求：根據技術支撐提供【預估目標價】。\n${rulesAndFormat}`;
+        }
 
         try {
             const MAX_VOTES = 3; let results = [];
@@ -2281,10 +2296,24 @@ ${signalRules}
                                 </button>
                             )}
                             {!isAiSummarizing && geminiApiKey && (
-                                <button onClick={() => { const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; if (data && data.length > 0) { generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose); } else { fetchHistoricalData(selectedHistorySymbol, timeframe); } }} className="text-[10px] md:text-xs flex items-center transition-colors text-blue-400 hover:text-blue-300 bg-blue-900/30 border border-blue-500/30 px-2 md:px-3 py-1.5 rounded shadow-sm">
-                                    <RefreshCw className="w-3 h-3 mr-1" />
-                                    {isCachedResult || aiDetail ? '重新分析' : '開始 AI 分析'}
-                                </button>
+                                <div className="flex items-center gap-2">
+                                    <select 
+                                        value={aiAnalysisType} 
+                                        onChange={(e) => setAiAnalysisType(e.target.value)} 
+                                        className="text-[10px] md:text-xs bg-slate-900 border border-slate-600 text-slate-300 rounded px-2 py-1.5 outline-none focus:border-blue-500 max-w-[140px] md:max-w-xs"
+                                    >
+                                        <option value="DEFAULT">綜合趨勢分析 (預設)</option>
+                                        <option value="MARKET_PRICING">1. 看懂市場正在定價什麼</option>
+                                        <option value="CHART_EXPERT">2. 像專家一樣看懂圖表</option>
+                                        <option value="NEWS_IMPACT">3. 把新聞轉化為市場影響</option>
+                                        <option value="PORTFOLIO_STRESS">4. 投資組合壓力測試</option>
+                                        <option value="STRATEGY_BACKTEST">5. 回測你的交易策略</option>
+                                    </select>
+                                    <button onClick={() => { const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; if (data && data.length > 0) { generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose, aiAnalysisType); } else { fetchHistoricalData(selectedHistorySymbol, timeframe); } }} className="text-[10px] md:text-xs flex items-center transition-colors text-blue-400 hover:text-blue-300 bg-blue-900/30 border border-blue-500/30 px-2 md:px-3 py-1.5 rounded shadow-sm">
+                                        <RefreshCw className="w-3 h-3 mr-1" />
+                                        {isCachedResult || aiDetail ? '重新分析' : '開始 AI 分析'}
+                                    </button>
+                                </div>
                             )}
                         </div>
                     </div>
