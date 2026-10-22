@@ -18,7 +18,7 @@ import {
  * Alpha 投資戰情室 v56.00 (完整無省略版 - 基於 v55.00 升級)
  * 
  * [v55.00 ~ v56.00 核心功能總覽]
- * 1. AI 模型全面升級：支援 gemini-3.7-flash (預設)、gemini-3.6-flash、gemini-3.7-flash-lite。
+ * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量），並擴充左側資訊欄寬度避免日期截斷。
  * 4. 歷史走勢 AI 分析雙模式：「綜合趨勢分析 (含市場定價與新聞影響)」與「回測交易策略」。
@@ -187,7 +187,10 @@ const getPureCode = (symbol) => {
 
 const extractSpreadsheetId = (url) => {
   if (!url) return null;
-  const match = String(url).match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  const clean = String(url).trim();
+  // 若為「發布到網路」產生的 /spreadsheets/d/e/2PACX-... 連結，並無包含原始試算表 ID
+  if (clean.includes('/spreadsheets/d/e/')) return null;
+  const match = clean.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
   return match ? match[1] : null;
 };
 
@@ -497,9 +500,11 @@ const Toast = ({ message, onClose }) => {
 
 const App = () => {
   const [sheetUrl, setSheetUrl] = useState('');
+  const [reportSheetUrl, setReportSheetUrl] = useState('');
   const [gasWebAppUrl, setGasWebAppUrl] = useState('');
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const [cloudReports, setCloudReports] = useState({});
+  const cloudReportsRef = useRef({});
   const [cloudReportTime, setCloudReportTime] = useState(null);
   const [aiAnalysisType, setAiAnalysisType] = useState('DEFAULT');
 
@@ -829,9 +834,11 @@ const App = () => {
     }).format(new Date());
 
     // 1. 更新本地與雲端快取供下次使用
+    const pureCode = getPureCode(symbol);
     const updatedReport = { time: nowStr, signal, summary: summaryText, detail: detailText };
     setCloudReports(prev => {
-      const next = { ...prev, [symbol]: updatedReport };
+      const next = { ...prev, [symbol]: updatedReport, ...(pureCode ? { [pureCode]: updatedReport } : {}) };
+      cloudReportsRef.current = next;
       localStorage.setItem('alpha_synced_cloud_reports', JSON.stringify(next));
       return next;
     });
@@ -890,45 +897,164 @@ const App = () => {
     }
   };
 
-  const fetchCloudReports = async (sheetId) => {
-    if (!sheetId) return;
-    const reportUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent('AI_分析報告')}`;
+  const parseAndStoreCloudRows = useCallback((rows, sourceLabel = 'Google表單') => {
+    if (!Array.isArray(rows) || rows.length === 0) return 0;
+
+    let timeIdx = 0, symIdx = 1, nameIdx = 2, sigIdx = 3, sumIdx = 4, detIdx = 5;
+    let startRow = 0;
+
+    // 檢查第一列是否為標題列
+    const firstRow = rows[0].map(c => String(c || '').trim());
+    if (firstRow.some(col => col.includes('標的') || col.includes('時間') || col.includes('燈號') || col.includes('簡評') || col.includes('Summary'))) {
+      startRow = 1;
+      firstRow.forEach((col, idx) => {
+        if (col.includes('時間') || col.toLowerCase().includes('time')) timeIdx = idx;
+        else if (col.includes('標的') || col.includes('代號') || col.toLowerCase().includes('symbol')) symIdx = idx;
+        else if (col.includes('名稱') || col.toLowerCase().includes('name')) nameIdx = idx;
+        else if (col.includes('燈號') || col.includes('訊號') || col.toLowerCase().includes('signal')) sigIdx = idx;
+        else if (col.includes('簡評') || col.toLowerCase().includes('summary')) sumIdx = idx;
+        else if (col.includes('詳細') || col.includes('報告') || col.toLowerCase().includes('detail')) detIdx = idx;
+      });
+    }
+
+    const reports = {};
+    let count = 0;
+
+    for (let i = startRow; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length < 2) continue;
+      const rawSym = String(row[symIdx] || '').trim();
+      if (!rawSym || rawSym === '標的') continue;
+
+      const timeStr = String(row[timeIdx] || '').trim();
+      const rawSig = String(row[sigIdx] || 'HOLD').trim().toUpperCase();
+      const validSignals = ['ADD_ALL', 'ADD_BASIC', 'ADD_BONUS', 'REDUCE', 'HOLD'];
+      const signal = validSignals.find(s => rawSig.includes(s)) || 'HOLD';
+      const summary = String(row[sumIdx] || '').trim();
+      const detail = String(row[detIdx] || '').trim();
+
+      if (!summary && !detail) continue;
+
+      const pureCode = getPureCode(rawSym);
+      const entry = { time: timeStr, signal, summary, detail };
+
+      // 若同一標的有數筆歷史紀錄，保留時間最新的一筆
+      const existing = reports[rawSym];
+      if (!existing || (timeStr && existing.time && timeStr > existing.time)) {
+        reports[rawSym] = entry;
+        if (pureCode) reports[pureCode] = entry;
+        count++;
+      }
+    }
+
+    if (count > 0) {
+      const localSynced = JSON.parse(localStorage.getItem('alpha_synced_cloud_reports') || '{}');
+      const mergedReports = { ...localSynced, ...reports };
+      cloudReportsRef.current = mergedReports;
+      setCloudReports(mergedReports);
+      setAiSignals(prev => {
+        const next = { ...prev };
+        Object.keys(mergedReports).forEach(sym => {
+          if (mergedReports[sym]?.signal) next[sym] = mergedReports[sym].signal;
+        });
+        return next;
+      });
+      console.log(`[Cloud Engine] 🟢 成功從 ${sourceLabel} 載入 ${count} 筆 AI 分析報告！`);
+    }
+    return count;
+  }, []);
+
+  const fetchCloudReports = useCallback(async (primaryUrl, customReportUrl = '', customGasUrl = '') => {
+    const targetGasUrl = (customGasUrl || gasWebAppUrl || localStorage.getItem('gas_webapp_url') || '').trim();
+    const targetReportUrl = (customReportUrl || reportSheetUrl || localStorage.getItem('investment_report_sheet_url') || '').trim();
+    const targetPrimaryUrl = (primaryUrl || sheetUrl || localStorage.getItem('investment_sheet_url') || '').trim();
+
+    // 管道 1：若有設定 GAS 網頁應用程式網址，優先透過 GAS 直接讀取「AI_分析報告」分頁（不受權限與 2PACX 網址限制）
+    if (targetGasUrl) {
+      try {
+        console.log(`[Cloud Engine] 🌐 嘗試透過 GAS Web App 讀取 AI_分析報告...`);
+        const gasFetchUrl = targetGasUrl + (targetGasUrl.includes('?') ? '&' : '?') + `action=GET_REPORTS&_t=${Date.now()}`;
+        const res = await fetch(gasFetchUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+        if (res.ok) {
+          const json = await res.json();
+          if (json && json.status === 'success' && Array.isArray(json.rows)) {
+            const loaded = parseAndStoreCloudRows(json.rows, 'GAS 雲端引擎');
+            if (loaded > 0) return;
+          }
+        }
+      } catch (e) {
+        console.log(`[Cloud Engine] 🟡 GAS 讀取略過，切換至表單 CSV 管道:`, e.message);
+      }
+    }
+
+    const Papa = await loadPapaParse();
+
+    // 管道 2：若有設定專屬「AI_分析報告」CSV 連結，直接讀取該 CSV
+    if (targetReportUrl && !extractSpreadsheetId(targetReportUrl)) {
+      try {
+        console.log(`[Cloud Engine] 🌐 嘗試讀取指定之 AI_分析報告 CSV 連結...`);
+        let csvText = null;
+        try {
+          const r = await fetch(targetReportUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+          if (r.ok) csvText = await r.text();
+        } catch (e) {}
+        if (!csvText || String(csvText).trim().toLowerCase().startsWith('<html')) {
+          csvText = await smartFetch(targetReportUrl, 'text', 6000);
+        }
+        if (csvText && !String(csvText).trim().toLowerCase().startsWith('<html')) {
+          Papa.parse(csvText, {
+            header: false,
+            skipEmptyLines: true,
+            complete: (results) => {
+              parseAndStoreCloudRows(results.data, '專屬報告 CSV 連結');
+            }
+          });
+          return;
+        }
+      } catch (e) {
+        console.warn(`[Cloud Engine] 專屬報告連結讀取失敗:`, e.message);
+      }
+    }
+
+    // 管道 3：從試算表網址萃取 Spreadsheet ID，並加上 &headers=1 防止 gviz 合併純文字表頭的 Bug
+    const sheetId = extractSpreadsheetId(targetReportUrl) || extractSpreadsheetId(targetPrimaryUrl);
+    if (!sheetId) {
+      if (targetPrimaryUrl.includes('/spreadsheets/d/e/')) {
+        console.warn(`[Cloud Engine] ⚠️ 偵測到您的 CSV 連結為「發布到網路 (2PACX-...)」格式，Google 隱藏了原始試算表 ID，無法直接跨分頁抓取「AI_分析報告」。請於「設定」頁面填入「AI_分析報告 CSV 連結」或「一般試算表分享連結」或「GAS 網址」！`);
+      }
+      return;
+    }
+
+    // 關鍵修正：加上 &headers=1 避免 Google gviz 將全文字表格的多筆資料列合併成單一表頭
+    const reportUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&headers=1&sheet=${encodeURIComponent('AI_分析報告')}`;
     try {
-      const Papa = await loadPapaParse();
-      const csvText = await smartFetch(reportUrl, 'text', 6000);
+      console.log(`[Cloud Engine] 🌐 正在從試算表 (${sheetId.substring(0, 8)}...) 讀取「AI_分析報告」分頁...`);
+      let csvText = null;
+      try {
+        const res = await fetch(`${reportUrl}&_t=${Date.now()}`, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+        if (res.ok) csvText = await res.text();
+      } catch (e) {}
+      if (!csvText || String(csvText).trim().toLowerCase().startsWith('<html')) {
+        csvText = await smartFetch(reportUrl, 'text', 6000);
+      }
       if (csvText && !String(csvText).trim().toLowerCase().startsWith('<html')) {
         Papa.parse(csvText, {
-          header: true,
+          header: false,
           skipEmptyLines: true,
           complete: (results) => {
-            if (!results.data || results.data.length === 0) return;
-            const reports = {};
-            results.data.forEach(row => {
-              const sym = row['標的'];
-              if (sym && !reports[sym]) {
-                reports[sym] = {
-                  time: row['分析時間'] || '',
-                  signal: row['燈號'] || 'HOLD',
-                  summary: row['簡評 (Summary)'] || row['簡評'] || '',
-                  detail: row['詳細報告 (Detail)'] || row['詳細報告'] || ''
-                };
-              }
-            });
-            const localSynced = JSON.parse(localStorage.getItem('alpha_synced_cloud_reports') || '{}');
-            const mergedReports = { ...localSynced, ...reports };
-            setCloudReports(mergedReports);
-            setAiSignals(prev => {
-              const next = { ...prev };
-              Object.keys(mergedReports).forEach(sym => { if (!next[sym]) next[sym] = mergedReports[sym].signal; });
-              return next;
-            });
+            const count = parseAndStoreCloudRows(results.data, 'Google 表單 (gviz)');
+            if (count === 0) {
+              console.warn(`[Cloud Engine] ⚠️ 已連線至「AI_分析報告」但未解析出有效資料列，請確認分頁名稱是否為「AI_分析報告」且試算表共用權限為「知道連結的任何人皆可查看」。`);
+            }
           }
         });
+      } else {
+        console.warn(`[Cloud Engine] ⚠️ 無法直接讀取「AI_分析報告」分頁 (可能試算表未開啟「知道連結的任何人皆可查看」權限)。`);
       }
     } catch (e) {
       console.log(`[Cloud Engine] 雲端報告同步略過:`, e.message);
     }
-  };
+  }, [gasWebAppUrl, reportSheetUrl, sheetUrl, parseAndStoreCloudRows]);
 
   const processData = (data, pricesMap, extraMap = {}) => {
     const currentUsdRate = pricesMap['TWD=X'] || 30; 
@@ -1394,9 +1520,14 @@ ${signalRules}
     }
   };
 
-  const applyExistingReportForSymbol = (symbol) => {
+  const applyExistingReportForSymbol = useCallback((symbol) => {
+    if (!symbol) return;
     const today = getTodayDate();
     const cache = getAiCache();
+    const pureCode = getPureCode(symbol);
+    const latestCloudReports = cloudReportsRef.current || {};
+    const cloudRep = latestCloudReports[symbol] || latestCloudReports[pureCode] || cloudReports[symbol] || cloudReports[pureCode];
+
     if (cache[symbol] && cache[symbol].date === today && (cache[symbol].summary || cache[symbol].detail)) {
       setAiSummary(String(cache[symbol].summary));
       setAiDetail(String(cache[symbol].detail));
@@ -1405,12 +1536,12 @@ ${signalRules}
       setIsCachedResult(true);
       setCloudReportTime(null);
       setIsDetailExpanded(true);
-    } else if (cloudReports[symbol]) {
-      setAiSummary(String(cloudReports[symbol].summary));
-      setAiDetail(String(cloudReports[symbol].detail));
-      if (cloudReports[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cloudReports[symbol].signal }));
+    } else if (cloudRep && (cloudRep.summary || cloudRep.detail)) {
+      setAiSummary(String(cloudRep.summary));
+      setAiDetail(String(cloudRep.detail));
+      if (cloudRep.signal) setAiSignals(prev => ({ ...prev, [symbol]: cloudRep.signal }));
       setUsedModel('雲端自動排程');
-      setCloudReportTime(cloudReports[symbol].time);
+      setCloudReportTime(cloudRep.time || '最新');
       setIsCachedResult(true);
       setIsDetailExpanded(true);
     } else {
@@ -1420,7 +1551,14 @@ ${signalRules}
       setCloudReportTime(null);
       setIsCachedResult(false);
     }
-  };
+  }, [cloudReports]);
+
+  // 當雲端報告非同步載入完成時，若使用者正停留在某檔標的，立即把報告渲染到畫面上
+  useEffect(() => {
+    if (selectedHistorySymbol && !isAiSummarizing && Object.keys(cloudReports).length > 0) {
+      applyExistingReportForSymbol(selectedHistorySymbol);
+    }
+  }, [cloudReports, selectedHistorySymbol, isAiSummarizing, applyExistingReportForSymbol]);
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
@@ -1537,8 +1675,14 @@ ${signalRules}
     let cleanUrl = url ? String(url).trim() : '';
     if (!cleanUrl) { setError('請輸入有效的網址'); setLoading(false); return; }
 
-    const sheetId = extractSpreadsheetId(cleanUrl);
-    if (sheetId) fetchCloudReports(sheetId);
+    // 同步啟動雲端 AI_分析報告 讀取
+    fetchCloudReports(cleanUrl);
+
+    // 若使用者貼入的是一般 Google 試算表網址 (如 .../edit#gid=0)，自動轉為 CSV 匯出網址
+    const extractedId = extractSpreadsheetId(cleanUrl);
+    if (extractedId && !cleanUrl.includes('output=csv') && !cleanUrl.includes('tqx=out:csv')) {
+      cleanUrl = `https://docs.google.com/spreadsheets/d/${extractedId}/gviz/tq?tqx=out:csv&headers=1`;
+    }
 
     try {
       const Papa = await loadPapaParse();
@@ -1591,7 +1735,7 @@ ${signalRules}
   };
 
   const handleFetchButton = () => { 
-    localStorage.setItem('gemini_api_key', geminiApiKey); localStorage.setItem('gemini_model', selectedModel); localStorage.setItem('fee_discount', feeDiscount); localStorage.setItem('custom_proxy_url', customProxyUrl); localStorage.setItem('gas_webapp_url', gasWebAppUrl); localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
+    localStorage.setItem('gemini_api_key', geminiApiKey); localStorage.setItem('gemini_model', selectedModel); localStorage.setItem('fee_discount', feeDiscount); localStorage.setItem('custom_proxy_url', customProxyUrl); localStorage.setItem('gas_webapp_url', gasWebAppUrl); localStorage.setItem('investment_report_sheet_url', reportSheetUrl); localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
     if (customOrder.length > 0) localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
     setToast("設定已儲存！開始更新資料..."); 
     if (!sheetUrl) { if (rawData.length > 0) processData(rawData, realTimePrices, etfExtraData); return; } 
@@ -1673,10 +1817,17 @@ ${signalRules}
   };
 
   useEffect(() => {
-    const savedUrl = localStorage.getItem('investment_sheet_url'); const savedGasUrl = localStorage.getItem('gas_webapp_url'); const savedKey = localStorage.getItem('gemini_api_key'); const savedModel = localStorage.getItem('gemini_model'); const savedDiscount = localStorage.getItem('fee_discount'); const savedSort = localStorage.getItem('investment_sort_config'); const savedOrder = localStorage.getItem('investment_custom_order'); const savedSettings = localStorage.getItem('investment_settings'); const savedClassifications = localStorage.getItem('investment_asset_classifications'); const savedProxyUrl = localStorage.getItem('custom_proxy_url'); const savedManualKLines = localStorage.getItem('investment_manual_klines'); const savedSyncedReports = localStorage.getItem('alpha_synced_cloud_reports');
+    const savedUrl = localStorage.getItem('investment_sheet_url'); const savedReportUrl = localStorage.getItem('investment_report_sheet_url'); const savedGasUrl = localStorage.getItem('gas_webapp_url'); const savedKey = localStorage.getItem('gemini_api_key'); const savedModel = localStorage.getItem('gemini_model'); const savedDiscount = localStorage.getItem('fee_discount'); const savedSort = localStorage.getItem('investment_sort_config'); const savedOrder = localStorage.getItem('investment_custom_order'); const savedSettings = localStorage.getItem('investment_settings'); const savedClassifications = localStorage.getItem('investment_asset_classifications'); const savedProxyUrl = localStorage.getItem('custom_proxy_url'); const savedManualKLines = localStorage.getItem('investment_manual_klines'); const savedSyncedReports = localStorage.getItem('alpha_synced_cloud_reports');
     if (savedKey) setGeminiApiKey(savedKey);
+    if (savedReportUrl) setReportSheetUrl(savedReportUrl);
     if (savedGasUrl) setGasWebAppUrl(savedGasUrl);
-    if (savedSyncedReports) { try { setCloudReports(JSON.parse(savedSyncedReports)); } catch(e) {} }
+    if (savedSyncedReports) {
+      try {
+        const parsed = JSON.parse(savedSyncedReports);
+        cloudReportsRef.current = parsed;
+        setCloudReports(parsed);
+      } catch(e) {}
+    }
     const isValidModel = AVAILABLE_MODELS.some(m => m.id === savedModel); if (savedModel && isValidModel) { setSelectedModel(savedModel); } else { setSelectedModel(AVAILABLE_MODELS[0].id); }
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount)); if (savedSort) setSortConfig(JSON.parse(savedSort)); if (savedOrder) setCustomOrder(JSON.parse(savedOrder)); if (savedProxyUrl) setCustomProxyUrl(savedProxyUrl); if (savedManualKLines) setManualKLinesState(JSON.parse(savedManualKLines));
 
@@ -2506,6 +2657,19 @@ ${signalRules}
                               <RefreshCw className="w-3 h-3 mr-1" />
                               {isCachedResult || aiDetail || usedModel === '雲端自動排程' ? '重新分析並同步' : '開始 AI 分析'}
                             </button>
+                            <button
+                              onClick={async () => {
+                                setToast('☁️ 正在從 Google 表單重新讀取 AI 分析報告...');
+                                localStorage.removeItem('gemini_analysis_cache');
+                                await fetchCloudReports(sheetUrl, reportSheetUrl, gasWebAppUrl);
+                                applyExistingReportForSymbol(selectedHistorySymbol);
+                              }}
+                              className="text-[10px] md:text-xs flex items-center transition-colors text-cyan-300 hover:text-white bg-cyan-900/40 hover:bg-cyan-700 border border-cyan-500/40 px-2.5 py-1.5 rounded shadow-sm"
+                              title="強制從 Google 表單重新抓取最新 AI_分析報告"
+                            >
+                              <Database className="w-3 h-3 mr-1" />
+                              讀取表單報告
+                            </button>
                             {aiDetail && (
                               <button
                                 onClick={() => {
@@ -2762,7 +2926,17 @@ ${signalRules}
                   <Cloud className="w-4 h-4 mr-2 text-blue-400" /> 雲端自動排程與表單雙向同步 (v56.00)
                 </h4>
                 <div className="mb-3">
-                  <label className="block text-xs text-slate-400 mb-1">Google Apps Script 網頁應用程式網址 (選填，供前端將分析結果與自動分析設定寫回表單)</label>
+                  <label className="block text-xs text-slate-400 mb-1">「AI_分析報告」分頁 CSV 連結 或 試算表共用連結 (當主連結為 2PACX 發布網址時必填)</label>
+                  <input
+                    type="text"
+                    value={reportSheetUrl}
+                    onChange={(e) => setReportSheetUrl(e.target.value)}
+                    placeholder="貼上「AI_分析報告」分頁發布的 CSV 網址，或試算表一般分享網址 (含 /d/試算表ID/)"
+                    className="flex-1 min-w-0 block w-full px-4 py-2.5 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                  />
+                </div>
+                <div className="mb-3">
+                  <label className="block text-xs text-slate-400 mb-1">Google Apps Script 網頁應用程式網址 (選填，可同時直接讀取報告與雙向寫回表單)</label>
                   <input
                     type="text"
                     value={gasWebAppUrl}
@@ -2772,7 +2946,9 @@ ${signalRules}
                   />
                 </div>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  系統會自動從 Google Sheets 讀取 <code>AI_分析報告</code>。若填入部署後的 GAS 網址（以 <code>/exec</code> 結尾），點擊「重新分析並同步」或切換持股明細的「自動分析:ON/OFF」時，將直接同步寫回 Google 表單供下次使用。
+                  💡 <strong>為什麼表單有資料但網頁沒顯示？</strong><br/>
+                  1. 若您上方的 Google Sheets 主連結是「檔案 → 共用 → 發布到網路」產生的 <code>/d/e/2PACX-...</code> 網址，Google 會隱藏試算表 ID，而且每個分頁有獨立網址。請將<strong>「AI_分析報告」分頁也發布為 CSV 連結</strong>貼於上方欄位，或直接貼上試算表網址列的一般連結（含 <code>/spreadsheets/d/xxxxx/edit</code>，需開啟「知道連結的任何人皆可查看」）。<br/>
+                  2. 或者只要填入部署後的 GAS 網址（以 <code>/exec</code> 結尾），系統即可自動雙向讀取與寫入！
                 </p>
               </div>
 
