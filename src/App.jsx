@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.00 (完整無省略版 - 基於 v55.00 升級)
+ * Alpha 投資戰情室 v56.03
  * 
  * [v55.00 ~ v56.00 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
@@ -23,8 +23,9 @@ import {
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量），並擴充左側資訊欄寬度避免日期截斷。
  * 4. 歷史走勢 AI 分析雙模式：「綜合趨勢分析 (含市場定價與新聞影響)」與「回測交易策略」。
  * 5. AI 投資組合總體健檢室：整合集中風險、產業曝險與 4 大極端情境壓力測試。
- * 6. [v56.00] 取消切換標的自動分析，改由使用者決定是否重新分析，分析結果自動同步回 Google 表單供下次使用。
- * 7. [v56.00] 持股明細新增個股「自動分析 (ON/OFF)」開關，雙向同步回 Google 表單控制雲端排程。
+ * 6. 取消切換標的自動分析，改由使用者決定是否重新分析，分析結果透過 GET 同步回 Google 表單供下次使用。
+ * 7. 持股明細新增個股「自動分析 (ON/OFF)」開關，雙向同步回 Google 表單控制雲端排程。
+ * 8. [v56.03 修正] 手機版與電腦版同步顯示雲端報告產生/同步時間標籤。
  */
 
 const DEMO_DATA = [
@@ -146,12 +147,10 @@ const getLogicalTradingDate = (holidays = [], isEodApi = false) => {
   let dt = new Date(y, m - 1, d);
   const currentMinutes = h * 60 + min;
 
-  // 若早於 09:00 開盤前，或盤後 API 於 15:00 前尚未更新當日資料，回推至前一日
   if (currentMinutes < 540 || (isEodApi && currentMinutes < 900)) {
     dt.setDate(dt.getDate() - 1);
   }
 
-  // 若遇週末或台灣國定假日，持續往前回推至最近一個交易日
   while (true) {
     const dayOfWeek = dt.getDay();
     const yStr = dt.getFullYear();
@@ -175,7 +174,7 @@ const isTaiwanTradingHours = (holidays = []) => {
   const compactStr = `${y}${String(m).padStart(2, '0')}${String(d).padStart(2, '0')}`;
   if (day >= 1 && day <= 5 && !holidays.includes(compactStr)) {
     const currentMinutes = h * 60 + min;
-    return currentMinutes >= 540 && currentMinutes <= 810; // 09:00 ~ 13:30
+    return currentMinutes >= 540 && currentMinutes <= 810;
   }
   return false;
 };
@@ -188,7 +187,6 @@ const getPureCode = (symbol) => {
 const extractSpreadsheetId = (url) => {
   if (!url) return null;
   const clean = String(url).trim();
-  // 若為「發布到網路」產生的 /spreadsheets/d/e/2PACX-... 連結，並無包含原始試算表 ID
   if (clean.includes('/spreadsheets/d/e/')) return null;
   const match = clean.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
   return match ? match[1] : null;
@@ -283,7 +281,6 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, pare
   const isYahoo = targetUrl.includes('yahoo.com');
   const bypassUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + `_t=${Date.now()}`;
 
-  console.log(`[Network] 🌐 嘗試直連: ${targetUrl}`);
   let abortHandler;
   try {
     const controller = new AbortController();
@@ -303,13 +300,11 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, pare
     if (parentSignal && abortHandler) parentSignal.removeEventListener('abort', abortHandler);
     
     if (res.ok && !text.trim().toLowerCase().startsWith('<html')) {
-      console.log(`[Network] 🟢 直連成功!`);
       return returnType === 'json' ? JSON.parse(text) : text;
     }
   } catch(e) {
     if (parentSignal && abortHandler) parentSignal.removeEventListener('abort', abortHandler);
     if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
-    console.log(`[Network] 🟡 直連遭遇 CORS 或超時，啟動「快刀序列」代理備援 (Fast-Fail)`);
   }
 
   const encodedUrl = encodeURIComponent(bypassUrl);
@@ -319,7 +314,6 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, pare
     { name: 'cors.lol', url: `https://api.cors.lol/?url=${encodedUrl}`, type: 'raw' },
     { name: 'codetabs', url: `https://api.codetabs.com/v1/proxy?quest=${encodedUrl}&${proxyCb}`, type: 'raw' },
     { name: 'allorigins-raw', url: `https://api.allorigins.win/raw?url=${encodedUrl}&disableCache=true&${proxyCb}`, type: 'raw' },
-    { name: 'cors-proxy.htmldriven', url: `https://cors-proxy.htmldriven.com/?url=${encodedUrl}`, type: 'raw' },
     { name: 'thingproxy', url: `https://thingproxy.freeboard.io/fetch/${bypassUrl}`, type: 'raw' }
   ];
 
@@ -327,9 +321,7 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, pare
     const customProxy = localStorage.getItem('custom_proxy_url');
     if (customProxy && customProxy.trim() !== '') {
       let pUrl = customProxy.trim();
-      const finalUrl = pUrl.includes('?') 
-        ? (pUrl.endsWith('=') ? pUrl + encodedUrl : pUrl + '&url=' + encodedUrl)
-        : pUrl + '?url=' + encodedUrl;
+      const finalUrl = pUrl.includes('?') ? (pUrl.endsWith('=') ? pUrl + encodedUrl : pUrl + '&url=' + encodedUrl) : pUrl + '?url=' + encodedUrl;
       proxies.unshift({ name: '自訂 Proxy', url: finalUrl, type: 'raw' });
     }
   } catch(e) {}
@@ -340,7 +332,6 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, pare
 
   for (const proxy of proxies) {
     if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
-    console.log(`[Network] 🔄 嘗試 Proxy [${proxy.name}]...`);
     let proxyAbortHandler;
     try {
       const controller = new AbortController();
@@ -361,87 +352,35 @@ const smartFetch = async (targetUrl, returnType = 'json', timeoutMs = 4500, pare
         if (wrapper.status && wrapper.status.http_code >= 400) throw new Error(`HTTP ${wrapper.status.http_code}`);
         if (!wrapper.contents) throw new Error('No contents in wrapper');
         const contentText = wrapper.contents;
-        
-        if (typeof contentText === 'string') {
-          if (contentText.includes('Oops...') || contentText.includes('Rate limit')) throw new Error('Rate Limited by Proxy');
-          if (contentText.trim().toLowerCase().startsWith('<html') && !targetUrl.includes('tradingeconomics')) throw new Error('HTML Blocked');
-        }
-        
         resultData = returnType === 'json' ? (typeof contentText === 'string' ? JSON.parse(contentText) : contentText) : contentText;
       } else {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        if (typeof text === 'string') {
-          if (text.includes('Oops...') || text.includes('Edge: Too') || text.includes('Rate limit') || text.includes('429 Too Many Requests')) throw new Error('Rate Limited by Proxy');
-          if (text.trim().toLowerCase().startsWith('<html') && !targetUrl.includes('tradingeconomics')) throw new Error('HTML Blocked');
-          if (targetUrl.includes('all_etf.txt') && text.length < 500) throw new Error('Data too short (Blocked)');
-        }
         resultData = returnType === 'json' ? JSON.parse(text) : text;
       }
-
-      if (isYahoo && returnType === 'json' && resultData) {
-        if (resultData.chart && resultData.chart.error) throw new Error(`Yahoo API Error: ${resultData.chart.error.code}`);
-      }
-
-      console.log(`[Network] 🟢 [${proxy.name}] 成功取得資料!`);
       return resultData; 
-
     } catch (e) {
       if (parentSignal && proxyAbortHandler) parentSignal.removeEventListener('abort', proxyAbortHandler);
       if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
-      const errName = e.name === 'AbortError' ? `超時 (>${timeoutMs}ms)` : e.message;
-      console.log(`[Network] 🔴 [${proxy.name}] 失敗: ${errName}`);
     }
   }
-  
-  if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
-  console.warn(`[Network] ❌ 所有 Proxy 皆失敗: ${targetUrl}`);
   return null;
 };
 
 const fetchOfficialDataWithDegradation = async (url, parentSignal = null) => {
   if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
-  const isHugeFile = url.includes('STOCK_DAY_ALL') || 
-                     url.includes('BWIBBU_ALL') || 
-                     url.includes('tpex_mainboard_quotes') || 
-                     url.includes('pera_result') || 
-                     url.includes('a1271825') || 
-                     url.includes('net_value_result');
-                     
-  console.log(`[Network] 🌐 嘗試直連開放資料: ${url.split('/').pop().split('?')[0]}`);
-  let abortHandler;
+  const isHugeFile = url.includes('STOCK_DAY_ALL') || url.includes('BWIBBU_ALL') || url.includes('tpex_mainboard_quotes');
   try {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), 2000); 
-    if (parentSignal) {
-      abortHandler = () => controller.abort();
-      parentSignal.addEventListener('abort', abortHandler);
-    }
-    
     const bypassUrl = url.includes('?') ? `${url}&_t=${Date.now()}` : `${url}?_t=${Date.now()}`;
     const res = await fetch(bypassUrl, { method: 'GET', credentials: 'omit', cache: 'no-store', signal: controller.signal });
     const text = await res.text();
     clearTimeout(id);
-    if (parentSignal && abortHandler) parentSignal.removeEventListener('abort', abortHandler);
-    
     if (res.ok && !text.trim().toLowerCase().startsWith('<html')) {
-      try { 
-        const parsed = JSON.parse(text); 
-        console.log(`[Network] 🟢 OpenAPI 直連成功, 筆數: ${Array.isArray(parsed) ? parsed.length : 'Object'}`);
-        return parsed;
-      } catch(e) { }
+      try { return JSON.parse(text); } catch(e) {}
     }
-  } catch(e) {
-    if (parentSignal && abortHandler) parentSignal.removeEventListener('abort', abortHandler);
-    if (parentSignal?.aborted) throw new Error('AbortError: 手動中止');
-    console.log(`[Network] 直連發生例外或超時`);
-  }
-  
-  if (isHugeFile) {
-    console.log(`[Network] 🛑 絕對阻擋官方大檔案 Proxy 備援，以保護代理健康: ${url.split('/').pop().split('?')[0]}`);
-    return null;
-  }
-
-  console.log(`[Network] 🔄 啟動 Proxy 快刀序列備援抓取微型官方資料: ${url.split('/').pop().split('?')[0]}`);
+  } catch(e) {}
+  if (isHugeFile) return null;
   return await smartFetch(url, 'json', 4500, parentSignal); 
 };
 
@@ -449,13 +388,11 @@ const fetchTradingEconomicsYields = async (parentSignal = null) => {
   try {
     const html = await smartFetch('https://tradingeconomics.com/united-states/government-bond-yield', 'text', 6000, parentSignal);
     if (typeof html !== 'string') return {};
-    
     const extractYield = (code) => {
       const regex = new RegExp(`data-symbol="${code}"[\\s\\S]*?id="p"[^>]*>([\\d.]+)`, 'i');
       const match = html.match(regex);
       return match ? parseFloat(match[1]) : null;
     };
-
     return { '10Y': extractYield('USGG10YR:IND'), '20Y': extractYield('USGG20YR:IND'), '30Y': extractYield('USGG30YR:IND') };
   } catch (e) { return {}; }
 };
@@ -541,7 +478,7 @@ const App = () => {
   const [isDetailExpanded, setIsDetailExpanded] = useState(true);
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
-  const [selectedModel, setSelectedModel] = useState('gemini-3.7-flash'); 
+  const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash'); 
   const [aiSignals, setAiSignals] = useState({}); 
 
   const [portfolioHealth, setPortfolioHealth] = useState(null);
@@ -833,7 +770,6 @@ const App = () => {
       hour: '2-digit', minute: '2-digit', second: '2-digit'
     }).format(new Date());
 
-    // 1. 更新本地與雲端快取供下次使用
     const pureCode = getPureCode(symbol);
     const updatedReport = { time: nowStr, signal, summary: summaryText, detail: detailText };
     setCloudReports(prev => {
@@ -844,7 +780,6 @@ const App = () => {
     });
     setCloudReportTime(nowStr);
 
-    // 2. 若有設定 GAS Web App 網址，發送 POST 寫入 Google 表單 (AI_分析報告)
     if (!gasWebAppUrl || !gasWebAppUrl.trim()) {
       setToast(`✅ ${symbol} 分析已儲存供下次使用 (若需寫回雲端表單請於設定填入 GAS 網址)`);
       return;
@@ -852,22 +787,22 @@ const App = () => {
 
     setIsSyncingCloud(true);
     try {
-      const res = await fetch(gasWebAppUrl.trim(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: 'SAVE_REPORT',
-          time: nowStr,
-          symbol,
-          name,
-          signal,
-          summary: summaryText,
-          detail: detailText
-        })
+      const targetUrl = gasWebAppUrl.trim();
+      const params = new URLSearchParams({
+        action: 'SAVE_REPORT',
+        time: nowStr,
+        symbol: symbol,
+        name: name || symbol,
+        signal: signal || 'HOLD',
+        summary: summaryText || '',
+        detail: detailText || ''
       });
+      const finalGetUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + params.toString();
+
+      const res = await fetch(finalGetUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
       const resData = await res.json();
       if (resData.status === 'success') {
-        setToast(`☁️ ${symbol} AI 分析報告已同步寫入 Google 表單！`);
+        setToast(`☁️ ${symbol} AI 分析報告已透過 GET 成功同步寫入 Google 表單！`);
       } else {
         throw new Error(resData.message || '寫入失敗');
       }
@@ -882,15 +817,14 @@ const App = () => {
   const syncAutoSettingToSheet = async (symbol, autoAnalyze) => {
     if (!gasWebAppUrl || !gasWebAppUrl.trim()) return;
     try {
-      await fetch(gasWebAppUrl.trim(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: 'UPDATE_AUTO_SETTING',
-          symbol,
-          autoAnalyze
-        })
+      const targetUrl = gasWebAppUrl.trim();
+      const params = new URLSearchParams({
+        action: 'UPDATE_AUTO_SETTING',
+        symbol: symbol,
+        autoAnalyze: String(autoAnalyze)
       });
+      const finalGetUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + params.toString();
+      await fetch(finalGetUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
       console.log(`[Cloud Sync] 🟢 已同步 ${symbol} 自動分析設定 (${autoAnalyze ? 'ON' : 'OFF'}) 至雲端表單`);
     } catch (e) {
       console.warn(`[Cloud Sync] 同步自動分析設定失敗:`, e.message);
@@ -903,7 +837,6 @@ const App = () => {
     let timeIdx = 0, symIdx = 1, nameIdx = 2, sigIdx = 3, sumIdx = 4, detIdx = 5;
     let startRow = 0;
 
-    // 檢查第一列是否為標題列
     const firstRow = rows[0].map(c => String(c || '').trim());
     if (firstRow.some(col => col.includes('標的') || col.includes('時間') || col.includes('燈號') || col.includes('簡評') || col.includes('Summary'))) {
       startRow = 1;
@@ -938,7 +871,6 @@ const App = () => {
       const pureCode = getPureCode(rawSym);
       const entry = { time: timeStr, signal, summary, detail };
 
-      // 若同一標的有數筆歷史紀錄，保留時間最新的一筆
       const existing = reports[rawSym];
       if (!existing || (timeStr && existing.time && timeStr > existing.time)) {
         reports[rawSym] = entry;
@@ -969,7 +901,6 @@ const App = () => {
     const targetReportUrl = (customReportUrl || reportSheetUrl || localStorage.getItem('investment_report_sheet_url') || '').trim();
     const targetPrimaryUrl = (primaryUrl || sheetUrl || localStorage.getItem('investment_sheet_url') || '').trim();
 
-    // 管道 1：若有設定 GAS 網頁應用程式網址，優先透過 GAS 直接讀取「AI_分析報告」分頁（不受權限與 2PACX 網址限制）
     if (targetGasUrl) {
       try {
         console.log(`[Cloud Engine] 🌐 嘗試透過 GAS Web App 讀取 AI_分析報告...`);
@@ -989,10 +920,8 @@ const App = () => {
 
     const Papa = await loadPapaParse();
 
-    // 管道 2：若有設定專屬「AI_分析報告」CSV 連結，直接讀取該 CSV
     if (targetReportUrl && !extractSpreadsheetId(targetReportUrl)) {
       try {
-        console.log(`[Cloud Engine] 🌐 嘗試讀取指定之 AI_分析報告 CSV 連結...`);
         let csvText = null;
         try {
           const r = await fetch(targetReportUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
@@ -1011,24 +940,14 @@ const App = () => {
           });
           return;
         }
-      } catch (e) {
-        console.warn(`[Cloud Engine] 專屬報告連結讀取失敗:`, e.message);
-      }
+      } catch (e) {}
     }
 
-    // 管道 3：從試算表網址萃取 Spreadsheet ID，並加上 &headers=1 防止 gviz 合併純文字表頭的 Bug
     const sheetId = extractSpreadsheetId(targetReportUrl) || extractSpreadsheetId(targetPrimaryUrl);
-    if (!sheetId) {
-      if (targetPrimaryUrl.includes('/spreadsheets/d/e/')) {
-        console.warn(`[Cloud Engine] ⚠️ 偵測到您的 CSV 連結為「發布到網路 (2PACX-...)」格式，Google 隱藏了原始試算表 ID，無法直接跨分頁抓取「AI_分析報告」。請於「設定」頁面填入「AI_分析報告 CSV 連結」或「一般試算表分享連結」或「GAS 網址」！`);
-      }
-      return;
-    }
+    if (!sheetId) return;
 
-    // 關鍵修正：加上 &headers=1 避免 Google gviz 將全文字表格的多筆資料列合併成單一表頭
     const reportUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&headers=1&sheet=${encodeURIComponent('AI_分析報告')}`;
     try {
-      console.log(`[Cloud Engine] 🌐 正在從試算表 (${sheetId.substring(0, 8)}...) 讀取「AI_分析報告」分頁...`);
       let csvText = null;
       try {
         const res = await fetch(`${reportUrl}&_t=${Date.now()}`, { method: 'GET', credentials: 'omit', cache: 'no-store' });
@@ -1042,18 +961,11 @@ const App = () => {
           header: false,
           skipEmptyLines: true,
           complete: (results) => {
-            const count = parseAndStoreCloudRows(results.data, 'Google 表單 (gviz)');
-            if (count === 0) {
-              console.warn(`[Cloud Engine] ⚠️ 已連線至「AI_分析報告」但未解析出有效資料列，請確認分頁名稱是否為「AI_分析報告」且試算表共用權限為「知道連結的任何人皆可查看」。`);
-            }
+            parseAndStoreCloudRows(results.data, 'Google 表單 (gviz)');
           }
         });
-      } else {
-        console.warn(`[Cloud Engine] ⚠️ 無法直接讀取「AI_分析報告」分頁 (可能試算表未開啟「知道連結的任何人皆可查看」權限)。`);
       }
-    } catch (e) {
-      console.log(`[Cloud Engine] 雲端報告同步略過:`, e.message);
-    }
+    } catch (e) {}
   }, [gasWebAppUrl, reportSheetUrl, sheetUrl, parseAndStoreCloudRows]);
 
   const processData = (data, pricesMap, extraMap = {}) => {
@@ -1100,7 +1012,6 @@ const App = () => {
   };
 
   const fetchRealTimePrices = async (data, forceUpdate = false) => {
-    console.log("=== 開始更新股價與數據 (v56.00 Fast-Fail Engine) ===");
     if (globalAbortRef.current) globalAbortRef.current.abort();
     globalAbortRef.current = new AbortController();
     const signal = globalAbortRef.current.signal;
@@ -1112,7 +1023,7 @@ const App = () => {
     if (!symbolsToFetchList.includes('^TNX')) symbolsToFetchList.push('^TNX');
     if (!symbolsToFetchList.includes('^TYX')) symbolsToFetchList.push('^TYX'); 
     
-    const fetchTEWithTimer = async () => { const start = performance.now(); const res = await fetchTradingEconomicsYields(signal); console.log(`[Timer] TradingEconomics: ${(performance.now() - start).toFixed(2)} ms`); return res; };
+    const fetchTEWithTimer = async () => { const start = performance.now(); const res = await fetchTradingEconomicsYields(signal); return res; };
     const tePromise = fetchTEWithTimer();
 
     const symbolToName = {}; data.forEach(item => { symbolToName[item['標的']] = item['名稱']; });
@@ -1205,7 +1116,7 @@ const App = () => {
               if (meta.previousClose !== undefined) extra.prevClose = meta.previousClose;
               newEtfData[symbol] = extra;
             }
-          } catch (e) { console.warn(`Yahoo Chart 例外 (${symbol}):`, e.message); }
+          } catch (e) {}
           if (!signal.aborted) await delay(1000); 
         }
       }
@@ -1285,7 +1196,6 @@ const App = () => {
           if (parentSignal) parentSignal.removeEventListener('abort', abortHandler);
         }
       }
-      console.error(`[AI Analysis] 模型 ${model} 失敗: ${lastErr?.message}`);
     }
     throw new Error(`AI 連線失敗 (已達嘗試上限)，請稍後再試或檢查額度狀態`);
   };
@@ -1330,15 +1240,12 @@ const App = () => {
   };
 
   const generateFullAnalysis = async (symbol, data, forceUpdate = false, metaPrevCloseOverride = null, customAnalysisType = 'DEFAULT') => {
-    console.log(`[AI Master] 🟢 啟動分析流程: ${symbol}, 模式: ${customAnalysisType}, forceUpdate: ${forceUpdate}`);
     if (!data || data.length === 0) { 
-      console.warn(`[AI Master] 🟡 取消分析: 無圖表資料 (${symbol})`); 
       setIsAiSummarizing(false); 
       return; 
     }
     
     if (aiAbortControllerRef.current) {
-      console.log(`[AI Master] 🛑 強制中斷前次 AI 分析請求`);
       aiAbortControllerRef.current.abort();
     }
     aiAbortControllerRef.current = new AbortController();
@@ -1350,7 +1257,6 @@ const App = () => {
       const today = getTodayDate(); const cache = getAiCache();
 
       if (!forceUpdate && customAnalysisType === 'DEFAULT' && cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
-        console.log(`[AI Master] 🟢 命中本地快取: ${symbol}`);
         if (activeHistorySymbolRef.current === symbol) {
           setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
           if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
@@ -1475,7 +1381,6 @@ ${signalRules}
             results.push({ summary: summaryMatch ? String(summaryMatch[1]).trim().replace(/[`*#]/g, '').replace(/\n/g, ' ') : "分析完成", detail: detailMatch ? String(detailMatch[1]).trim() : String(text), signal: signalMatch ? String(signalMatch[1]).toUpperCase() : 'HOLD', model });
           } catch (err) {
             if (String(err.message).includes('AbortError')) throw err;
-            console.error(`[AI Master] 解析錯誤 (${symbol} - 第 ${i} 次):`, err.message);
           }
           if (i < MAX_VOTES && !signal.aborted) await delay(3000);
         }
@@ -1492,7 +1397,6 @@ ${signalRules}
         const consensusSummary = `${modePrefix}【多數決共識 (${maxCount}/${results.length})】${finalResult.summary}`;
         
         if (activeHistorySymbolRef.current === symbol && !signal.aborted) {
-          console.log(`[AI Master] 🟢 更新 UI 畫面: ${symbol}`);
           setAiSummary(consensusSummary); setAiDetail(finalResult.detail); setAiSignals(prev => ({ ...prev, [symbol]: majoritySignal }));
           setUsedModel(finalResult.model); setIsDetailExpanded(true); 
         }
@@ -1501,20 +1405,17 @@ ${signalRules}
           await syncReportToSheet(symbol, stockName, majoritySignal, consensusSummary, finalResult.detail);
         }
       } catch (err) { 
-        console.error(`[AI Master] 🔴 迴圈捕捉錯誤 (${symbol}):`, err);
         if (activeHistorySymbolRef.current === symbol) {
           if (String(err.message).includes('AbortError') || signal.aborted) {
-            setAiSummary("已手動中斷 AI 分析，或因切換標的已取消。");
+            setAiSummary("已手動中斷 AI 分析。");
           } else {
             setAiSummary(`分析暫時無法使用: ${err.message}`); 
           }
         }
       } 
     } catch(err) { 
-      console.error(`[AI Master] 🔴 嚴重全域錯誤 (${symbol}):`, err);
       if (activeHistorySymbolRef.current === symbol) setAiSummary(`分析發生嚴重錯誤: ${err.message}`); 
     } finally { 
-      console.log(`[AI Master] ⚪ 結束分析流程清理狀態: ${symbol}`);
       if (activeHistorySymbolRef.current === symbol) { setIsAiSummarizing(false); setAiProgressMsg(''); }
       delete analysisInProgressRef.current[symbol]; 
     }
@@ -1553,7 +1454,6 @@ ${signalRules}
     }
   }, [cloudReports]);
 
-  // 當雲端報告非同步載入完成時，若使用者正停留在某檔標的，立即把報告渲染到畫面上
   useEffect(() => {
     if (selectedHistorySymbol && !isAiSummarizing && Object.keys(cloudReports).length > 0) {
       applyExistingReportForSymbol(selectedHistorySymbol);
@@ -1667,7 +1567,6 @@ ${signalRules}
         applyExistingReportForSymbol(selectedHistorySymbol);
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, selectedHistorySymbol, timeframe, cloudReports]); 
 
   const performFetch = async (url) => {
@@ -1675,10 +1574,8 @@ ${signalRules}
     let cleanUrl = url ? String(url).trim() : '';
     if (!cleanUrl) { setError('請輸入有效的網址'); setLoading(false); return; }
 
-    // 同步啟動雲端 AI_分析報告 讀取
     fetchCloudReports(cleanUrl);
 
-    // 若使用者貼入的是一般 Google 試算表網址 (如 .../edit#gid=0)，自動轉為 CSV 匯出網址
     const extractedId = extractSpreadsheetId(cleanUrl);
     if (extractedId && !cleanUrl.includes('output=csv') && !cleanUrl.includes('tqx=out:csv')) {
       cleanUrl = `https://docs.google.com/spreadsheets/d/${extractedId}/gviz/tq?tqx=out:csv&headers=1`;
@@ -1696,7 +1593,6 @@ ${signalRules}
           if (validData.length === 0) throw new Error('CSV 中找不到資料');
           setRawData(validData);
 
-          // 同步表單內的「自動分析」欄位至個股設定
           setInvestmentSettings(prev => {
             const updated = { ...prev };
             validData.forEach(row => {
@@ -1841,7 +1737,6 @@ ${signalRules}
     const today = getTodayDate(); let cacheModified = false; Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } }); if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleWheel = (e) => {
@@ -2040,7 +1935,7 @@ ${signalRules}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
-            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.00</span></span>
+            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.03</span></span>
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">{['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (<button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-slate-900 text-blue-400' : 'text-slate-300 hover:bg-slate-700'}`}>{tab === 'overview' ? '資產總覽' : tab === 'history' ? '歷史走勢' : tab === 'chat' ? 'AI 助理' : tab === 'holdings' ? '持股明細' : '設定'}</button>))}</div>
@@ -2144,7 +2039,6 @@ ${signalRules}
 
         {activeTab === 'history' && (
           <div className="flex flex-col lg:grid lg:grid-cols-4 gap-6 h-full pb-20 md:pb-0 items-start">
-            {/* 左側持股列表 */}
             <div className={`lg:col-span-1 w-full bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden flex flex-col h-48 lg:h-[calc(100vh-7rem)] lg:sticky lg:top-20 flex-none transition-opacity duration-300 ${isUiLocked ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
               <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center sticky top-0 z-10"><h3 className="font-semibold text-white flex items-center"><LineIcon className="w-5 h-5 mr-2 text-blue-400" /> 持股列表</h3></div>
               <div className="overflow-y-auto flex-1 p-2 space-y-2">
@@ -2158,10 +2052,7 @@ ${signalRules}
               </div>
             </div>
 
-            {/* 右側新版儀表板 */}
             <div className="lg:col-span-3 w-full flex flex-col relative h-auto gap-4">
-              
-              {/* Header 資訊與操作區 */}
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center border border-slate-700 bg-slate-800 rounded-xl p-3 shadow-lg gap-4">
                 <div className="flex items-center gap-4 flex-wrap">
                   <h1 className="text-2xl font-bold text-white tracking-wider">{String(selectedHistorySymbol || '')}</h1>
@@ -2200,7 +2091,6 @@ ${signalRules}
                 <div className="flex-1 flex items-center justify-center min-h-[400px] bg-slate-800 border border-slate-700 rounded-xl"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div>
               ) : currentChartData && currentChartData.length > 0 ? (
                 <>
-                  {/* --- SVG 圖表引擎 --- */}
                   <Card className="h-[450px] md:h-[500px]" noPadding>
                     <div className="flex justify-between items-center p-2 border-b border-slate-700 text-xs bg-slate-900/50 z-10 relative">
                       <div className="flex gap-4 flex-wrap">
@@ -2215,7 +2105,6 @@ ${signalRules}
                     </div>
                     
                     <div className="relative flex-1 p-2 flex h-full overflow-hidden">
-                      {/* 懸停資訊面板 (左側擴寬為 w-28 確保日期完整顯示) */}
                       <div className="w-28 border-r border-slate-700/50 pr-2 flex flex-col gap-1 text-[11px] font-mono shrink-0 z-10 bg-slate-800">
                         <div className={`border-b border-slate-700 pb-1 mb-1 whitespace-nowrap text-[10px] ${safeHoverIndex !== null ? 'text-blue-400 font-bold' : 'text-slate-300'}`}>
                           {dateStr}
@@ -2266,7 +2155,6 @@ ${signalRules}
                         onTouchCancel={handleTouchEnd}
                       >
                         <svg width="100%" height="100%" viewBox="0 0 800 520" preserveAspectRatio="none">
-                          {/* 網格線 */}
                           <g stroke="#334155" strokeWidth="0.5" strokeDasharray="4 4" opacity="0.5">
                             <line x1="0" y1="50" x2="800" y2="50" />
                             <line x1="0" y1="150" x2="800" y2="150" />
@@ -2281,7 +2169,6 @@ ${signalRules}
                             )}
                           </g>
 
-                          {/* 繪製 K線與副圖 */}
                           {(() => {
                             const maxV = Math.max(...displayChartData.map(d => d.volume || 0), 1);
                             const mapVolH = (val) => ((val || 0) / maxV) * 70;
@@ -2317,7 +2204,6 @@ ${signalRules}
                             });
                           })()}
 
-                          {/* 繪製折線 */}
                           {(() => {
                             const maxMacdAbs = Math.max(
                               ...displayChartData.map(d => Math.abs(d.OSC || 0)), 
@@ -2370,7 +2256,6 @@ ${signalRules}
                             );
                           })()}
 
-                          {/* 繪製買入點圖示 */}
                           {(() => {
                             const spacing = 800 / Math.max(displayChartData.length, 1);
                             return displayChartData.map((d, i) => {
@@ -2388,7 +2273,6 @@ ${signalRules}
                             });
                           })()}
 
-                          {/* 十字游標 */}
                           {safeHoverIndex !== null && displayChartData[safeHoverIndex] && (() => {
                             const spacing = 800 / Math.max(displayChartData.length, 1);
                             const x = spacing * 0.5 + safeHoverIndex * spacing;
@@ -2404,7 +2288,6 @@ ${signalRules}
                         </svg>
                       </div>
                       
-                      {/* 比例尺面板 (右側) */}
                       <div className="w-10 border-l border-slate-700/50 pl-1 py-1 flex flex-col text-[10px] text-slate-500 font-mono relative shrink-0 bg-slate-800">
                         {displayChartData.length > 0 && (
                           <div className="absolute top-0 bottom-0 w-full flex flex-col py-0">
@@ -2432,7 +2315,6 @@ ${signalRules}
                       </div>
                     </div>
 
-                    {/* 買入點圖例說明區塊 */}
                     <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 px-2 py-1.5 border-t border-slate-700/50 text-[10px] text-slate-400 bg-slate-900/50">
                       <span className="font-semibold text-slate-300">圖例說明:</span>
                       {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
@@ -2612,11 +2494,11 @@ ${signalRules}
                         <Sparkles className="w-5 h-5 text-purple-400 mr-2 flex-none" />
                         <h4 className="text-white font-semibold">AI 智能分析與決策</h4>
                         {usedModel === '雲端自動排程' ? (
-                          <span className="hidden lg:inline ml-2 text-xs px-2 py-0.5 rounded bg-blue-900/50 text-blue-300 border border-blue-600 shadow-sm">
+                          <span className="ml-2 text-xs px-2 py-0.5 rounded bg-blue-900/50 text-blue-300 border border-blue-600 shadow-sm">
                             ☁️ 雲端表單報告 ({cloudReportTime})
                           </span>
                         ) : usedModel && (
-                          <span className="hidden lg:inline ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">
+                          <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">
                             {String(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} 
                             {isCachedResult ? <span className="text-slate-500"> (已快取/同步)</span> : <span className="text-green-400"> (本次生成並同步)</span>}
                           </span>
@@ -2765,7 +2647,12 @@ ${signalRules}
                 {[ { id: 'manual', label: '自訂' }, { id: '類別', label: '類別' }, { id: 'buyPrice', label: '成本' }, { id: 'profitLoss', label: '損益' }, { id: 'roi', label: '報酬' } ].map(opt => (<button key={opt.id} onClick={() => requestSort(opt.id)} className={`px-3 py-1 rounded text-xs border ${sortConfig.key === opt.id ? 'bg-blue-600 border-blue-500 text-white' : 'border-slate-600 text-slate-400'}`}>{String(opt.label)} {sortConfig.key === opt.id && (sortConfig.direction === 'asc' ? '↑' : '↓')}</button>))}
               </div>
               {sortedHoldings.map((row) => {
-                const signal = aiSignals[row['標的']]; const settings = investmentSettings[row['標的']] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE', autoAnalyze: true }; const classification = settings.type; const isDCA = settings.isDCA; const addonLogic = settings.addon; const addon2Logic = settings.addon2; const autoAnalyze = settings.autoAnalyze !== false; const assetType = detectAssetType(row['標的'], row['名稱'], row['類別']); const isBondETF = assetType === 'BOND_ETF'; const isBond = assetType === 'BOND'; const isETF = assetType === 'ETF'; const etfData = etfExtraData[row['標的']]; let premDisc = null;
+                const signal = aiSignals[row['標的']]; 
+                const pureCode = getPureCode(row['標的']);
+                const cloudRep = cloudReports[row['標的']] || cloudReports[pureCode];
+                const settings = investmentSettings[row['標的']] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE', autoAnalyze: true }; 
+                const classification = settings.type; const isDCA = settings.isDCA; const addonLogic = settings.addon; const addon2Logic = settings.addon2; const autoAnalyze = settings.autoAnalyze !== false; 
+                const assetType = detectAssetType(row['標的'], row['名稱'], row['類別']); const isBondETF = assetType === 'BOND_ETF'; const isBond = assetType === 'BOND'; const isETF = assetType === 'ETF'; const etfData = etfExtraData[row['標的']]; let premDisc = null;
                 if (etfData && etfData.nav) { const price = row.isUS ? row.currentPriceRaw : row.currentPrice; if (price) premDisc = (price - etfData.nav) / etfData.nav; }
                 const yieldVal = etfData && etfData.yield ? (etfData.yield < 1 ? etfData.yield * 100 : etfData.yield) : null;
                 return (
@@ -2781,6 +2668,15 @@ ${signalRules}
                           {premDisc !== null && (<span className={`text-[10px] px-1.5 py-0.5 rounded border ${premDisc > 0 ? 'bg-red-900/30 text-red-300 border-red-500/30' : 'bg-green-900/30 text-green-300 border-green-500/30'}`}>{premDisc > 0 ? '溢' : '折'} {Math.abs(premDisc * 100).toFixed(2)}%</span>)}
                         </div>
                         <div className="text-sm text-slate-400 mt-1">{String(row['名稱'])}</div>
+                        
+                        {/* 手機版：顯示雲端報告產生/同步時間 */}
+                        {cloudRep && cloudRep.time && (
+                          <div className="mt-1.5 flex items-center text-[10px] text-blue-300 bg-blue-950/40 px-2 py-0.5 rounded border border-blue-500/30 w-fit">
+                            <Cloud className="w-3 h-3 mr-1 text-blue-400 shrink-0" />
+                            <span>雲端表單報告 ({cloudRep.time})</span>
+                          </div>
+                        )}
+
                         <div className="mt-3 bg-slate-700/50 p-2 rounded-lg space-y-2">
                           <div className="flex items-center justify-between"><span className="text-xs text-slate-400">定位</span><select value={classification} onChange={(e) => handleSettingChange(row['標的'], 'type', e.target.value)} className={`text-xs px-2 py-0.5 rounded border focus:outline-none cursor-pointer bg-slate-800 ${ASSET_TYPES[classification].color} ${ASSET_TYPES[classification].border}`} onClick={(e) => e.stopPropagation()}><option value="CORE">核心</option><option value="SATELLITE">衛星</option></select></div>
                           <div className="flex items-center justify-between"><span className="text-xs text-slate-400 flex items-center"><Repeat className="w-3 h-3 mr-1" />定期定額</span><button onClick={(e) => { e.stopPropagation(); handleSettingChange(row['標的'], 'isDCA', !isDCA); }} className={`w-8 h-4 rounded-full transition-colors relative ${isDCA ? 'bg-green-500' : 'bg-slate-600'}`}><div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${isDCA ? 'translate-x-4' : 'translate-x-0'}`} /></button></div>
@@ -2823,13 +2719,27 @@ ${signalRules}
                   </thead>
                   <tbody className="bg-slate-800 divide-y divide-slate-700">
                     {sortedHoldings.map((row, index) => {
-                      const signal = aiSignals[row['標的']]; const settings = investmentSettings[row['標的']] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE', autoAnalyze: true }; const classification = settings.type; const isDCA = settings.isDCA; const addonLogic = settings.addon; const addon2Logic = settings.addon2; const autoAnalyze = settings.autoAnalyze !== false; const assetType = detectAssetType(row['標的'], row['名稱'], row['類別']); const isBondETF = assetType === 'BOND_ETF'; const isBond = assetType === 'BOND'; const isETF = assetType === 'ETF'; const etfData = etfExtraData[row['標的']]; let premDisc = null;
+                      const signal = aiSignals[row['標的']]; const pureCode = getPureCode(row['標的']); const cloudRep = cloudReports[row['標的']] || cloudReports[pureCode]; const settings = investmentSettings[row['標的']] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE', autoAnalyze: true }; const classification = settings.type; const isDCA = settings.isDCA; const addonLogic = settings.addon; const addon2Logic = settings.addon2; const autoAnalyze = settings.autoAnalyze !== false; const assetType = detectAssetType(row['標的'], row['名稱'], row['類別']); const isBondETF = assetType === 'BOND_ETF'; const isBond = assetType === 'BOND'; const isETF = assetType === 'ETF'; const etfData = etfExtraData[row['標的']]; let premDisc = null;
                       if ((isETF || isBondETF) && etfData && etfData.nav && row.isRealData) { const price = row.isUS ? row.currentPriceRaw : row.currentPrice; premDisc = (price - etfData.nav) / etfData.nav; }
                       const yieldVal = etfData && etfData.yield ? (etfData.yield < 1 ? etfData.yield * 100 : etfData.yield) : null;
                       return (
                         <tr key={row['標的']} className="hover:bg-slate-700/50 transition-colors">
                           <td className="px-6 py-4 whitespace-nowrap"><div className="flex flex-col space-y-1">{index > 0 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], -1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowUp className="w-3 h-3" /></button>}{index < sortedHoldings.length - 1 && <button onClick={(e) => { e.stopPropagation(); moveItem(row['標的'], 1); }} className="p-1 rounded hover:bg-slate-600 text-slate-400 hover:text-white"><ArrowDown className="w-3 h-3" /></button>}</div></td>
-                          <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-white font-medium flex items-center">{signal?.includes('ADD') && <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" title="AI建議: 加碼" />}{signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" title="AI建議: 減碼" />}{signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" title="AI建議: 觀望" />}{String(row['標的'])}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}</div><div className="text-xs text-slate-500">最近交易: {String(row['日期'])}</div></td>
+                          <td className="px-6 py-4 whitespace-nowrap text-left">
+                            <div className="text-sm text-white font-medium flex items-center">
+                              {signal?.includes('ADD') && <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" title="AI建議: 加碼" />}
+                              {signal === 'REDUCE' && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" title="AI建議: 減碼" />}
+                              {signal === 'HOLD' && <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" title="AI建議: 觀望" />}
+                              {String(row['標的'])}{row.isRealData ? <Wifi className="w-3 h-3 ml-1 text-green-500" /> : row['類別'] !== '定存' && <WifiOff className="w-3 h-3 ml-1 text-slate-600" />}
+                            </div>
+                            <div className="text-xs text-slate-500">最近交易: {String(row['日期'])}</div>
+                            {cloudRep && cloudRep.time && (
+                              <div className="mt-1 flex items-center text-[10px] text-blue-300 bg-blue-950/40 px-1.5 py-0.5 rounded border border-blue-500/30 w-fit">
+                                <Cloud className="w-2.5 h-2.5 mr-1 text-blue-400 shrink-0" />
+                                <span>雲端報告 ({cloudRep.time})</span>
+                              </div>
+                            )}
+                          </td>
                           <td className="px-6 py-4 whitespace-nowrap text-left"><div className="text-sm text-slate-200">{String(row['名稱'])}</div><div className="flex flex-wrap items-center gap-2 mt-1"><span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${CATEGORY_STYLES[row['類別']]?.badge || CATEGORY_STYLES['default'].badge}`}>{String(row['類別'])}</span></div></td>
                           <td className="px-6 py-4 whitespace-nowrap text-left">{ (isETF || isBondETF) ? ( etfData?.nav ? ( <div className="flex flex-col"><span className="text-sm text-slate-300 font-medium">{formatPrice(etfData.nav)} <span className="text-[10px] text-slate-500">{etfData.navSource ? `(${etfData.navSource})` : ''}</span></span>{premDisc !== null && (<span className={`text-[10px] mt-0.5 ${premDisc > 0 ? 'text-red-400' : 'text-green-400'}`}>{premDisc > 0 ? '溢價' : '折價'} {Math.abs(premDisc * 100).toFixed(2)}%</span>)}</div>) : <span className="text-xs text-slate-500">查無資料</span> ) : <span className="text-slate-600">-</span> }</td>
                           <td className="px-6 py-4 whitespace-nowrap text-left">{ (isBond || isBondETF) ? ( yieldVal !== null ? ( <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-900/30 text-purple-300 border border-purple-500/30" title={etfData.yieldSource}>{yieldVal.toFixed(2)}% <span className="ml-1 text-[8px] opacity-70">{etfData.yieldSource ? `(${etfData.yieldSource})` : ''}</span></span> ) : <span className="text-xs text-slate-500">查無資料</span> ) : <span className="text-slate-600">-</span> }</td>
@@ -2870,7 +2780,7 @@ ${signalRules}
 
         {activeTab === 'config' && (
           <div className="max-w-2xl mx-auto bg-slate-800 p-8 rounded-xl border border-slate-700 shadow-lg mb-20">
-            <h2 className="text-2xl font-bold text-white mb-6 flex items-center"><Settings className="w-6 h-6 mr-3 text-blue-500" /> 資料來源設定 (v56.00)</h2>
+            <h2 className="text-2xl font-bold text-white mb-6 flex items-center"><Settings className="w-6 h-6 mr-3 text-blue-500" /> 資料來源設定 </h2>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2">Google Sheets CSV 連結</label>
@@ -2918,25 +2828,25 @@ ${signalRules}
                     ))}
                   </select>
                 </div>
-                <p className="mt-1 text-xs text-slate-500 ml-7">* 預設使用 Gemini 3.7 Flash 穩定版模型。</p>
+                <p className="mt-1 text-xs text-slate-500 ml-7">* 預設使用 Gemini 3.8 Flash 穩定版模型。</p>
               </div>
 
               <div className="pt-4 border-t border-slate-700 mt-4">
                 <h4 className="text-sm font-semibold text-slate-300 mb-2 flex items-center">
-                  <Cloud className="w-4 h-4 mr-2 text-blue-400" /> 雲端自動排程與表單雙向同步 (v56.00)
+                  <Cloud className="w-4 h-4 mr-2 text-blue-400" /> 雲端自動排程與表單雙向同步
                 </h4>
                 <div className="mb-3">
-                  <label className="block text-xs text-slate-400 mb-1">「AI_分析報告」分頁 CSV 連結 或 試算表共用連結 (當主連結為 2PACX 發布網址時必填)</label>
+                  <label className="block text-xs text-slate-400 mb-1">「AI_分析報告」分頁 CSV 連結 或 試算表共用連結</label>
                   <input
                     type="text"
                     value={reportSheetUrl}
                     onChange={(e) => setReportSheetUrl(e.target.value)}
-                    placeholder="貼上「AI_分析報告」分頁發布的 CSV 網址，或試算表一般分享網址 (含 /d/試算表ID/)"
+                    placeholder="貼上「AI_分析報告」分頁發布的 CSV 網址，或試算表一般分享網址"
                     className="flex-1 min-w-0 block w-full px-4 py-2.5 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
                   />
                 </div>
                 <div className="mb-3">
-                  <label className="block text-xs text-slate-400 mb-1">Google Apps Script 網頁應用程式網址 (選填，可同時直接讀取報告與雙向寫回表單)</label>
+                  <label className="block text-xs text-slate-400 mb-1">Google Apps Script 網頁應用程式網址 (GET/POST 雙向同步)</label>
                   <input
                     type="text"
                     value={gasWebAppUrl}
@@ -2945,11 +2855,6 @@ ${signalRules}
                     className="flex-1 min-w-0 block w-full px-4 py-2.5 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
                   />
                 </div>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  💡 <strong>為什麼表單有資料但網頁沒顯示？</strong><br/>
-                  1. 若您上方的 Google Sheets 主連結是「檔案 → 共用 → 發布到網路」產生的 <code>/d/e/2PACX-...</code> 網址，Google 會隱藏試算表 ID，而且每個分頁有獨立網址。請將<strong>「AI_分析報告」分頁也發布為 CSV 連結</strong>貼於上方欄位，或直接貼上試算表網址列的一般連結（含 <code>/spreadsheets/d/xxxxx/edit</code>，需開啟「知道連結的任何人皆可查看」）。<br/>
-                  2. 或者只要填入部署後的 GAS 網址（以 <code>/exec</code> 結尾），系統即可自動雙向讀取與寫入！
-                </p>
               </div>
 
               {error && <div className="p-3 bg-red-900/30 border border-red-500/50 text-red-300 rounded-md text-sm">{String(error)}</div>}
@@ -2957,32 +2862,6 @@ ${signalRules}
               <button onClick={handleFetchButton} disabled={loading} className={`w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 focus:ring-offset-slate-800 transition-colors ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}>
                 {loading ? '資料載入中...' : '儲存設定並匯入更新股價'}
               </button>
-              
-              <div className="pt-6 mt-6 border-t border-slate-700">
-                <div className="flex justify-between items-center mb-4">
-                  <h4 className="text-sm font-semibold text-slate-300 flex items-center">
-                    <FileSearch className="w-4 h-4 mr-2" /> 系統執行紀錄 (Logs)
-                  </h4>
-                  <button 
-                    onClick={() => setAppLogs([])} 
-                    className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-xs text-white rounded transition-colors flex items-center"
-                  >
-                    <Trash2 className="w-3 h-3 mr-1" /> 清除紀錄
-                  </button>
-                </div>
-                <div ref={logsContainerRef} className="bg-slate-900 border border-slate-700 rounded-md p-3 h-64 overflow-y-auto font-mono text-[10px] sm:text-xs custom-scrollbar">
-                  {appLogs.length === 0 ? (
-                    <span className="text-slate-500">目前沒有紀錄...</span>
-                  ) : (
-                    appLogs.map((log, i) => (
-                      <div key={i} className={`mb-1 break-all ${log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-yellow-400' : 'text-slate-300'}`}>
-                        <span className="text-slate-500 mr-2 flex-shrink-0">[{String(log.time)}]</span>
-                        <span>{String(log.msg)}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
             </div>
           </div>
         )}
