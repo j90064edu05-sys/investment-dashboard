@@ -1311,8 +1311,7 @@ const App = () => {
 
       const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
       const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票'; const assetType = detectAssetType(symbol, stockName, category);
-      const currentMonthPrefix = today.substring(0, 7); 
-      const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && (item['策略'] === '基礎買入' || item['策略'].includes('基礎')));
+      const currentMonthPrefix = today.substring(0, 7); const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && item['策略'] === '基礎買入');
       const isLongBond = isLongTermBond(stockName); const benchmarkYield = isLongBond ? (usBondYields['20Y'] || usBondYields['30Y']) : usBondYields['10Y'];
       
       const etfData = etfExtraData[symbol];
@@ -1333,19 +1332,19 @@ const App = () => {
       let signalRules = "";
 
       if (isDCA && hasBoughtThisMonth) {
-        dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。依據策略設定，本月不再進行基礎投資，僅針對加碼策略(${ADDON_LABELS[settings.addon]}, ${ADDON_LABELS[settings.addon2]})進行評估。`;
+        dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。目前**僅需**評估是否觸發加碼條件，不再產生基礎扣款訊號。`;
         signalRules = `燈號規則 (本月已扣款，僅評估加碼)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
       } else if (isDCA) {
-        dcaStrategy = `3. 【定期定額 (尋找買點)】：尋找低點進行定期定額基礎買入，並同步評估加碼策略(${ADDON_LABELS[settings.addon]}, ${ADDON_LABELS[settings.addon2]})。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}。`;
+        dcaStrategy = `3. 【定期定額 (尋找買點)】：尋找低點扣款。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}。若強制扣款成立，請視為基礎扣款條件成立。`;
         signalRules = `燈號規則：\n- REDUCE (轉空未跌)\n- ADD_ALL (基礎+加碼皆成立且未漲)\n- ADD_BASIC (僅基礎成立未漲)\n- ADD_BONUS (僅加碼成立未漲)\n- HOLD (其他或遭鐵律阻擋)`;
       } else {
-        dcaStrategy = `3. 【單筆投入】：純粹依據標的設定之加碼策略(${ADDON_LABELS[settings.addon]}, ${ADDON_LABELS[settings.addon2]})尋找買點。`;
+        dcaStrategy = `3. 【單筆投入】：純粹依據加碼條件尋找買點。`;
         signalRules = `燈號規則 (單筆投入)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
       }
 
       const startDate = data[0]?.date || '未知';
       const endDate = latest.date;
-      const timeframeMap = { '1y_1d': '1年日線', '5y_1wk': '5y_1wk', '10y_1mo': '10y_1mo' };
+      const timeframeMap = { '1y_1d': '1年日線', '5y_1wk': '5年週線', '10y_1mo': '10年月線' };
       const periodStr = `${timeframeMap[timeframe] || timeframe} (${startDate} 至 ${endDate})`;
       const strategyDesc = `${classLabel} / ${isDCA ? '定期定額' : '單筆投入'} / 加碼1:${ADDON_LABELS[settings.addon] || '無'} / 加碼2:${ADDON_LABELS[settings.addon2] || '無'}`;
 
@@ -1780,6 +1779,16 @@ ${signalRules}
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
+
+  const handleWheel = (e) => {
+    if (!currentChartData.length || isUiLocked) return;
+    setZoom(prev => {
+      const delta = e.deltaY > 0 ? 5 : -5;
+      const newCount = Math.max(20, Math.min(currentChartData.length, prev.count + delta));
+      return { ...prev, count: newCount };
+    });
+    setHoverIndex(null); 
+  };
 
   const handleMouseDown = (e) => { if(!isUiLocked) { setIsDragging(true); setStartX(e.clientX); } };
   const handleMouseUp = () => setIsDragging(false);
