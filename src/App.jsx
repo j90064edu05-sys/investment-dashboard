@@ -14,8 +14,8 @@ import {
   Percent, Layers, Link as LinkIcon, XCircle, PlusCircle, Trash2, Edit, Cloud
 } from 'lucide-react';
 
-/*
- * Alpha 投資戰情室 v56.05 (修正歷史走勢頁面空白與未定義樣式崩潰版)
+/**
+ * Alpha 投資戰情室 v56.05 (修復 handleMouseDown 未定義與雲端設定同步版)
  */
 
 const DEMO_DATA = [
@@ -1781,6 +1781,37 @@ ${signalRules}
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
 
+  const handleMouseDown = (e) => { if(!isUiLocked) { setIsDragging(true); setStartX(e.clientX); } };
+  const handleMouseUp = () => setIsDragging(false);
+  const handleMouseLeave = () => { setIsDragging(false); setHoverIndex(null); }; 
+ 
+  const handleMouseMove = (e) => {
+     if (!currentChartData.length || isUiLocked) return;
+     if (isDragging) {
+         const deltaX = e.clientX - startX;
+         if (Math.abs(deltaX) > 8) {
+             setZoom(prev => {
+                 const shift = deltaX > 0 ? -1 : 1; 
+                 let currentEnd = prev.endIndex === null ? currentChartData.length : prev.endIndex;
+                 let newEnd = Math.max(prev.count, Math.min(currentChartData.length, currentEnd + shift));
+                 return { ...prev, endIndex: newEnd };
+             });
+             setStartX(e.clientX);
+         }
+         setHoverIndex(null); 
+     } else {
+         const rect = e.currentTarget.getBoundingClientRect();
+         const x = e.clientX - rect.left;
+         const endIdx = zoom.endIndex === null ? currentChartData.length : zoom.endIndex;
+         const startIdx = Math.max(0, endIdx - zoom.count);
+         const displayedCount = endIdx - startIdx;
+         const spacing = rect.width / displayedCount;
+         let idx = Math.floor(x / spacing);
+         idx = Math.max(0, Math.min(displayedCount - 1, idx));
+         setHoverIndex(idx); 
+     }
+  };
+
   const updateHoverIndexFromTouch = useCallback((touch) => {
     if (!svgRef.current || !currentChartData.length) return;
     const rect = svgRef.current.getBoundingClientRect();
@@ -2513,7 +2544,7 @@ ${signalRules}
                         <div className="flex gap-2 flex-wrap">
                             {isAiSummarizing && (
                                 <button onClick={() => { if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort(); }} className="text-[10px] md:text-xs bg-red-900/50 hover:bg-red-900/80 text-red-200 border border-red-500/50 px-2 md:px-3 py-1.5 rounded flex items-center transition-colors shadow-sm">
-                                    <XCircle className="w-3 h-3 mr-1" />中斷分析
+                                    <XCircle className="w-3 h-3 mr-1" />放棄分析
                                 </button>
                             )}
                             {!isAiSummarizing && (
