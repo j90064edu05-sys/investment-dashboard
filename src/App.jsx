@@ -56,6 +56,11 @@ const ASSET_TYPES = {
   'SATELLITE': { label: '衛星資產', color: 'text-orange-300', bg: 'bg-orange-900/50', border: 'border-orange-500/50' }
 };
 
+const CARD_STYLES = {
+  active: 'border-blue-500 bg-slate-800 text-white shadow-md',
+  inactive: 'border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700'
+};
+
 const Card = ({ children, title, className = "", noPadding = false }) => (
   <div className={`border border-slate-700 bg-slate-800 rounded-xl flex flex-col shadow-lg overflow-hidden ${className}`}>
     {title && (
@@ -355,7 +360,7 @@ const App = () => {
   const [isDetailExpanded, setIsDetailExpanded] = useState(false);
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
-  const [selectedModel, setSelectedModel] = useState('gemini-3.7-flash'); 
+  const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash'); 
   const [analysisMode, setAnalysisMode] = useState('comprehensive'); 
   const [aiSignals, setAiSignals] = useState({}); 
   const [cloudReports, setCloudReports] = useState({}); 
@@ -899,22 +904,24 @@ const App = () => {
 
     const settings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE' };
     const currentMonthPrefix = getTodayDate().substring(0, 7); 
-    const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && item['策略'] === '基礎買入');
+    const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && (item['策略'] === '基礎買入' || item['策略'].includes('基礎')));
 
     let prompt = "";
     if (analysisMode === 'comprehensive') {
+      const dcaText = settings.isDCA ? (hasBoughtThisMonth ? '定期定額 (本月已完成基礎買入，僅評估加碼)' : '定期定額 (尋找買點)') : '單筆投入';
       prompt = `角色：專業股票研究分析師。請深入分析 ${stockName}/${symbol}。
+投資設定：${dcaText}。加碼策略：${settings.addon}, ${settings.addon2}。
 1. 看懂市場正在定價什麼：檢視最新財報、財測、估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。請區分哪些資訊可能已反映在股價中，哪些仍可能讓市場意外。最後整理3個最大利多催化因素、3個最大風險，以及接下來應關注的關鍵發展。
 2. 把新聞轉化為市場影響：整理近期影響該產業與個股的重要新聞，說明實際發生什麼事、投資人為何關注、影響偏短期或長期、哪些財務指標受影響、市場隱含假設，並依重要性由高至低排序。
 最新K線日期:${latest.date} 現價:${latest.close}
-模式：${settings.isDCA ? (hasBoughtThisMonth ? '定期定額(本月已扣款僅評估加碼)' : '定期定額(尋找買點)') : '單筆投入'}。加碼策略：${settings.addon}, ${settings.addon2}。
 嚴格格式輸出(無Markdown)：
 [SUMMARY] (50字綜合趨勢簡評)
 [DETAIL] (詳細綜合分析報告與催化因素、風險)
 [SIGNAL] (僅輸出 ADD_ALL/ADD_BASIC/ADD_BONUS/REDUCE/HOLD 之一)`;
     } else {
-      prompt = `使用可取得的歷史資料，評估［${settings.addon}］交易策略在［${symbol} (${stockName})］於［${timeframe}］內的表現。
-計算交易次數、勝率、平均獲利、平均虧損、最大回撒、獲利因子，以及不同市場環境下的績效。
+      const dcaText = settings.isDCA ? (hasBoughtThisMonth ? '定期定額 (本月已完成基礎買入，僅評估加碼)' : '定期定額 (尋找買點)') : '單筆投入';
+      prompt = `使用可取得的歷史資料，評估［${dcaText} ＋ 加碼策略: ${settings.addon}, ${settings.addon2}］交易策略在［${symbol} (${stockName})］於［${timeframe}］內的表現。
+計算交易次數、勝率、平均獲利、平均虧損、最大回撤、獲利因子，以及不同市場環境下的績效。
 接著找出策略最有效與失效的情況，並提出下一步可測試、但不過度擬合歷史資料的規則。
 嚴格格式輸出(無Markdown)：
 [SUMMARY] (50字回測績效簡評)
@@ -1467,7 +1474,7 @@ const App = () => {
               <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex justify-between items-center sticky top-0 z-10"><h3 className="font-semibold text-white flex items-center"><LineIcon className="w-5 h-5 mr-2 text-blue-400" /> 持股列表</h3></div>
               <div className="overflow-y-auto flex-1 p-2 space-y-2">
                 {tradableSymbols.map((item) => (
-                  <button key={item['標的']} disabled={isUiLocked} onClick={() => { if(isUiLocked) return; setSelectedHistorySymbol(item['標的']); setTimeframe('1y_1d'); }} className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${selectedHistorySymbol === item['標的'] ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-slate-700/30 border-transparent text-slate-300 hover:bg-slate-700'} ${isUiLocked ? 'cursor-not-allowed' : ''}`}>
+                  <button key={item['標的']} disabled={isUiLocked} onClick={() => { if(isUiLocked) return; setHoverIndex(null); setSelectedHistorySymbol(item['標的']); setTimeframe('1y_1d'); }} className={`w-full text-left px-4 py-3 rounded-lg transition-all border ${selectedHistorySymbol === item['標的'] ? 'bg-blue-600 border-blue-500 text-white shadow-md' : 'bg-slate-700/30 border-transparent text-slate-300 hover:bg-slate-700'} ${isUiLocked ? 'cursor-not-allowed' : ''}`}>
                     <div className="flex justify-between items-center"><span className="font-bold">{String(item['標的'])}</span><span className="text-xs opacity-70">{String(item['類別'])}</span></div>
                     <div className="text-sm mt-1 truncate">{String(item['名稱'])}</div>
                     <div className="flex justify-between mt-1 text-xs opacity-60"><span>{formatCurrency(item.marketValue)}</span><span className={item.profitLoss >= 0 ? 'text-red-300' : 'text-green-300'}>{formatPercent(item.roi)}</span></div>
@@ -1492,7 +1499,7 @@ const App = () => {
                 <div className={`flex items-center gap-4 flex-wrap ${isUiLocked ? 'opacity-50 pointer-events-none' : ''}`}>
                    <div className="flex bg-slate-900 rounded-lg border border-slate-700 p-0.5">
                       {[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (
-                         <button key={tf.id} disabled={isUiLocked} onClick={() => setTimeframe(tf.id)} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${timeframe === tf.id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}>{String(tf.label)}</button>
+                         <button key={tf.id} disabled={isUiLocked} onClick={() => { setHoverIndex(null); setTimeframe(tf.id); }} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${timeframe === tf.id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}>{String(tf.label)}</button>
                       ))}
                    </div>
                    <button
@@ -1500,7 +1507,8 @@ const App = () => {
                            if (isUiLocked) return;
                            const key = `${selectedHistorySymbol}_${timeframe}`;
                            fetchingHistoryRef.current[key] = false;
-                           fetchHistoricalData(selectedHistorySymbol, timeframe);
+                           setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
+                           fetchHistoricalData(selectedHistorySymbol, timeframe).finally(() => { fetchingHistoryRef.current[key] = false; });
                        }}
                        disabled={isUiLocked}
                        className="px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors flex items-center bg-slate-800" title="重新抓取"
@@ -1637,15 +1645,15 @@ const App = () => {
                                  });
                               })()}
 
-                              {hoverIndex !== null && (() => {
+                              {safeHoverIndex !== null && displayChartData[safeHoverIndex] && (() => {
                                   const spacing = 800 / displayChartData.length;
-                                  const x = spacing * 0.5 + hoverIndex * spacing;
-                                  const y = mapPriceY(displayChartData[hoverIndex].close);
+                                  const x = spacing * 0.5 + safeHoverIndex * spacing;
+                                  const y = mapPriceY(displayChartData[safeHoverIndex].close);
                                   return (
                                      <g>
                                         <line x1={x} y1="0" x2={x} y2="520" stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
                                         <line x1="0" y1={y} x2="800" y2={y} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
-                                        <circle cx={x} cy={y} r="3" fill={displayChartData[hoverIndex].close >= displayChartData[hoverIndex].open ? "#ef4444" : "#22c55e"} />
+                                        <circle cx={x} cy={y} r="3" fill={displayChartData[safeHoverIndex].close >= displayChartData[safeHoverIndex].open ? "#ef4444" : "#22c55e"} />
                                      </g>
                                   );
                               })()}
@@ -1766,7 +1774,7 @@ const App = () => {
                 <tbody className="divide-y divide-slate-700">
                   {tradableSymbols.map(row => {
                     const s = investmentSettings[row['標的']] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE' };
-                    const autoVal = autoSettings[row['標的']] !== undefined ? autoSettings[row['標的']] : true;
+                    const autoVal = autoSettings[row['標的']] !== undefined ? autoSettings[row['標的']] : (s.autoAnalyze !== false);
                     return (
                       <tr key={row['標的']} className="hover:bg-slate-700/50">
                         <td className="p-3 font-bold text-white">{row['標的']}</td>
