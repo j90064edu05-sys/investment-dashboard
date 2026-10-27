@@ -536,7 +536,7 @@ const App = () => {
       
       <nav className="hidden md:block border-b border-slate-700 bg-slate-800/50 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 flex items-center justify-between h-16">
-          <div className="flex items-center"><TrendingUp className="h-6 w-6 text-blue-500 mr-2" /><span className="text-xl font-bold">Alpha 投資戰情室 v56.00</span></div>
+          <div className="flex items-center"><TrendingUp className="h-6 w-6 text-blue-500 mr-2" /><span className="text-xl font-bold">Alpha 投資戰情室 v56.04</span></div>
           <div className="flex space-x-4">{['overview', 'history', 'holdings', 'config'].map(tab => (<button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-2 rounded text-sm font-medium ${activeTab === tab ? 'bg-slate-900 text-blue-400' : 'text-slate-300'}`}>{tab === 'overview' ? '總覽' : tab === 'history' ? '歷史走勢' : tab === 'holdings' ? '持股明細' : '設定'}</button>))}</div>
         </div>
       </nav>
