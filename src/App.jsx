@@ -14,7 +14,7 @@ import {
   Percent, Layers, Link as LinkIcon, XCircle, PlusCircle, Trash2, Edit, Cloud
 } from 'lucide-react';
 
-/**
+/*
  * Alpha 投資戰情室 v56.05 (修正歷史走勢頁面空白與未定義樣式崩潰版)
  */
 
