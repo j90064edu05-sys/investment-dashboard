@@ -889,7 +889,7 @@ const App = () => {
     setIsSyncingCloud(true);
     try {
       const targetUrl = gasWebAppUrl.trim();
-      const params = new URLSearchParams({
+      const payload = {
         action: 'SAVE_REPORT',
         time: nowStr,
         symbol: symbol,
@@ -897,13 +897,19 @@ const App = () => {
         signal: signal || 'HOLD',
         summary: summaryText || '',
         detail: detailText || ''
-      });
-      const finalGetUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + params.toString();
+      };
 
-      const res = await fetch(finalGetUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+      const res = await fetch(targetUrl, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        headers: {
+          'Content-Type': 'text/plain;charset=utf-8',
+        }
+      });
+
       const resData = await res.json();
       if (resData.status === 'success') {
-        setToast(`☁️ ${symbol} AI 分析報告已透過 GET 成功同步寫入 Google 表單！`);
+        setToast(`☁️ ${symbol} AI 分析報告已成功同步寫入 Google 表單！`);
       } else {
         throw new Error(resData.message || '寫入失敗');
       }
