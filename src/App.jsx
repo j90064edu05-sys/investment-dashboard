@@ -15,7 +15,14 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.05 (修復 handleMouseDown、AI 重新分析與雲端設定同步版)
+ * Alpha 投資戰情室 v56.05
+ * 
+ * [v55.00 ~ v56.05 核心功能總覽]
+ * 1. AI 模型全面升級：支援 gemini-3.7-flash (預設)、gemini-3.6-flash、gemini-3.7-flash-lite。
+ * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
+ * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
+ * 4. 歷史走勢 AI 分析雙模式：「綜合趨勢分析」與「回測交易策略」。
+ * 5. 修正：系統日誌 (Logs) 顯示回歸，並確保「重新分析並同步」按鈕能強制觸發分析與上傳。
  */
 
 const DEMO_DATA = [
@@ -46,9 +53,9 @@ const CATEGORY_STYLES = {
 };
 
 const AVAILABLE_MODELS = [
-  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (最新穩定版)' },
-  { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash (穩定)' },
-  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite (快速穩定)' },
+  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (最新預設)' },
+  { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash (穩定版)' },
+  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite (快速)' },
 ];
 
 const ASSET_TYPES = {
@@ -468,7 +475,7 @@ const App = () => {
   const [isDetailExpanded, setIsDetailExpanded] = useState(true);
   const [usedModel, setUsedModel] = useState(null); 
   const [isCachedResult, setIsCachedResult] = useState(false); 
-  const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash'); 
+  const [selectedModel, setSelectedModel] = useState('gemini-3.7-flash'); 
   const [aiSignals, setAiSignals] = useState({}); 
 
   const [portfolioHealth, setPortfolioHealth] = useState(null);
@@ -511,6 +518,7 @@ const App = () => {
 
   const isUiLocked = historyLoading || isAiSummarizing;
 
+  // System Logs Hook
   useEffect(() => {
     const originalLog = console.log; const originalWarn = console.warn; const originalError = console.error;
     const handleLog = (level, originalFn, ...args) => {
@@ -531,7 +539,7 @@ const App = () => {
 
   useEffect(() => {
     if (logsContainerRef.current) logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
-  }, [appLogs]);
+  }, [appLogs, activeTab]);
 
   useEffect(() => {
     const loadHolidays = async () => {
@@ -619,25 +627,25 @@ const App = () => {
   const sortedHoldings = useMemo(() => {
     let sortableItems = [...aggregatedHoldings];
     if (sortConfig.key === 'manual') {
-       sortableItems.sort((a, b) => {
-         const idxA = customOrder.indexOf(a['標的']); const idxB = customOrder.indexOf(b['標的']);
-         return (idxA === -1 ? 9999 : idxA) - (idxB === -1 ? 9999 : idxB);
-       });
+      sortableItems.sort((a, b) => {
+        const idxA = customOrder.indexOf(a['標的']); const idxB = customOrder.indexOf(b['標的']);
+        return (idxA === -1 ? 9999 : idxA) - (idxB === -1 ? 9999 : idxB);
+      });
     } else if (sortConfig.key !== null) {
       sortableItems.sort((a, b) => {
         let aValue = a[sortConfig.key]; let bValue = b[sortConfig.key];
         if (sortConfig.key === '標的') aValue = a['標的']; 
         if (sortConfig.key === '類別') aValue = a['類別'];
         if (['buyPrice', 'currentPrice', 'shares', 'profitLoss', 'roi', 'marketValue', 'costBasis'].includes(sortConfig.key)) {
-            const numA = typeof aValue === 'number' ? aValue : (Number(aValue) || 0);
-            const numB = typeof bValue === 'number' ? bValue : (Number(bValue) || 0);
-            return sortConfig.direction === 'asc' ? numA - numB : numB - numA;
+          const numA = typeof aValue === 'number' ? aValue : (Number(aValue) || 0);
+          const numB = typeof bValue === 'number' ? bValue : (Number(bValue) || 0);
+          return sortConfig.direction === 'asc' ? numA - numB : numB - numA;
         } else {
-            if (aValue === undefined || aValue === null) aValue = ''; if (bValue === undefined || bValue === null) bValue = '';
-            if (typeof aValue === 'string' && typeof bValue === 'string') { aValue = aValue.toLowerCase(); bValue = bValue.toLowerCase(); }
-            if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
-            if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
-            return 0;
+          if (aValue === undefined || aValue === null) aValue = ''; if (bValue === undefined || bValue === null) bValue = '';
+          if (typeof aValue === 'string' && typeof bValue === 'string') { aValue = aValue.toLowerCase(); bValue = bValue.toLowerCase(); }
+          if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+          if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
+          return 0;
         }
       });
     }
@@ -656,16 +664,16 @@ const App = () => {
 
     if (prevSortRef.current !== sortConfig || prevOrderRef.current !== customOrder) {
       if (tradableSymbols.length > 0 && (!selectedHistorySymbol || !isSymbolValid)) {
-          setSelectedHistorySymbol(tradableSymbols[0]['標的']);
-          setTimeframe('1y_1d'); 
+        setSelectedHistorySymbol(tradableSymbols[0]['標的']);
+        setTimeframe('1y_1d'); 
       }
       prevSortRef.current = sortConfig; prevOrderRef.current = customOrder;
     } else if (prevDataHashRef.current !== currentDataHash) {
       if (tradableSymbols.length > 0 && (!selectedHistorySymbol || !isSymbolValid)) {
-          setSelectedHistorySymbol(tradableSymbols[0]['標的']);
-          setTimeframe('1y_1d'); 
+        setSelectedHistorySymbol(tradableSymbols[0]['標的']);
+        setTimeframe('1y_1d'); 
       } else if (tradableSymbols.length === 0) {
-          setSelectedHistorySymbol(null);
+        setSelectedHistorySymbol(null);
       }
     }
     prevDataHashRef.current = currentDataHash;
@@ -685,64 +693,172 @@ const App = () => {
     const extraData = etfExtraData[selectedHistorySymbol];
     
     if (currentPrice && merged.length > 0 && timeframe === '1y_1d') {
-        const isTwAsset = selectedHistorySymbol?.includes('.TW') || selectedHistorySymbol?.includes('.TWO');
-        let latestDateStr = isTwAsset ? getLogicalTradingDate(twseHolidays, false) : getTodayDate(); 
-        
-        if (extraData && extraData.dateStr) {
-            const dStr = extraData.dateStr.split(' ')[0]; const parts = dStr.split('/'); const today = new Date();
-            if (parts.length === 2) {
-                latestDateStr = `${today.getFullYear()}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
-            } else if (parts.length === 3) {
-                let year = parseInt(parts[0]); if (year < 1911) year += 1911; 
-                latestDateStr = `${year}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
-            }
+      const isTwAsset = selectedHistorySymbol?.includes('.TW') || selectedHistorySymbol?.includes('.TWO');
+      let latestDateStr = isTwAsset ? getLogicalTradingDate(twseHolidays, false) : getTodayDate(); 
+      
+      if (extraData && extraData.dateStr) {
+        const dStr = extraData.dateStr.split(' ')[0]; const parts = dStr.split('/'); const today = new Date();
+        if (parts.length === 2) {
+          latestDateStr = `${today.getFullYear()}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+        } else if (parts.length === 3) {
+          let year = parseInt(parts[0]); if (year < 1911) year += 1911; 
+          latestDateStr = `${year}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
         }
-        
-        const [y, m, d] = latestDateStr.split('-');
-        let patchDateObj = new Date(parseInt(y), parseInt(m) - 1, parseInt(d));
+      }
+      
+      const [y, m, d] = latestDateStr.split('-');
+      let patchDateObj = new Date(parseInt(y), parseInt(m) - 1, parseInt(d));
 
-        while (true) {
-            const dayOfWeek = patchDateObj.getDay();
-            const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-            const formattedDateStr = `${patchDateObj.getFullYear()}${String(patchDateObj.getMonth() + 1).padStart(2, '0')}${String(patchDateObj.getDate()).padStart(2, '0')}`;
-            const isHoliday = isTwAsset && twseHolidays.includes(formattedDateStr);
-            if (isWeekend || isHoliday) { patchDateObj.setDate(patchDateObj.getDate() - 1); } else { break; }
-        }
+      while (true) {
+        const dayOfWeek = patchDateObj.getDay();
+        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+        const formattedDateStr = `${patchDateObj.getFullYear()}${String(patchDateObj.getMonth() + 1).padStart(2, '0')}${String(patchDateObj.getDate()).padStart(2, '0')}`;
+        const isHoliday = isTwAsset && twseHolidays.includes(formattedDateStr);
+        if (isWeekend || isHoliday) { patchDateObj.setDate(patchDateObj.getDate() - 1); } else { break; }
+      }
 
-        const formatY = patchDateObj.getFullYear(); const formatM = String(patchDateObj.getMonth() + 1).padStart(2, '0'); const formatD = String(patchDateObj.getDate()).padStart(2, '0');
-        latestDateStr = `${formatY}-${formatM}-${formatD}`;
-        
-        const lastPoint = merged[merged.length - 1];
-        if (lastPoint.date < latestDateStr) { 
-             merged.push({ 
-                ...lastPoint, date: latestDateStr, 
-                close: currentPrice, open: currentPrice, high: currentPrice, low: currentPrice, volume: 0, 
-                isPatched: true, ts: patchDateObj.getTime()
-             });
-        } else if (lastPoint.date === latestDateStr && !lastPoint.isManual) { 
-             merged[merged.length - 1] = { 
-                ...lastPoint, close: currentPrice, 
-                high: Math.max(lastPoint.high, currentPrice), 
-                low: Math.min(lastPoint.low, currentPrice) 
-             }; 
-        }
+      const formatY = patchDateObj.getFullYear(); const formatM = String(patchDateObj.getMonth() + 1).padStart(2, '0'); const formatD = String(patchDateObj.getDate()).padStart(2, '0');
+      latestDateStr = `${formatY}-${formatM}-${formatD}`;
+      
+      const lastPoint = merged[merged.length - 1];
+      if (lastPoint.date < latestDateStr) { 
+        merged.push({ 
+          ...lastPoint, date: latestDateStr, 
+          close: currentPrice, open: currentPrice, high: currentPrice, low: currentPrice, volume: 0, 
+          isPatched: true, ts: patchDateObj.getTime()
+        });
+      } else if (lastPoint.date === latestDateStr && !lastPoint.isManual) { 
+        merged[merged.length - 1] = { 
+          ...lastPoint, close: currentPrice, 
+          high: Math.max(lastPoint.high, currentPrice), 
+          low: Math.min(lastPoint.low, currentPrice) 
+        }; 
+      }
     }
 
     const buys = portfolioData.filter(p => p['標的'] === selectedHistorySymbol);
     buys.forEach(buy => {
-        const rawDate = (buy['日期'] || '').toString().trim().replace(/\//g, '-');
-        let closestIdx = merged.findIndex(pt => pt.date === rawDate);
-        if (closestIdx === -1) {
-            const buyDateTs = new Date(rawDate).getTime();
-            if (!isNaN(buyDateTs)) {
-                let minDiff = Infinity;
-                merged.forEach((pt, i) => { const diff = Math.abs(buyDateTs - new Date(pt.date).getTime()); if (diff < minDiff && diff < 604800000) { minDiff = diff; closestIdx = i; } });
-            }
+      const rawDate = (buy['日期'] || '').toString().trim().replace(/\//g, '-');
+      let closestIdx = merged.findIndex(pt => pt.date === rawDate);
+      if (closestIdx === -1) {
+        const buyDateTs = new Date(rawDate).getTime();
+        if (!isNaN(buyDateTs)) {
+          let minDiff = Infinity;
+          merged.forEach((pt, i) => { const diff = Math.abs(buyDateTs - new Date(pt.date).getTime()); if (diff < minDiff && diff < 604800000) { minDiff = diff; closestIdx = i; } });
         }
-        if (closestIdx !== -1) { merged[closestIdx] = { ...merged[closestIdx], buyPricePoint: buy['價格'], buyAction: buy }; }
+      }
+      if (closestIdx !== -1) { merged[closestIdx] = { ...merged[closestIdx], buyPricePoint: buy['價格'], buyAction: buy }; }
     });
     return merged;
   }, [historicalData, selectedHistorySymbol, timeframe, portfolioData, realTimePrices, etfExtraData, twseHolidays]);
+
+  const handleWheel = (e) => {
+    if (!currentChartData.length || isUiLocked) return;
+    setZoom(prev => {
+      const delta = e.deltaY > 0 ? 5 : -5;
+      const newCount = Math.max(20, Math.min(currentChartData.length, prev.count + delta));
+      return { ...prev, count: newCount };
+    });
+    setHoverIndex(null); 
+  };
+
+  const handleMouseDown = (e) => { 
+    if(!isUiLocked) { setIsDragging(true); setStartX(e.clientX); } 
+  };
+  
+  const handleMouseUp = () => setIsDragging(false);
+  
+  const handleMouseLeave = () => { 
+    setIsDragging(false); setHoverIndex(null); 
+  }; 
+ 
+  const handleMouseMove = (e) => {
+    if (!currentChartData.length || isUiLocked) return;
+    if (isDragging) {
+      const deltaX = e.clientX - startX;
+      if (Math.abs(deltaX) > 8) {
+        setZoom(prev => {
+          const shift = deltaX > 0 ? -1 : 1; 
+          let currentEnd = prev.endIndex === null ? currentChartData.length : prev.endIndex;
+          let newEnd = Math.max(prev.count, Math.min(currentChartData.length, currentEnd + shift));
+          return { ...prev, endIndex: newEnd };
+        });
+        setStartX(e.clientX);
+      }
+      setHoverIndex(null); 
+    } else {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const endIdx = zoom.endIndex === null ? currentChartData.length : zoom.endIndex;
+      const startIdx = Math.max(0, endIdx - zoom.count);
+      const displayedCount = endIdx - startIdx;
+      const spacing = rect.width / displayedCount;
+      let idx = Math.floor(x / spacing);
+      idx = Math.max(0, Math.min(displayedCount - 1, idx));
+      setHoverIndex(idx); 
+    }
+  };
+
+  const updateHoverIndexFromTouch = useCallback((touch) => {
+    if (!svgRef.current || !currentChartData.length) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const x = touch.clientX - rect.left;
+    const endIdx = zoom.endIndex === null ? currentChartData.length : zoom.endIndex;
+    const startIdx = Math.max(0, endIdx - zoom.count);
+    const displayedCount = endIdx - startIdx;
+    const spacing = rect.width / displayedCount;
+    let idx = Math.floor(x / spacing);
+    idx = Math.max(0, Math.min(displayedCount - 1, idx));
+    setHoverIndex(idx);
+  }, [currentChartData, zoom]);
+
+  const handleTouchStart = (e) => {
+    if (isUiLocked) return;
+    if (e.touches.length === 2) {
+      const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+      touchRef.current = { startX: 0, startDist: dist, isPinching: true, isPanning: false };
+    } else if (e.touches.length === 1) {
+      touchRef.current = { startX: e.touches[0].clientX, startDist: 0, isPinching: false, isPanning: true };
+      updateHoverIndexFromTouch(e.touches[0]);
+    }
+  };
+
+  const handleTouchMove = (e) => {
+    if (!currentChartData.length || isUiLocked) return;
+    
+    if (touchRef.current.isPinching && e.touches.length === 2) {
+      const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+      const deltaDist = touchRef.current.startDist - dist;
+
+      if (Math.abs(deltaDist) > 5) {
+        setZoom(prev => {
+          const shift = deltaDist > 0 ? 4 : -4;
+          const newCount = Math.max(20, Math.min(currentChartData.length, prev.count + shift));
+          return { ...prev, count: newCount };
+        });
+        touchRef.current.startDist = dist;
+        setHoverIndex(null);
+      }
+    } else if (touchRef.current.isPanning && e.touches.length === 1) {
+      const deltaX = e.touches[0].clientX - touchRef.current.startX;
+      if (Math.abs(deltaX) > 8) {
+        setZoom(prev => {
+          const shift = deltaX > 0 ? -2 : 2;
+          let currentEnd = prev.endIndex === null ? currentChartData.length : prev.endIndex;
+          let newEnd = Math.max(prev.count, Math.min(currentChartData.length, currentEnd + shift));
+          return { ...prev, endIndex: newEnd };
+        });
+        touchRef.current.startX = e.touches[0].clientX;
+        setHoverIndex(null);
+      } else {
+        updateHoverIndexFromTouch(e.touches[0]);
+      }
+    }
+  };
+
+  const handleTouchEnd = () => {
+    touchRef.current = { startX: 0, startDist: 0, isPinching: false, isPanning: false };
+  };
 
   useEffect(() => {
     const svgEl = svgRef.current;
@@ -801,33 +917,6 @@ const App = () => {
       setToast(`⚠️ 已儲存本地快取，但雲端表單同步失敗: ${e.message}`);
     } finally {
       setIsSyncingCloud(false);
-    }
-  };
-
-  const syncSettingsToCloud = async (newSettings) => {
-    if (!gasWebAppUrl || !gasWebAppUrl.trim()) return;
-    try {
-      const targetUrl = gasWebAppUrl.trim();
-      const settingsPayload = {};
-      Object.keys(newSettings).forEach(sym => {
-        const s = newSettings[sym];
-        settingsPayload[sym] = {
-          type: s.type || 'CORE',
-          isDCA: !!s.isDCA,
-          addon: s.addon || 'PYRAMID',
-          addon2: s.addon2 || 'NONE',
-          autoAnalyze: s.autoAnalyze !== false
-        };
-      });
-      const params = new URLSearchParams({
-        action: 'SAVE_SETTINGS',
-        settings: JSON.stringify(settingsPayload)
-      });
-      const finalGetUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + params.toString();
-      await fetch(finalGetUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
-      console.log(`[Cloud Sync] 🟢 投資策略與設定已成功同步至 Google 表單`);
-    } catch (e) {
-      console.warn(`[Cloud Sync] 同步設定至表單失敗:`, e.message);
     }
   };
 
@@ -908,7 +997,7 @@ const App = () => {
         });
         return next;
       });
-      console.log(`[Cloud Engine] 成功從 ${sourceLabel} 載入 ${count} 筆 AI 分析報告！`);
+      console.log(`[Cloud Engine] 🟢 成功從 ${sourceLabel} 載入 ${count} 筆 AI 分析報告！`);
     }
     return count;
   }, []);
@@ -920,37 +1009,18 @@ const App = () => {
 
     if (targetGasUrl) {
       try {
-        console.log(`[Cloud Engine] 嘗試透過 GAS Web App 讀取 AI_分析報告與設定...`);
+        console.log(`[Cloud Engine] 🌐 嘗試透過 GAS Web App 讀取 AI_分析報告...`);
         const gasFetchUrl = targetGasUrl + (targetGasUrl.includes('?') ? '&' : '?') + `action=GET_REPORTS&_t=${Date.now()}`;
         const res = await fetch(gasFetchUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
         if (res.ok) {
           const json = await res.json();
-          if (json && json.status === 'success') {
-            if (Array.isArray(json.rows)) {
-              parseAndStoreCloudRows(json.rows, 'GAS 雲端引擎');
-            }
-            if (json.settings && typeof json.settings === 'object') {
-              setInvestmentSettings(prev => {
-                const updated = { ...prev };
-                Object.keys(json.settings).forEach(sym => {
-                  const cloudS = json.settings[sym];
-                  updated[sym] = {
-                    type: cloudS.type || 'CORE',
-                    isDCA: !!cloudS.isDCA,
-                    addon: cloudS.addon || 'PYRAMID',
-                    addon2: cloudS.addon2 || 'NONE',
-                    autoAnalyze: cloudS.autoAnalyze !== false
-                  };
-                });
-                localStorage.setItem('investment_settings', JSON.stringify(updated));
-                return updated;
-              });
-            }
-            return;
+          if (json && json.status === 'success' && Array.isArray(json.rows)) {
+            const loaded = parseAndStoreCloudRows(json.rows, 'GAS 雲端引擎');
+            if (loaded > 0) return;
           }
         }
       } catch (e) {
-        console.log(`[Cloud Engine] GAS 讀取略過，切換至表單 CSV 管道:`, e.message);
+        console.log(`[Cloud Engine] 🟡 GAS 讀取略過，切換至表單 CSV 管道:`, e.message);
       }
     }
 
@@ -1281,6 +1351,12 @@ const App = () => {
       return; 
     }
     
+    // Prevent duplicate calls if already summarizing the same symbol
+    if (analysisInProgressRef.current[symbol]) {
+        console.log(`[AI] ${symbol} is already being analyzed. Ignoring duplicate trigger.`);
+        return;
+    }
+    
     if (aiAbortControllerRef.current) {
       aiAbortControllerRef.current.abort();
     }
@@ -1436,6 +1512,8 @@ ${signalRules}
           setAiSummary(consensusSummary); setAiDetail(finalResult.detail); setAiSignals(prev => ({ ...prev, [symbol]: majoritySignal }));
           setUsedModel(finalResult.model); setIsDetailExpanded(true); 
         }
+        
+        // !important: 如果是強制刷新 (forceUpdate === true)，一定要執行同步上傳至雲端表單！
         if (!signal.aborted) {
           updateAiCache(symbol, { summary: consensusSummary, detail: finalResult.detail, signal: majoritySignal, model: finalResult.model }, dataDate); 
           await syncReportToSheet(symbol, stockName, majoritySignal, consensusSummary, finalResult.detail);
@@ -1667,7 +1745,7 @@ ${signalRules}
   };
 
   const handleFetchButton = () => { 
-    localStorage.setItem('investment_sheet_url', sheetUrl); localStorage.setItem('investment_report_sheet_url', reportSheetUrl); localStorage.setItem('gas_webapp_url', gasWebAppUrl); localStorage.setItem('gemini_api_key', geminiApiKey); localStorage.setItem('gemini_model', selectedModel); localStorage.setItem('fee_discount', feeDiscount); localStorage.setItem('custom_proxy_url', customProxyUrl); localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
+    localStorage.setItem('gemini_api_key', geminiApiKey); localStorage.setItem('gemini_model', selectedModel); localStorage.setItem('fee_discount', feeDiscount); localStorage.setItem('custom_proxy_url', customProxyUrl); localStorage.setItem('gas_webapp_url', gasWebAppUrl); localStorage.setItem('investment_report_sheet_url', reportSheetUrl); localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
     if (customOrder.length > 0) localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
     setToast("設定已儲存！開始更新資料..."); 
     if (!sheetUrl) { if (rawData.length > 0) processData(rawData, realTimePrices, etfExtraData); return; } 
@@ -1687,9 +1765,7 @@ ${signalRules}
   const handleSettingChange = (symbol, key, value) => {
     const currentSettings = investmentSettings[symbol] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE', autoAnalyze: true };
     const newSettings = { ...investmentSettings, [symbol]: { ...currentSettings, [key]: value } };
-    setInvestmentSettings(newSettings); 
-    localStorage.setItem('investment_settings', JSON.stringify(newSettings));
-
+    setInvestmentSettings(newSettings); localStorage.setItem('investment_settings', JSON.stringify(newSettings));
     if (key === 'type') { const newClassifications = { ...assetClassifications, [symbol]: value }; setAssetClassifications(newClassifications); localStorage.setItem('investment_asset_classifications', JSON.stringify(newClassifications)); }
     if (key === 'autoAnalyze') {
       setToast(`${symbol} 自動分析已設為：${value ? '開啟 (ON)' : '關閉 (OFF)'}`);
@@ -1777,195 +1853,6 @@ ${signalRules}
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
 
-  const handleWheel = (e) => {
-    if (!currentChartData.length || isUiLocked) return;
-    setZoom(prev => {
-      const delta = e.deltaY > 0 ? 5 : -5;
-      const newCount = Math.max(20, Math.min(currentChartData.length, prev.count + delta));
-      return { ...prev, count: newCount };
-    });
-    setHoverIndex(null); 
-  };
-
-  const handleMouseDown = (e) => { if(!isUiLocked) { setIsDragging(true); setStartX(e.clientX); } };
-  const handleMouseUp = () => setIsDragging(false);
-  const handleMouseLeave = () => { setIsDragging(false); setHoverIndex(null); }; 
- 
-  const handleMouseMove = (e) => {
-     if (!currentChartData.length || isUiLocked) return;
-     if (isDragging) {
-         const deltaX = e.clientX - startX;
-         if (Math.abs(deltaX) > 8) {
-             setZoom(prev => {
-                 const shift = deltaX > 0 ? -1 : 1; 
-                 let currentEnd = prev.endIndex === null ? currentChartData.length : prev.endIndex;
-                 let newEnd = Math.max(prev.count, Math.min(currentChartData.length, currentEnd + shift));
-                 return { ...prev, endIndex: newEnd };
-             });
-             setStartX(e.clientX);
-         }
-         setHoverIndex(null); 
-     } else {
-         const rect = e.currentTarget.getBoundingClientRect();
-         const x = e.clientX - rect.left;
-         const endIdx = zoom.endIndex === null ? currentChartData.length : zoom.endIndex;
-         const startIdx = Math.max(0, endIdx - zoom.count);
-         const displayedCount = endIdx - startIdx;
-         const spacing = rect.width / displayedCount;
-         let idx = Math.floor(x / spacing);
-         idx = Math.max(0, Math.min(displayedCount - 1, idx));
-         setHoverIndex(idx); 
-     }
-  };
-
-  const updateHoverIndexFromTouch = useCallback((touch) => {
-    if (!svgRef.current || !currentChartData.length) return;
-    const rect = svgRef.current.getBoundingClientRect();
-    const x = touch.clientX - rect.left;
-    const endIdx = zoom.endIndex === null ? currentChartData.length : zoom.endIndex;
-    const startIdx = Math.max(0, endIdx - zoom.count);
-    const displayedCount = endIdx - startIdx;
-    const spacing = rect.width / displayedCount;
-    let idx = Math.floor(x / spacing);
-    idx = Math.max(0, Math.min(displayedCount - 1, idx));
-    setHoverIndex(idx);
-  }, [currentChartData, zoom]);
-
-  const handleTouchStart = (e) => {
-    if (isUiLocked) return;
-    if (e.touches.length === 2) {
-      const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-      touchRef.current = { startX: 0, startDist: dist, isPinching: true, isPanning: false };
-    } else if (e.touches.length === 1) {
-      touchRef.current = { startX: e.touches[0].clientX, startDist: 0, isPinching: false, isPanning: true };
-      updateHoverIndexFromTouch(e.touches[0]);
-    }
-  };
-
-  const handleTouchMove = (e) => {
-    if (!currentChartData.length || isUiLocked) return;
-    
-    if (touchRef.current.isPinching && e.touches.length === 2) {
-      const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-      const deltaDist = touchRef.current.startDist - dist;
-
-      if (Math.abs(deltaDist) > 5) {
-        setZoom(prev => {
-          const shift = deltaDist > 0 ? 4 : -4;
-          const newCount = Math.max(20, Math.min(currentChartData.length, prev.count + shift));
-          return { ...prev, count: newCount };
-        });
-        touchRef.current.startDist = dist;
-        setHoverIndex(null);
-      }
-    } else if (touchRef.current.isPanning && e.touches.length === 1) {
-      const deltaX = e.touches[0].clientX - touchRef.current.startX;
-      if (Math.abs(deltaX) > 8) {
-        setZoom(prev => {
-          const shift = deltaX > 0 ? -2 : 2;
-          let currentEnd = prev.endIndex === null ? currentChartData.length : prev.endIndex;
-          let newEnd = Math.max(prev.count, Math.min(currentChartData.length, currentEnd + shift));
-          return { ...prev, endIndex: newEnd };
-        });
-        touchRef.current.startX = e.touches[0].clientX;
-        setHoverIndex(null);
-      } else {
-        updateHoverIndexFromTouch(e.touches[0]);
-      }
-    }
-  };
-
-  const handleTouchEnd = () => {
-    touchRef.current = { startX: 0, startDist: 0, isPinching: false, isPanning: false };
-  };
-
-  const endIdx = zoom.endIndex === null ? currentChartData.length : Math.min(zoom.endIndex, currentChartData.length);
-  const startIdx = Math.max(0, endIdx - zoom.count);
-  const displayChartData = currentChartData.slice(startIdx, endIdx);
-
-  const safeHoverIndex = (hoverIndex !== null && hoverIndex >= 0 && hoverIndex < displayChartData.length) ? hoverIndex : null;
-  const activeIdx = safeHoverIndex !== null ? safeHoverIndex : Math.max(0, displayChartData.length - 1);
-  const activeCandle = displayChartData[activeIdx] || { open: 0, high: 0, low: 0, close: 0, volume: 0, ts: Date.now(), date: '' };
-  const prevC = activeIdx > 0 && displayChartData[activeIdx - 1] ? displayChartData[activeIdx - 1].close : activeCandle.open;
-  
-  const activeChange = activeCandle.close - prevC;
-  const activeChangePercent = prevC > 0 ? (activeChange / prevC) * 100 : 0;
-  const activeColorClass = activeChange > 0 ? 'text-red-500' : activeChange < 0 ? 'text-green-500' : 'text-white';
-  const activeSign = activeChange > 0 ? '▲ ' : activeChange < 0 ? '▼ ' : '';
-  
-  const formattedHoverDate = activeCandle.date ? activeCandle.date.replace(/-/g, '/') : (() => {
-    const dObj = activeCandle.ts ? new Date(activeCandle.ts) : new Date();
-    return `${dObj.getFullYear()}/${String(dObj.getMonth()+1).padStart(2,'0')}/${String(dObj.getDate()).padStart(2,'0')}`;
-  })();
-  const dateStr = safeHoverIndex !== null ? formattedHoverDate : `最新 (${formattedHoverDate})`;
-
-  const currentMA5 = activeCandle.MA5 || 0;
-  const currentMA20 = activeCandle.MA20 || 0;
-  const currentMA60 = activeCandle.MA60 || 0;
-  const currentBBUpper = activeCandle.BBU || 0;
-  const currentBBLower = activeCandle.BBL || 0;
-  const currentMACD = activeCandle.OSC || 0;
-  const currentK = activeCandle.K || 50;
-  const currentD = activeCandle.D || 50;
-  const currentRSI = activeCandle.RSI14 || 50;
-
-  const bias20 = currentMA20 > 0 ? ((activeCandle.close - currentMA20) / currentMA20) * 100 : 0;
-  const stockPrice = currentChartData.length > 0 ? currentChartData[currentChartData.length - 1].close : 0;
-
-  let bbStatus = "區間內震盪";
-  let bbColor = "text-yellow-400";
-  if (stockPrice > activeCandle.BBU && activeCandle.BBU > 0) {
-    bbStatus = "突破上軌 (強勢)";
-    bbColor = "text-red-500";
-  } else if (stockPrice < activeCandle.BBL && activeCandle.BBL > 0) {
-    bbStatus = "跌破下軌 (弱勢)";
-    bbColor = "text-green-500";
-  } else if (stockPrice > currentMA20) {
-    bbStatus = "中軌之上 (偏多)";
-    bbColor = "text-red-400";
-  } else if (stockPrice < currentMA20) {
-    bbStatus = "中軌之下 (偏空)";
-    bbColor = "text-green-400";
-  }
-
-  const latestChangePercent = currentChartData.length > 1 ? ((currentChartData[currentChartData.length - 1].close - currentChartData[currentChartData.length - 2].close) / currentChartData[currentChartData.length - 2].close) * 100 : 0;
-  const extRatio = Math.min(Math.max(Math.round(50 + latestChangePercent * 3), 20), 80);
-  const intRatio = 100 - extRatio;
-  
-  const bodySize = Math.abs(activeCandle.close - activeCandle.open);
-  const upperShadow = activeCandle.high - Math.max(activeCandle.close, activeCandle.open);
-  const lowerShadow = Math.min(activeCandle.close, activeCandle.open) - activeCandle.low;
-  
-  const isRedK = activeCandle.close >= activeCandle.open;
-  const isLongRed = isRedK && activeCandle.open > 0 && (activeCandle.close - activeCandle.open) / activeCandle.open > 0.03;
-  const isLongBlack = !isRedK && activeCandle.open > 0 && (activeCandle.open - activeCandle.close) / activeCandle.open > 0.03;
-  const hasUpperShadow = upperShadow > bodySize * 2 && upperShadow > (activeCandle.open * 0.01);
-  const hasLowerShadow = lowerShadow > bodySize * 2 && lowerShadow > (activeCandle.open * 0.01);
-
-  const last10 = displayChartData.slice(-10);
-  const winDays = last10.filter(d => d.close >= d.open).length;
-  const winRate = last10.length > 0 ? Math.round((winDays / last10.length) * 100) : 50;
-
-  const volMA5 = displayChartData.length >= 5 ? displayChartData.slice(-5).reduce((acc, curr) => acc + (curr.volume || 0), 0) / 5 : activeCandle.volume;
-  const isVolUp = (activeCandle.volume) > volMA5;
-
-  let paddedMin = 0, paddedMax = 0, mapPriceY = () => 0;
-  if (displayChartData.length > 0) {
-    const allLows = displayChartData.map(d => d.low);
-    const allHighs = displayChartData.map(d => d.high);
-    const validMAs = displayChartData.map(d => [d.MA5, d.MA20, d.MA60, d.BBU, d.BBL]).flat().filter(v => v !== null && v !== undefined);
-    
-    const minPrice = Math.min(...allLows, ...validMAs);
-    const maxPrice = Math.max(...allHighs, ...validMAs);
-    const priceRange = maxPrice - minPrice || 1;
-    
-    paddedMin = minPrice - priceRange * 0.05;
-    paddedMax = maxPrice + priceRange * 0.05;
-    const paddedRange = paddedMax - paddedMin || 1;
-    
-    mapPriceY = (val) => 280 - ((val - paddedMin) / paddedRange) * 260;
-  }
-
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20 md:pb-0">
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
@@ -1986,93 +1873,93 @@ ${signalRules}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 md:py-8">
         {priceLoading && (
-            <div className="mb-6 bg-blue-900/30 border border-blue-500/30 rounded-lg p-3 flex items-center justify-between animate-pulse"><div className="flex items-center"><Loader2 className="w-5 h-5 text-blue-400 animate-spin mr-3" /><span className="text-sm text-blue-200">{loadingMessage}</span></div><button onClick={() => { if (globalAbortRef.current) { globalAbortRef.current.abort(); } setPriceLoading(false); setUpdateError('已手動取消資料更新'); }} className="text-xs bg-red-900/50 text-red-200 px-2 py-1 rounded border border-red-500/50 flex items-center hover:bg-red-900/70"><XCircle className="w-3 h-3 mr-1" />停止</button></div>
+          <div className="mb-6 bg-blue-900/30 border border-blue-500/30 rounded-lg p-3 flex items-center justify-between animate-pulse"><div className="flex items-center"><Loader2 className="w-5 h-5 text-blue-400 animate-spin mr-3" /><span className="text-sm text-blue-200">{loadingMessage}</span></div><button onClick={() => { if (globalAbortRef.current) { globalAbortRef.current.abort(); } setPriceLoading(false); setUpdateError('已手動取消資料更新'); }} className="text-xs bg-red-900/50 text-red-200 px-2 py-1 rounded border border-red-500/50 flex items-center hover:bg-red-900/70"><XCircle className="w-3 h-3 mr-1" />停止</button></div>
         )}
         {updateError && <div className="mb-6 bg-red-900/30 border border-red-500/30 rounded-lg p-3 flex items-center"><AlertTriangle className="w-5 h-5 text-red-400 mr-3 flex-shrink-0" /><span className="text-sm text-red-200">{String(updateError)}</span></div>}
 
         {activeTab === 'overview' && (
           <div className="space-y-8">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-               {[ { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' }, { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' }, { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' }, { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' } ].map((item, idx) => (
-                   <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center"><div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div><div className="ml-5 flex-1 min-w-0"><p className="text-sm font-medium text-slate-400 truncate">{String(item.label)}</p><p className={`${getResponsiveFontSize(item.value)} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{String(item.value)}</p></div></div>
-               ))}
+              {[ { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' }, { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' }, { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' }, { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' } ].map((item, idx) => (
+                <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center"><div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div><div className="ml-5 flex-1 min-w-0"><p className="text-sm font-medium text-slate-400 truncate">{String(item.label)}</p><p className={`${getResponsiveFontSize(item.value)} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{String(item.value)}</p></div></div>
+              ))}
             </div>
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
-                  <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><PieIcon className="w-5 h-5 mr-2 text-blue-400" /> 資產類別配置</h3>
-                  <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
-                    {allocationData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}><PieChart><Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">{allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}</Pie><RechartsTooltip itemStyle={{ color: '#f1f5f9' }} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} /><Legend formatter={(value, entry) => { const p = entry?.payload?.percent ?? entry?.payload?.payload?.percent ?? 0; return `${String(value)} (${(p * 100).toFixed(1)}%)`; }} /></PieChart></ResponsiveContainer>
-                    ) : <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>}
-                  </div>
+              <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
+                <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><PieIcon className="w-5 h-5 mr-2 text-blue-400" /> 資產類別配置</h3>
+                <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
+                  {allocationData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}><PieChart><Pie data={allocationData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">{allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={CATEGORY_STYLES[entry.name]?.color || COLORS[index % COLORS.length]} />)}</Pie><RechartsTooltip itemStyle={{ color: '#f1f5f9' }} contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} /><Legend formatter={(value, entry) => { const p = entry?.payload?.percent ?? entry?.payload?.payload?.percent ?? 0; return `${String(value)} (${(p * 100).toFixed(1)}%)`; }} /></PieChart></ResponsiveContainer>
+                  ) : <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>}
                 </div>
-                <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
-                  <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><BarChart2 className="w-5 h-5 mr-2 text-purple-400" /> 持股標的分佈</h3>
-                  <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
-                    {tradableSymbols.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}><BarChart data={tradableSymbols.map(item => ({ name: item['名稱'], value: item.marketValue })).sort((a, b) => b.value - a.value)} layout="vertical"><CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} /><XAxis type="number" stroke="#94a3b8" tickFormatter={(val) => `${val / 1000}k`} /><YAxis dataKey="name" type="category" stroke="#94a3b8" width={80} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} /><Bar dataKey="value" fill="#8B5CF6" radius={[0, 4, 4, 0]}>{tradableSymbols.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}</Bar></BarChart></ResponsiveContainer>
-                    ) : <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>}
-                  </div>
+              </div>
+              <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
+                <h3 className="text-lg font-semibold text-white mb-4 flex items-center"><BarChart2 className="w-5 h-5 mr-2 text-purple-400" /> 持股標的分佈</h3>
+                <div className="h-80 w-full min-h-[320px]" style={{ height: 400 }}>
+                  {tradableSymbols.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}><BarChart data={tradableSymbols.map(item => ({ name: item['名稱'], value: item.marketValue })).sort((a, b) => b.value - a.value)} layout="vertical"><CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} /><XAxis type="number" stroke="#94a3b8" tickFormatter={(val) => `${val / 1000}k`} /><YAxis dataKey="name" type="category" stroke="#94a3b8" width={80} /><RechartsTooltip contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }} formatter={(value) => formatCurrency(value)} /><Bar dataKey="value" fill="#8B5CF6" radius={[0, 4, 4, 0]}>{tradableSymbols.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}</Bar></BarChart></ResponsiveContainer>
+                  ) : <div className="flex h-full items-center justify-center text-slate-500">暫無數據</div>}
                 </div>
+              </div>
             </div>
             
             <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-xl border border-slate-700 shadow-lg relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-64 h-64 bg-purple-500/10 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none"></div>
-                <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 z-10 relative">
-                    <div><h3 className="text-xl font-bold text-white flex items-center"><Activity className="w-6 h-6 mr-2 text-purple-400" /> AI 投資組合總體健檢室 (含壓力測試)</h3><p className="text-sm text-slate-400 mt-1">由 AI 擔任首席投資長，針對您的資產配置、集中度曝險與 4 大極端市況進行壓力測試與評分。</p></div>
-                    {!portfolioHealth && !isHealthChecking && (<button onClick={generatePortfolioHealthCheck} className="mt-4 md:mt-0 px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium shadow-lg hover:shadow-purple-500/25 transition-all flex items-center"><BrainCircuit className="w-5 h-5 mr-2" />開始健檢與壓力測試</button>)}
+              <div className="absolute top-0 right-0 w-64 h-64 bg-purple-500/10 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none"></div>
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 z-10 relative">
+                <div><h3 className="text-xl font-bold text-white flex items-center"><Activity className="w-6 h-6 mr-2 text-purple-400" /> AI 投資組合總體健檢室 (含壓力測試)</h3><p className="text-sm text-slate-400 mt-1">由 AI 擔任首席投資長，針對您的資產配置、集中度曝險與 4 大極端市況進行壓力測試與評分。</p></div>
+                {!portfolioHealth && !isHealthChecking && (<button onClick={generatePortfolioHealthCheck} className="mt-4 md:mt-0 px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium shadow-lg hover:shadow-purple-500/25 transition-all flex items-center"><BrainCircuit className="w-5 h-5 mr-2" />開始健檢與壓力測試</button>)}
+              </div>
+              {isHealthChecking && <div className="flex flex-col items-center justify-center py-12"><Loader2 className="w-12 h-12 text-purple-500 animate-spin mb-4" /><p className="text-slate-300 font-medium">AI 正在執行投資組合壓力測試與風險結構模擬...</p></div>}
+              {portfolioHealth && (
+                <div className="animate-fade-in-up">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                    <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center"><span className="text-slate-400 text-sm mb-2">健康度評分</span><div className="relative"><svg className="w-24 h-24 transform -rotate-90"><circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-slate-700" /><circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" strokeDasharray={251.2} strokeDashoffset={251.2 - (251.2 * portfolioHealth.score) / 100} className={portfolioHealth.score >= 80 ? "text-green-500" : portfolioHealth.score >= 60 ? "text-yellow-500" : "text-red-500"} /></svg><span className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-3xl font-bold text-white">{portfolioHealth.score}</span></div></div>
+                    <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center"><span className="text-slate-400 text-sm mb-2">風險屬性判定</span><ShieldAlert className={`w-12 h-12 mb-2 ${portfolioHealth.risk.includes('高') ? 'text-red-400' : portfolioHealth.risk.includes('低') ? 'text-green-400' : 'text-yellow-400'}`} /><span className="text-xl font-bold text-white">{String(portfolioHealth.risk)}</span></div>
+                    <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 md:col-span-1"><span className="text-slate-400 text-sm mb-2 block text-center md:text-left">AI 分散與避險建議</span><ul className="space-y-2 mt-2">{portfolioHealth.suggestions.slice(0, 3).map((suggestion, idx) => (<li key={idx} className="flex items-start text-sm text-slate-300"><ClipboardCheck className="w-4 h-4 text-purple-400 mr-2 mt-0.5 flex-shrink-0" />{String(suggestion).replace(/^\d+\.\s*/, '').replace(/^- /, '')}</li>))}</ul></div>
+                  </div>
+                  <div className="bg-slate-900/50 rounded-lg p-5 border border-slate-700/50"><h4 className="text-white font-medium mb-2 flex items-center"><MessageSquare className="w-4 h-4 mr-2 text-blue-400" /> 總體分析與壓力測試報告</h4><p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">{String(portfolioHealth.comment)}</p></div>
+                  <div className="mt-4 flex justify-end"><button onClick={generatePortfolioHealthCheck} className="text-xs text-slate-500 hover:text-slate-300 flex items-center"><RefreshCw className="w-3 h-3 mr-1" /> 重新健檢</button></div>
                 </div>
-                {isHealthChecking && <div className="flex flex-col items-center justify-center py-12"><Loader2 className="w-12 h-12 text-purple-500 animate-spin mb-4" /><p className="text-slate-300 font-medium">AI 正在執行投資組合壓力測試與風險結構模擬...</p></div>}
-                {portfolioHealth && (
-                    <div className="animate-fade-in-up">
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center"><span className="text-slate-400 text-sm mb-2">健康度評分</span><div className="relative"><svg className="w-24 h-24 transform -rotate-90"><circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-slate-700" /><circle cx="48" cy="48" r="40" stroke="currentColor" strokeWidth="8" fill="transparent" strokeDasharray={251.2} strokeDashoffset={251.2 - (251.2 * portfolioHealth.score) / 100} className={portfolioHealth.score >= 80 ? "text-green-500" : portfolioHealth.score >= 60 ? "text-yellow-500" : "text-red-500"} /></svg><span className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-3xl font-bold text-white">{portfolioHealth.score}</span></div></div>
-                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 flex flex-col items-center justify-center text-center"><span className="text-slate-400 text-sm mb-2">風險屬性判定</span><ShieldAlert className={`w-12 h-12 mb-2 ${portfolioHealth.risk.includes('高') ? 'text-red-400' : portfolioHealth.risk.includes('低') ? 'text-green-400' : 'text-yellow-400'}`} /><span className="text-xl font-bold text-white">{String(portfolioHealth.risk)}</span></div>
-                            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700 md:col-span-1"><span className="text-slate-400 text-sm mb-2 block text-center md:text-left">AI 分散與避險建議</span><ul className="space-y-2 mt-2">{portfolioHealth.suggestions.slice(0, 3).map((suggestion, idx) => (<li key={idx} className="flex items-start text-sm text-slate-300"><ClipboardCheck className="w-4 h-4 text-purple-400 mr-2 mt-0.5 flex-shrink-0" />{String(suggestion).replace(/^\d+\.\s*/, '').replace(/^- /, '')}</li>))}</ul></div>
-                        </div>
-                        <div className="bg-slate-900/50 rounded-lg p-5 border border-slate-700/50"><h4 className="text-white font-medium mb-2 flex items-center"><MessageSquare className="w-4 h-4 mr-2 text-blue-400" /> 總體分析與壓力測試報告</h4><p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">{String(portfolioHealth.comment)}</p></div>
-                        <div className="mt-4 flex justify-end"><button onClick={generatePortfolioHealthCheck} className="text-xs text-slate-500 hover:text-slate-300 flex items-center"><RefreshCw className="w-3 h-3 mr-1" /> 重新健檢</button></div>
-                    </div>
-                )}
+              )}
             </div>
           </div>
         )}
 
         {activeTab !== 'overview' && activeTab !== 'chat' && (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-             {[ { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' }, { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' }, { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' }, { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' } ].map((item, idx) => (
-                 <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center"><div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div><div className="ml-5 flex-1 min-w-0"><p className="text-sm font-medium text-slate-400 truncate">{String(item.label)}</p><p className={`${getResponsiveFontSize(item.value)} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{String(item.value)}</p></div></div>
-             ))}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+            {[ { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' }, { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' }, { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' }, { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' } ].map((item, idx) => (
+              <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center"><div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div><div className="ml-5 flex-1 min-w-0"><p className="text-sm font-medium text-slate-400 truncate">{String(item.label)}</p><p className={`${getResponsiveFontSize(item.value)} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{String(item.value)}</p></div></div>
+            ))}
           </div>
         )}
         
         {activeTab === 'chat' && (
-            <div className="max-w-4xl mx-auto h-[70vh] flex flex-col bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
-                <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center"><Bot className="w-6 h-6 text-purple-400 mr-2" /><h3 className="font-semibold text-white">AI 投資顧問</h3></div>
-                <div className="flex-1 overflow-y-auto p-4 space-y-4">{chatMessages.map((msg, idx) => (<div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'}`}><p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{String(msg.content)}</p></div></div>))}{isChatLoading && (<div className="flex justify-start"><div className="bg-slate-700 p-3 rounded-lg flex items-center"><Loader2 className="w-4 h-4 animate-spin text-purple-400 mr-2" /><span className="text-xs text-slate-400">AI 正在思考中...</span></div></div>)}<div ref={chatEndRef} /></div>
-                <div className="p-4 border-t border-slate-700 bg-slate-900/50">
-                    <div className="flex gap-2 items-end">
-                        <textarea 
-                            value={chatInput} 
-                            onChange={(e) => setChatInput(e.target.value)} 
-                            onKeyDown={(e) => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                    e.preventDefault();
-                                    if (chatInput.trim()) handleChatSend();
-                                }
-                            }} 
-                            placeholder="輸入您的問題... (Shift + Enter 換行)" 
-                            className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 text-sm resize-y min-h-[42px] max-h-[150px] custom-scrollbar" 
-                            rows={2}
-                            disabled={isChatLoading} 
-                        />
-                        <button onClick={handleChatSend} disabled={isChatLoading || !chatInput.trim()} className="bg-purple-600 hover:bg-purple-700 text-white px-4 rounded-lg disabled:opacity-50 transition-colors h-[42px] flex items-center justify-center mb-[2px]">
-                            <Send className="w-4 h-4" />
-                        </button>
-                    </div>
-                </div>
+          <div className="max-w-4xl mx-auto h-[70vh] flex flex-col bg-slate-800 rounded-xl border border-slate-700 shadow-lg overflow-hidden">
+            <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center"><Bot className="w-6 h-6 text-purple-400 mr-2" /><h3 className="font-semibold text-white">AI 投資顧問</h3></div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">{chatMessages.map((msg, idx) => (<div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[80%] p-3 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'}`}><p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{String(msg.content)}</p></div></div>))}{isChatLoading && (<div className="flex justify-start"><div className="bg-slate-700 p-3 rounded-lg flex items-center"><Loader2 className="w-4 h-4 animate-spin text-purple-400 mr-2" /><span className="text-xs text-slate-400">AI 正在思考中...</span></div></div>)}<div ref={chatEndRef} /></div>
+            <div className="p-4 border-t border-slate-700 bg-slate-900/50">
+              <div className="flex gap-2 items-end">
+                <textarea 
+                  value={chatInput} 
+                  onChange={(e) => setChatInput(e.target.value)} 
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (chatInput.trim()) handleChatSend();
+                    }
+                  }} 
+                  placeholder="輸入您的問題... (Shift + Enter 換行)" 
+                  className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 text-sm resize-y min-h-[42px] max-h-[150px] custom-scrollbar" 
+                  rows={2}
+                  disabled={isChatLoading} 
+                />
+                <button onClick={handleChatSend} disabled={isChatLoading || !chatInput.trim()} className="bg-purple-600 hover:bg-purple-700 text-white px-4 rounded-lg disabled:opacity-50 transition-colors h-[42px] flex items-center justify-center mb-[2px]">
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
             </div>
+          </div>
         )}
 
         {activeTab === 'history' && (
@@ -2104,515 +1991,522 @@ ${signalRules}
                 </div>
                 
                 <div className={`flex items-center gap-4 flex-wrap ${isUiLocked ? 'opacity-50 pointer-events-none' : ''}`}>
-                   <div className="flex bg-slate-900 rounded-lg border border-slate-700 p-0.5">
-                      {[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (
-                         <button key={tf.id} disabled={isUiLocked} onClick={() => { setHoverIndex(null); setTimeframe(tf.id); }} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${timeframe === tf.id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}>{String(tf.label)}</button>
-                      ))}
-                   </div>
-                   <button
-                       onClick={() => {
-                           if (isUiLocked) return;
-                           const key = `${selectedHistorySymbol}_${timeframe}`;
-                           fetchingHistoryRef.current[key] = false;
-                           setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
-                           fetchHistoricalData(selectedHistorySymbol, timeframe).finally(() => { fetchingHistoryRef.current[key] = false; });
-                       }}
-                       disabled={isUiLocked}
-                       className="px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors flex items-center bg-slate-800" title="清除快取並重新抓取"
-                   >
-                       <RefreshCw className={`w-3 h-3 ${historyLoading ? 'animate-spin' : ''} md:mr-1`} /><span className="hidden md:inline">重抓</span>
-                   </button>
+                  <div className="flex bg-slate-900 rounded-lg border border-slate-700 p-0.5">
+                    {[{ id: '1y_1d', label: '1年日線' }, { id: '5y_1wk', label: '5年週線' }, { id: '10y_1mo', label: '10年月線' }].map(tf => (
+                      <button key={tf.id} disabled={isUiLocked} onClick={() => { setHoverIndex(null); setTimeframe(tf.id); }} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${timeframe === tf.id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}>{String(tf.label)}</button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (isUiLocked) return;
+                      const key = `${selectedHistorySymbol}_${timeframe}`;
+                      fetchingHistoryRef.current[key] = false;
+                      setHistoricalData(prev => { const next = { ...prev }; delete next[key]; return next; });
+                      fetchHistoricalData(selectedHistorySymbol, timeframe).finally(() => { fetchingHistoryRef.current[key] = false; });
+                    }}
+                    disabled={isUiLocked}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors flex items-center bg-slate-800" title="清除快取並重新抓取"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${historyLoading ? 'animate-spin' : ''} md:mr-1`} /><span className="hidden md:inline">重抓</span>
+                  </button>
                 </div>
               </div>
 
               {historyLoading ? (
-                 <div className="flex-1 flex items-center justify-center min-h-[400px] bg-slate-800 border border-slate-700 rounded-xl"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div>
+                <div className="flex-1 flex items-center justify-center min-h-[400px] bg-slate-800 border border-slate-700 rounded-xl"><div className="flex flex-col items-center"><Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-3" /><span className="text-blue-300">計算技術指標中...</span></div></div>
               ) : currentChartData && currentChartData.length > 0 ? (
                 <>
                   <Card className="h-[450px] md:h-[500px]" noPadding>
-                     <div className="flex justify-between items-center p-2 border-b border-slate-700 text-xs bg-slate-900/50 z-10 relative">
-                        <div className="flex gap-4 flex-wrap">
-                           <span className="bg-blue-900/50 px-2 py-0.5 border border-blue-700/50 rounded flex items-center gap-1 text-blue-200 shadow-sm">主圖指標</span>
-                           <span className="text-yellow-500 font-mono flex items-center">MA5: {currentMA5 > 0 ? currentMA5.toFixed(2) : '--'}</span>
-                           <span className="text-cyan-400 font-mono flex items-center">MA20: {currentMA20 > 0 ? currentMA20.toFixed(2) : '--'}</span>
-                           <span className="text-purple-400 font-mono flex items-center">MA60: {currentMA60 > 0 ? currentMA60.toFixed(2) : '--'}</span>
+                    <div className="flex justify-between items-center p-2 border-b border-slate-700 text-xs bg-slate-900/50 z-10 relative">
+                      <div className="flex gap-4 flex-wrap">
+                        <span className="bg-blue-900/50 px-2 py-0.5 border border-blue-700/50 rounded flex items-center gap-1 text-blue-200 shadow-sm">主圖指標</span>
+                        <span className="text-yellow-500 font-mono flex items-center">MA5: {currentMA5 > 0 ? currentMA5.toFixed(2) : '--'}</span>
+                        <span className="text-cyan-400 font-mono flex items-center">MA20: {currentMA20 > 0 ? currentMA20.toFixed(2) : '--'}</span>
+                        <span className="text-purple-400 font-mono flex items-center">MA60: {currentMA60 > 0 ? currentMA60.toFixed(2) : '--'}</span>
+                      </div>
+                      <div className="hidden md:flex text-slate-400 items-center gap-2">
+                        <span className="animate-pulse text-blue-400 opacity-70">💡 滾輪/雙指可縮放，拖曳可平移</span>
+                      </div>
+                    </div>
+                    
+                    <div className="relative flex-1 p-2 flex h-full overflow-hidden">
+                      <div className="w-28 border-r border-slate-700/50 pr-2 flex flex-col gap-1 text-[11px] font-mono shrink-0 z-10 bg-slate-800">
+                        <div className={`border-b border-slate-700 pb-1 mb-1 whitespace-nowrap text-[10px] ${safeHoverIndex !== null ? 'text-blue-400 font-bold' : 'text-slate-300'}`}>
+                          {dateStr}
                         </div>
-                        <div className="hidden md:flex text-slate-400 items-center gap-2">
-                           <span className="animate-pulse text-blue-400 opacity-70">💡 滾輪/雙指可縮放，拖曳可平移</span>
-                        </div>
-                     </div>
-                     
-                     <div className="relative flex-1 p-2 flex h-full overflow-hidden">
-                        <div className="w-28 border-r border-slate-700/50 pr-2 flex flex-col gap-1 text-[11px] font-mono shrink-0 z-10 bg-slate-800">
-                           <div className={`border-b border-slate-700 pb-1 mb-1 whitespace-nowrap text-[10px] ${safeHoverIndex !== null ? 'text-blue-400 font-bold' : 'text-slate-300'}`}>
-                              {dateStr}
-                           </div>
-                           <TextRow label="開" value={activeCandle.open.toFixed(2)} />
-                           <TextRow label="高" value={activeCandle.high.toFixed(2)} valueColor="text-red-500" />
-                           <TextRow label="低" value={activeCandle.low.toFixed(2)} valueColor="text-green-500" />
-                           <TextRow label="收" value={activeCandle.close.toFixed(2)} valueColor={activeColorClass} />
-                           <TextRow label="量" value={Math.floor((activeCandle.volume||0)/1000).toLocaleString()} valueColor="text-yellow-500" />
-                           <div className={`py-1 ${activeColorClass} border-b border-slate-700 mb-1`}>{activeSign}{Math.abs(activeChange).toFixed(2)}</div>
-                           
-                           <div className="text-slate-400 border-b border-slate-700 pb-1 mt-2 flex justify-between items-center">
-                              <span>通道/副圖</span>
-                           </div>
-                           <TextRow label="布林上" value={currentBBUpper > 0 ? currentBBUpper.toFixed(2) : '--'} valueColor="text-slate-300" />
-                           <TextRow label="布林下" value={currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'} valueColor="text-slate-300" />
-                           
-                           <div className="flex gap-1 mb-1 mt-2">
-                              <button onClick={() => setActiveSubChart('MACD')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'MACD' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>MACD</button>
-                              <button onClick={() => setActiveSubChart('KD')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'KD' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>KD</button>
-                              <button onClick={() => setActiveSubChart('RSI')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'RSI' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>RSI</button>
-                           </div>
-                           {activeSubChart === 'MACD' && (
-                              <TextRow label="MACD" value={currentMACD.toFixed(2)} valueColor={currentMACD > 0 ? "text-red-500" : "text-green-500"} />
-                           )}
-                           {activeSubChart === 'KD' && (
-                              <>
-                                 <TextRow label="K(9)" value={currentK.toFixed(1)} valueColor="text-yellow-400" />
-                                 <TextRow label="D(9)" value={currentD.toFixed(1)} valueColor="text-blue-400" />
-                              </>
-                           )}
-                           {activeSubChart === 'RSI' && (
-                              <TextRow label="RSI(14)" value={currentRSI.toFixed(1)} valueColor="text-purple-400" />
-                           )}
-                        </div>
-
-                        <div 
-                           className="flex-1 relative bg-slate-900/30 overflow-hidden cursor-crosshair ml-1 touch-none"
-                           ref={svgRef}
-                           onMouseDown={handleMouseDown}
-                           onMouseUp={handleMouseUp}
-                           onMouseLeave={handleMouseLeave}
-                           onMouseMove={handleMouseMove}
-                           onWheel={handleWheel}
-                           onTouchStart={handleTouchStart}
-                           onTouchMove={handleTouchMove}
-                           onTouchEnd={handleTouchEnd}
-                           onTouchCancel={handleTouchEnd}
-                        >
-                           <svg width="100%" height="100%" viewBox="0 0 800 520" preserveAspectRatio="none">
-                              <g stroke="#334155" strokeWidth="0.5" strokeDasharray="4 4" opacity="0.5">
-                                 <line x1="0" y1="50" x2="800" y2="50" />
-                                 <line x1="0" y1="150" x2="800" y2="150" />
-                                 <line x1="0" y1="250" x2="800" y2="250" />
-                                 
-                                 {activeSubChart === 'MACD' && <line x1="0" y1="470" x2="800" y2="470" stroke="#64748b" opacity="0.3" strokeDasharray="0"/>}
-                                 {activeSubChart === 'KD' && (
-                                    <><line x1="0" y1="440" x2="800" y2="440" stroke="#ef4444" opacity="0.5" /><line x1="0" y1="500" x2="800" y2="500" stroke="#22c55e" opacity="0.5" /></>
-                                 )}
-                                 {activeSubChart === 'RSI' && (
-                                    <><line x1="0" y1="450" x2="800" y2="450" stroke="#ef4444" opacity="0.5" /><line x1="0" y1="490" x2="800" y2="490" stroke="#22c55e" opacity="0.5" /></>
-                                 )}
-                              </g>
-
-                              {(() => {
-                                 const maxV = Math.max(...displayChartData.map(d => d.volume || 0), 1);
-                                 const mapVolH = (val) => ((val || 0) / maxV) * 70;
-
-                                 const maxMacdAbs = Math.max(
-                                    ...displayChartData.map(d => Math.abs(d.OSC || 0)), 
-                                    ...displayChartData.map(d => Math.abs(d.DIF || 0)), 
-                                    ...displayChartData.map(d => Math.abs(d.Signal || 0)), 
-                                    0.01
-                                 );
-                                 const mapMacdY = (val) => 470 - (val / maxMacdAbs) * 45; 
-
-                                 const spacing = 800 / Math.max(displayChartData.length, 1);
-                                 const barW = Math.max(1, spacing * 0.7);
-
-                                 return displayChartData.map((d, i) => {
-                                    const x = spacing * 0.5 + i * spacing;
-                                    const isUpK = d.close >= d.open;
-                                    const kColor = isUpK ? "#ef4444" : "#22c55e";
-                                    const osc = d.OSC || 0;
-                                    const oscColor = osc >= 0 ? "#ef4444" : "#22c55e";
-
-                                    return (
-                                      <g key={i}>
-                                        <line x1={x} y1={mapPriceY(d.high)} x2={x} y2={mapPriceY(d.low)} stroke={kColor} strokeWidth={barW>3?1.5:1} />
-                                        <rect x={x-barW/2} y={mapPriceY(Math.max(d.open, d.close))} width={barW} height={Math.max(1, Math.abs(mapPriceY(d.open) - mapPriceY(d.close)))} fill={kColor} />
-                                        <rect x={x-barW/2} y={400 - mapVolH(d.volume)} width={barW} height={mapVolH(d.volume)} fill={kColor} opacity="0.5" />
-                                        {activeSubChart === 'MACD' && (
-                                           <rect x={x-barW/2} y={osc >= 0 ? mapMacdY(osc) : 470} width={barW} height={Math.max(1, Math.abs(mapMacdY(osc) - 470))} fill={oscColor} opacity="0.7" />
-                                        )}
-                                      </g>
-                                    );
-                                 });
-                              })()}
-
-                              {(() => {
-                                 const maxMacdAbs = Math.max(
-                                    ...displayChartData.map(d => Math.abs(d.OSC || 0)), 
-                                    ...displayChartData.map(d => Math.abs(d.DIF || 0)), 
-                                    ...displayChartData.map(d => Math.abs(d.Signal || 0)), 
-                                    0.01
-                                 );
-                                 const mapMacdY = (val) => 470 - (val / maxMacdAbs) * 45;
-                                 const mapKdY = (val) => 520 - (val / 100) * 100;
-                                 const mapRsiY = (val) => 520 - (val / 100) * 100;
-                                 const spacing = 800 / Math.max(displayChartData.length, 1);
-                                 
-                                 const buildPath = (dataKey, mapFn) => {
-                                    let started = false;
-                                    return displayChartData.map((d, i) => {
-                                       const val = d[dataKey];
-                                       if (val === null || val === undefined || isNaN(val)) return '';
-                                       const x = spacing * 0.5 + i * spacing;
-                                       const cmd = !started ? 'M' : 'L';
-                                       started = true;
-                                       return `${cmd} ${x},${mapFn(val)}`;
-                                    }).filter(Boolean).join(' ');
-                                 };
-
-                                 return (
-                                    <g fill="none" strokeWidth="1.5">
-                                       <path d={buildPath('BBU', mapPriceY)} stroke="#8b5cf6" strokeWidth="1" strokeDasharray="3 3" opacity="0.6" />
-                                       <path d={buildPath('BBL', mapPriceY)} stroke="#8b5cf6" strokeWidth="1" strokeDasharray="3 3" opacity="0.6" />
-
-                                       <path d={buildPath('MA5', mapPriceY)} stroke="#eab308" />
-                                       <path d={buildPath('MA20', mapPriceY)} stroke="#22d3ee" />
-                                       <path d={buildPath('MA60', mapPriceY)} stroke="#c084fc" />
-                                       
-                                       {activeSubChart === 'MACD' && (
-                                          <>
-                                             <path d={buildPath('DIF', mapMacdY)} stroke="#f59e0b" strokeWidth="1" />
-                                             <path d={buildPath('Signal', mapMacdY)} stroke="#3b82f6" strokeWidth="1" />
-                                          </>
-                                       )}
-                                       {activeSubChart === 'KD' && (
-                                          <>
-                                             <path d={buildPath('K', mapKdY)} stroke="#facc15" strokeWidth="1.2" />
-                                             <path d={buildPath('D', mapKdY)} stroke="#60a5fa" strokeWidth="1.2" />
-                                          </>
-                                       )}
-                                       {activeSubChart === 'RSI' && (
-                                          <path d={buildPath('RSI14', mapRsiY)} stroke="#c084fc" strokeWidth="1.2" />
-                                       )}
-                                    </g>
-                                 );
-                              })()}
-
-                              {(() => {
-                                 const spacing = 800 / Math.max(displayChartData.length, 1);
-                                 return displayChartData.map((d, i) => {
-                                    if (!d.buyAction) return null;
-                                    const x = spacing * 0.5 + i * spacing;
-                                    const buyPrice = d.buyPricePoint || d.close;
-                                    const y = mapPriceY(buyPrice);
-                                    const strategy = d.buyAction['策略'] || 'default';
-                                    const config = STRATEGY_CONFIG[strategy] || STRATEGY_CONFIG['default'];
-                                    return (
-                                       <g key={`buy-${i}`}>
-                                          {renderShape(config.shape, x, y, config.color, 5)}
-                                       </g>
-                                    );
-                                 });
-                              })()}
-
-                              {safeHoverIndex !== null && displayChartData[safeHoverIndex] && (() => {
-                                  const spacing = 800 / Math.max(displayChartData.length, 1);
-                                  const x = spacing * 0.5 + safeHoverIndex * spacing;
-                                  const y = mapPriceY(displayChartData[safeHoverIndex].close);
-                                  return (
-                                     <g>
-                                        <line x1={x} y1="0" x2={x} y2="520" stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
-                                        <line x1="0" y1={y} x2="800" y2={y} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
-                                        <circle cx={x} cy={y} r="3" fill={displayChartData[safeHoverIndex].close >= displayChartData[safeHoverIndex].open ? "#ef4444" : "#22c55e"} />
-                                     </g>
-                                  );
-                              })()}
-                           </svg>
-                        </div>
+                        <TextRow label="開" value={activeCandle.open.toFixed(2)} />
+                        <TextRow label="高" value={activeCandle.high.toFixed(2)} valueColor="text-red-500" />
+                        <TextRow label="低" value={activeCandle.low.toFixed(2)} valueColor="text-green-500" />
+                        <TextRow label="收" value={activeCandle.close.toFixed(2)} valueColor={activeColorClass} />
+                        <TextRow label="量" value={Math.floor((activeCandle.volume||0)/1000).toLocaleString()} valueColor="text-yellow-500" />
+                        <div className={`py-1 ${activeColorClass} border-b border-slate-700 mb-1`}>{activeSign}{Math.abs(activeChange).toFixed(2)}</div>
                         
-                        <div className="w-10 border-l border-slate-700/50 pl-1 py-1 flex flex-col text-[10px] text-slate-500 font-mono relative shrink-0 bg-slate-800">
-                           {displayChartData.length > 0 && (
-                              <div className="absolute top-0 bottom-0 w-full flex flex-col py-0">
-                                 <div className="flex flex-col justify-between" style={{ height: '57.69%' }}>
-                                    <span>{paddedMax.toFixed(0)}</span>
-                                    <span>{((paddedMax+paddedMin)/2).toFixed(0)}</span>
-                                    <span>{paddedMin.toFixed(0)}</span>
-                                 </div>
-                                 <div style={{ height: '3.85%' }}></div>
-                                 <div className="flex flex-col justify-end text-yellow-500 pb-1" style={{ height: '15.38%' }}>
-                                    Vol
-                                 </div>
-                                 <div style={{ height: '3.85%' }}></div>
-                                 <div className="flex flex-col justify-between pt-1 pb-1" style={{ height: '19.23%' }}>
-                                    {activeSubChart === 'MACD' && <div className="h-full flex items-center text-blue-400">MACD</div>}
-                                    {activeSubChart === 'KD' && (
-                                       <><span className="text-yellow-400">80</span><span className="text-slate-600">KD</span><span className="text-yellow-400">20</span></>
-                                    )}
-                                    {activeSubChart === 'RSI' && (
-                                       <><span className="text-purple-400">70</span><span className="text-slate-600">RSI</span><span className="text-purple-400">30</span></>
-                                    )}
-                                 </div>
-                              </div>
-                           )}
+                        <div className="text-slate-400 border-b border-slate-700 pb-1 mt-2 flex justify-between items-center">
+                          <span>通道/副圖</span>
                         </div>
-                     </div>
+                        <TextRow label="布林上" value={currentBBUpper > 0 ? currentBBUpper.toFixed(2) : '--'} valueColor="text-slate-300" />
+                        <TextRow label="布林下" value={currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'} valueColor="text-slate-300" />
+                        
+                        <div className="flex gap-1 mb-1 mt-2">
+                          <button onClick={() => setActiveSubChart('MACD')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'MACD' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>MACD</button>
+                          <button onClick={() => setActiveSubChart('KD')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'KD' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>KD</button>
+                          <button onClick={() => setActiveSubChart('RSI')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'RSI' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>RSI</button>
+                        </div>
+                        {activeSubChart === 'MACD' && (
+                          <TextRow label="MACD" value={currentMACD.toFixed(2)} valueColor={currentMACD > 0 ? "text-red-500" : "text-green-500"} />
+                        )}
+                        {activeSubChart === 'KD' && (
+                          <>
+                            <TextRow label="K(9)" value={currentK.toFixed(1)} valueColor="text-yellow-400" />
+                            <TextRow label="D(9)" value={currentD.toFixed(1)} valueColor="text-blue-400" />
+                          </>
+                        )}
+                        {activeSubChart === 'RSI' && (
+                          <TextRow label="RSI(14)" value={currentRSI.toFixed(1)} valueColor="text-purple-400" />
+                        )}
+                      </div>
 
-                     <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 px-2 py-1.5 border-t border-slate-700/50 text-[10px] text-slate-400 bg-slate-900/50">
-                        <span className="font-semibold text-slate-300">圖例說明:</span>
-                        {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
-                           <div key={key} className="flex items-center">
-                              <svg width="14" height="14" className="mr-1 overflow-visible">{renderShape(config.shape, 7, 7, config.color, 4)}</svg>
-                              {String(config.label)}
-                           </div>
-                        ))}
-                     </div>
+                      <div 
+                        className="flex-1 relative bg-slate-900/30 overflow-hidden cursor-crosshair ml-1 touch-none"
+                        ref={svgRef}
+                        onMouseDown={handleMouseDown}
+                        onMouseUp={handleMouseUp}
+                        onMouseLeave={handleMouseLeave}
+                        onMouseMove={handleMouseMove}
+                        onWheel={handleWheel}
+                        onTouchStart={handleTouchStart}
+                        onTouchMove={handleTouchMove}
+                        onTouchEnd={handleTouchEnd}
+                        onTouchCancel={handleTouchEnd}
+                      >
+                        <svg width="100%" height="100%" viewBox="0 0 800 520" preserveAspectRatio="none">
+                          <g stroke="#334155" strokeWidth="0.5" strokeDasharray="4 4" opacity="0.5">
+                            <line x1="0" y1="50" x2="800" y2="50" />
+                            <line x1="0" y1="150" x2="800" y2="150" />
+                            <line x1="0" y1="250" x2="800" y2="250" />
+                            
+                            {activeSubChart === 'MACD' && <line x1="0" y1="470" x2="800" y2="470" stroke="#64748b" opacity="0.3" strokeDasharray="0"/>}
+                            {activeSubChart === 'KD' && (
+                              <><line x1="0" y1="440" x2="800" y2="440" stroke="#ef4444" opacity="0.5" /><line x1="0" y1="500" x2="800" y2="500" stroke="#22c55e" opacity="0.5" /></>
+                            )}
+                            {activeSubChart === 'RSI' && (
+                              <><line x1="0" y1="450" x2="800" y2="450" stroke="#ef4444" opacity="0.5" /><line x1="0" y1="490" x2="800" y2="490" stroke="#22c55e" opacity="0.5" /></>
+                            )}
+                          </g>
+
+                          {(() => {
+                            const maxV = Math.max(...displayChartData.map(d => d.volume || 0), 1);
+                            const mapVolH = (val) => ((val || 0) / maxV) * 70;
+
+                            const maxMacdAbs = Math.max(
+                              ...displayChartData.map(d => Math.abs(d.OSC || 0)), 
+                              ...displayChartData.map(d => Math.abs(d.DIF || 0)), 
+                              ...displayChartData.map(d => Math.abs(d.Signal || 0)), 
+                              0.01
+                            );
+                            const mapMacdY = (val) => 470 - (val / maxMacdAbs) * 45; 
+
+                            const spacing = 800 / Math.max(displayChartData.length, 1);
+                            const barW = Math.max(1, spacing * 0.7);
+
+                            return displayChartData.map((d, i) => {
+                              const x = spacing * 0.5 + i * spacing;
+                              const isUpK = d.close >= d.open;
+                              const kColor = isUpK ? "#ef4444" : "#22c55e";
+                              const osc = d.OSC || 0;
+                              const oscColor = osc >= 0 ? "#ef4444" : "#22c55e";
+
+                              return (
+                                <g key={i}>
+                                  <line x1={x} y1={mapPriceY(d.high)} x2={x} y2={mapPriceY(d.low)} stroke={kColor} strokeWidth={barW>3?1.5:1} />
+                                  <rect x={x-barW/2} y={mapPriceY(Math.max(d.open, d.close))} width={barW} height={Math.max(1, Math.abs(mapPriceY(d.open) - mapPriceY(d.close)))} fill={kColor} />
+                                  <rect x={x-barW/2} y={400 - mapVolH(d.volume)} width={barW} height={mapVolH(d.volume)} fill={kColor} opacity="0.5" />
+                                  {activeSubChart === 'MACD' && (
+                                    <rect x={x-barW/2} y={osc >= 0 ? mapMacdY(osc) : 470} width={barW} height={Math.max(1, Math.abs(mapMacdY(osc) - 470))} fill={oscColor} opacity="0.7" />
+                                  )}
+                                </g>
+                              );
+                            });
+                          })()}
+
+                          {(() => {
+                            const maxMacdAbs = Math.max(
+                              ...displayChartData.map(d => Math.abs(d.OSC || 0)), 
+                              ...displayChartData.map(d => Math.abs(d.DIF || 0)), 
+                              ...displayChartData.map(d => Math.abs(d.Signal || 0)), 
+                              0.01
+                            );
+                            const mapMacdY = (val) => 470 - (val / maxMacdAbs) * 45;
+                            const mapKdY = (val) => 520 - (val / 100) * 100;
+                            const mapRsiY = (val) => 520 - (val / 100) * 100;
+                            const spacing = 800 / Math.max(displayChartData.length, 1);
+                            
+                            const buildPath = (dataKey, mapFn) => {
+                              let started = false;
+                              return displayChartData.map((d, i) => {
+                                const val = d[dataKey];
+                                if (val === null || val === undefined || isNaN(val)) return '';
+                                const x = spacing * 0.5 + i * spacing;
+                                const cmd = !started ? 'M' : 'L';
+                                started = true;
+                                return `${cmd} ${x},${mapFn(val)}`;
+                              }).filter(Boolean).join(' ');
+                            };
+
+                            return (
+                              <g fill="none" strokeWidth="1.5">
+                                <path d={buildPath('BBU', mapPriceY)} stroke="#8b5cf6" strokeWidth="1" strokeDasharray="3 3" opacity="0.6" />
+                                <path d={buildPath('BBL', mapPriceY)} stroke="#8b5cf6" strokeWidth="1" strokeDasharray="3 3" opacity="0.6" />
+
+                                <path d={buildPath('MA5', mapPriceY)} stroke="#eab308" />
+                                <path d={buildPath('MA20', mapPriceY)} stroke="#22d3ee" />
+                                <path d={buildPath('MA60', mapPriceY)} stroke="#c084fc" />
+                                
+                                {activeSubChart === 'MACD' && (
+                                  <>
+                                    <path d={buildPath('DIF', mapMacdY)} stroke="#f59e0b" strokeWidth="1" />
+                                    <path d={buildPath('Signal', mapMacdY)} stroke="#3b82f6" strokeWidth="1" />
+                                  </>
+                                )}
+                                {activeSubChart === 'KD' && (
+                                  <>
+                                    <path d={buildPath('K', mapKdY)} stroke="#facc15" strokeWidth="1.2" />
+                                    <path d={buildPath('D', mapKdY)} stroke="#60a5fa" strokeWidth="1.2" />
+                                  </>
+                                )}
+                                {activeSubChart === 'RSI' && (
+                                  <path d={buildPath('RSI14', mapRsiY)} stroke="#c084fc" strokeWidth="1.2" />
+                                )}
+                              </g>
+                            );
+                          })()}
+
+                          {(() => {
+                            const spacing = 800 / Math.max(displayChartData.length, 1);
+                            return displayChartData.map((d, i) => {
+                              if (!d.buyAction) return null;
+                              const x = spacing * 0.5 + i * spacing;
+                              const buyPrice = d.buyPricePoint || d.close;
+                              const y = mapPriceY(buyPrice);
+                              const strategy = d.buyAction['策略'] || 'default';
+                              const config = STRATEGY_CONFIG[strategy] || STRATEGY_CONFIG['default'];
+                              return (
+                                <g key={`buy-${i}`}>
+                                  {renderShape(config.shape, x, y, config.color, 5)}
+                                </g>
+                              );
+                            });
+                          })()}
+
+                          {safeHoverIndex !== null && displayChartData[safeHoverIndex] && (() => {
+                              const spacing = 800 / Math.max(displayChartData.length, 1);
+                              const x = spacing * 0.5 + safeHoverIndex * spacing;
+                              const y = mapPriceY(displayChartData[safeHoverIndex].close);
+                              return (
+                                <g>
+                                  <line x1={x} y1="0" x2={x} y2="520" stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
+                                  <line x1="0" y1={y} x2="800" y2={y} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
+                                  <circle cx={x} cy={y} r="3" fill={displayChartData[safeHoverIndex].close >= displayChartData[safeHoverIndex].open ? "#ef4444" : "#22c55e"} />
+                                </g>
+                              );
+                          })()}
+                        </svg>
+                      </div>
+                      
+                      <div className="w-10 border-l border-slate-700/50 pl-1 py-1 flex flex-col text-[10px] text-slate-500 font-mono relative shrink-0 bg-slate-800">
+                        {displayChartData.length > 0 && (
+                          <div className="absolute top-0 bottom-0 w-full flex flex-col py-0">
+                            <div className="flex flex-col justify-between" style={{ height: '57.69%' }}>
+                              <span>{paddedMax.toFixed(0)}</span>
+                              <span>{((paddedMax+paddedMin)/2).toFixed(0)}</span>
+                              <span>{paddedMin.toFixed(0)}</span>
+                            </div>
+                            <div style={{ height: '3.85%' }}></div>
+                            <div className="flex flex-col justify-end text-yellow-500 pb-1" style={{ height: '15.38%' }}>
+                              Vol
+                            </div>
+                            <div style={{ height: '3.85%' }}></div>
+                            <div className="flex flex-col justify-between pt-1 pb-1" style={{ height: '19.23%' }}>
+                              {activeSubChart === 'MACD' && <div className="h-full flex items-center text-blue-400">MACD</div>}
+                              {activeSubChart === 'KD' && (
+                                <><span className="text-yellow-400">80</span><span className="text-slate-600">KD</span><span className="text-yellow-400">20</span></>
+                              )}
+                              {activeSubChart === 'RSI' && (
+                                <><span className="text-purple-400">70</span><span className="text-slate-600">RSI</span><span className="text-purple-400">30</span></>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 px-2 py-1.5 border-t border-slate-700/50 text-[10px] text-slate-400 bg-slate-900/50">
+                      <span className="font-semibold text-slate-300">圖例說明:</span>
+                      {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
+                        <div key={key} className="flex items-center">
+                          <svg width="14" height="14" className="mr-1 overflow-visible">{renderShape(config.shape, 7, 7, config.color, 4)}</svg>
+                          {String(config.label)}
+                        </div>
+                      ))}
+                    </div>
                   </Card>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-2">
-                     <Card title="動態技術分析">
-                        <div className="flex flex-col gap-1.5 mt-1">
-                           <TextRow label="布林軌道" value={bbStatus} valueColor={bbColor} />
-                           <TextRow label="多空排列" value={stockPrice > currentMA20 ? "站上月線" : "跌破月線"} valueColor={stockPrice > currentMA20 ? "text-red-500" : "text-green-500"} />
-                           <TextRow label="月線乖離" value={`${bias20.toFixed(2)}%`} valueColor={Math.abs(bias20) > 8 ? "text-yellow-400" : "text-white"} />
-                           <TextRow label="KD 狀態" value={currentK > 80 ? "高檔鈍化" : currentK < 20 ? "低檔超跌" : "中性區間"} valueColor={currentK > 80 ? "text-red-400" : currentK < 20 ? "text-green-400" : "text-white"} />
+                    <Card title="動態技術分析">
+                      <div className="flex flex-col gap-1.5 mt-1">
+                        <TextRow label="布林軌道" value={bbStatus} valueColor={bbColor} />
+                        <TextRow label="多空排列" value={stockPrice > currentMA20 ? "站上月線" : "跌破月線"} valueColor={stockPrice > currentMA20 ? "text-red-500" : "text-green-500"} />
+                        <TextRow label="月線乖離" value={`${bias20.toFixed(2)}%`} valueColor={Math.abs(bias20) > 8 ? "text-yellow-400" : "text-white"} />
+                        <TextRow label="KD 狀態" value={currentK > 80 ? "高檔鈍化" : currentK < 20 ? "低檔超跌" : "中性區間"} valueColor={currentK > 80 ? "text-red-400" : currentK < 20 ? "text-green-400" : "text-white"} />
+                      </div>
+                    </Card>
+                    <Card title="籌碼動態模擬">
+                      <div className="flex flex-col gap-1.5 mt-1">
+                        <TextRow label="當前力道" value={activeChangePercent > 0 ? "買盤轉強" : "賣壓湧現"} valueColor={activeColorClass} />
+                        <TextRow label="量能狀態" value={isVolUp ? "爆量攻擊" : "量縮整理"} valueColor={isVolUp ? "text-yellow-400" : "text-slate-400"} />
+                        <TextRow label="RSI 強弱" value={currentRSI > 70 ? "強勢區" : currentRSI < 30 ? "弱勢區" : "整理區"} valueColor={currentRSI > 70 ? "text-red-400" : currentRSI < 30 ? "text-green-400" : "text-white"} />
+                      </div>
+                    </Card>
+                    <Card title="關鍵參考價位 (動態計算)" className="md:col-span-2">
+                      <div className="flex flex-col gap-2 mt-2 px-2">
+                        <div className="bg-red-900/20 border border-red-500/30 p-2 rounded flex justify-between items-center">
+                          <span className="text-xs text-red-400 font-bold">上檔壓力 (布林上軌)</span>
+                          <span className="text-lg font-mono text-white">{currentBBUpper > 0 ? currentBBUpper.toFixed(2) : '--'}</span>
                         </div>
-                     </Card>
-                     <Card title="籌碼動態模擬">
-                        <div className="flex flex-col gap-1.5 mt-1">
-                           <TextRow label="當前力道" value={activeChangePercent > 0 ? "買盤轉強" : "賣壓湧現"} valueColor={activeColorClass} />
-                           <TextRow label="量能狀態" value={isVolUp ? "爆量攻擊" : "量縮整理"} valueColor={isVolUp ? "text-yellow-400" : "text-slate-400"} />
-                           <TextRow label="RSI 強弱" value={currentRSI > 70 ? "強勢區" : currentRSI < 30 ? "弱勢區" : "整理區"} valueColor={currentRSI > 70 ? "text-red-400" : currentRSI < 30 ? "text-green-400" : "text-white"} />
+                        <div className="bg-green-900/20 border border-green-500/30 p-2 rounded flex justify-between items-center mt-2">
+                          <span className="text-xs text-green-400 font-bold">下檔支撐 (布林下軌)</span>
+                          <span className="text-lg font-mono text-white">{currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'}</span>
                         </div>
-                     </Card>
-                     <Card title="關鍵參考價位 (動態計算)" className="md:col-span-2">
-                        <div className="flex flex-col gap-2 mt-2 px-2">
-                           <div className="bg-red-900/20 border border-red-500/30 p-2 rounded flex justify-between items-center">
-                              <span className="text-xs text-red-400 font-bold">上檔壓力 (布林上軌)</span>
-                              <span className="text-lg font-mono text-white">{currentBBUpper > 0 ? currentBBUpper.toFixed(2) : '--'}</span>
-                           </div>
-                           <div className="bg-green-900/20 border border-green-500/30 p-2 rounded flex justify-between items-center mt-2">
-                              <span className="text-xs text-green-400 font-bold">下檔支撐 (布林下軌)</span>
-                              <span className="text-lg font-mono text-white">{currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'}</span>
-                           </div>
-                        </div>
-                     </Card>
+                      </div>
+                    </Card>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 mt-2">
-                     <Card title="主力出貨警示" className="items-center justify-center py-2 lg:col-span-2">
-                        <div className="flex justify-around w-full px-4 mb-3 mt-1">
-                           <div className="flex flex-col items-center gap-1">
-                              <span className="text-[10px] text-slate-400">主力動向</span>
-                              <IndicatorDot color={extRatio > 55 ? "red" : extRatio < 45 ? "green" : "yellow"} />
-                           </div>
-                           <div className="flex flex-col items-center gap-1">
-                              <span className="text-[10px] text-slate-400">量價穩定度</span>
-                              <IndicatorDot color={isVolUp && !isRedK ? "green" : isVolUp && isRedK ? "red" : "yellow"} />
-                           </div>
-                           <div className="flex flex-col items-center gap-1">
-                              <span className="text-[10px] text-slate-400">乖離警示</span>
-                              <IndicatorDot color={bias20 > 8 ? "green" : bias20 < -8 ? "red" : "yellow"} />
-                           </div>
+                    <Card title="主力出貨警示" className="items-center justify-center py-2 lg:col-span-2">
+                      <div className="flex justify-around w-full px-4 mb-3 mt-1">
+                        <div className="flex flex-col items-center gap-1">
+                          <span className="text-[10px] text-slate-400">主力動向</span>
+                          <IndicatorDot color={extRatio > 55 ? "red" : extRatio < 45 ? "green" : "yellow"} />
                         </div>
-                        <div className="flex items-center gap-2 mt-1">
-                           <span className={`bg-slate-900/80 px-2 py-0.5 text-xs rounded border ${extRatio > 55 ? 'text-red-400 border-red-500/50' : extRatio < 45 ? 'text-green-400 border-green-500/50' : 'text-yellow-400 border-yellow-500/50'}`}>
-                             {extRatio > 55 ? "偏多" : extRatio < 45 ? "偏空" : "中性"}
-                           </span>
-                           <span className="text-xs text-slate-400 truncate">依內外盤與乖離綜合判定</span>
+                        <div className="flex flex-col items-center gap-1">
+                          <span className="text-[10px] text-slate-400">量價穩定度</span>
+                          <IndicatorDot color={isVolUp && !isRedK ? "green" : isVolUp && isRedK ? "red" : "yellow"} />
                         </div>
-                     </Card>
+                        <div className="flex flex-col items-center gap-1">
+                          <span className="text-[10px] text-slate-400">乖離警示</span>
+                          <IndicatorDot color={bias20 > 8 ? "green" : bias20 < -8 ? "red" : "yellow"} />
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className={`bg-slate-900/80 px-2 py-0.5 text-xs rounded border ${extRatio > 55 ? 'text-red-400 border-red-500/50' : extRatio < 45 ? 'text-green-400 border-green-500/50' : 'text-yellow-400 border-yellow-500/50'}`}>
+                          {extRatio > 55 ? "偏多" : extRatio < 45 ? "偏空" : "中性"}
+                        </span>
+                        <span className="text-xs text-slate-400 truncate">依內外盤與乖離綜合判定</span>
+                      </div>
+                    </Card>
 
-                     <Card title="短線勝率 (近10日)" className="items-center justify-center relative overflow-hidden">
-                        <div className="w-24 h-12 relative mt-3">
-                           <svg viewBox="0 0 100 50" className="w-full h-full overflow-visible">
-                               <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="#334155" strokeWidth="12" strokeLinecap="round" />
-                               <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="url(#grad)" strokeWidth="12" strokeLinecap="round" pathLength="100" strokeDasharray="100" strokeDashoffset={100 - winRate} className="transition-all duration-1000 ease-out" />
-                               <defs>
-                                  <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="0%">
-                                    <stop offset="0%" stopColor="#22c55e" />
-                                    <stop offset="50%" stopColor="#eab308" />
-                                    <stop offset="100%" stopColor="#ef4444" />
-                                  </linearGradient>
-                               </defs>
-                            </svg>
-                            <div className="absolute bottom-0 left-0 right-0 text-center flex flex-col">
-                               <span className="text-xl font-bold text-white">{winRate}%</span>
-                            </div>
-                         </div>
-                         <div className="flex justify-between w-full px-6 text-[10px] text-slate-500 mt-2">
-                            <span>低</span>
-                            <span className="text-yellow-400">紅K佔比</span>
-                            <span>高</span>
-                         </div>
-                      </Card>
+                    <Card title="短線勝率 (近10日)" className="items-center justify-center relative overflow-hidden">
+                      <div className="w-24 h-12 relative mt-3">
+                        <svg viewBox="0 0 100 50" className="w-full h-full overflow-visible">
+                          <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="#334155" strokeWidth="12" strokeLinecap="round" />
+                          <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="url(#grad)" strokeWidth="12" strokeLinecap="round" pathLength="100" strokeDasharray="100" strokeDashoffset={100 - winRate} className="transition-all duration-1000 ease-out" />
+                          <defs>
+                            <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="0%">
+                              <stop offset="0%" stopColor="#22c55e" />
+                              <stop offset="50%" stopColor="#eab308" />
+                              <stop offset="100%" stopColor="#ef4444" />
+                            </linearGradient>
+                          </defs>
+                        </svg>
+                        <div className="absolute bottom-0 left-0 right-0 text-center flex flex-col">
+                          <span className="text-xl font-bold text-white">{winRate}%</span>
+                        </div>
+                      </div>
+                      <div className="flex justify-between w-full px-6 text-[10px] text-slate-500 mt-2">
+                        <span>低</span>
+                        <span className="text-yellow-400">紅K佔比</span>
+                        <span>高</span>
+                      </div>
+                    </Card>
 
-                      <Card title="內外盤氣勢分析" className="lg:col-span-2">
-                         <div className="flex flex-col gap-2 mt-2 px-2">
-                            <div className="flex justify-between text-sm">
-                               <span className="text-slate-400">內盤 (賣)</span>
-                               <span className="text-green-500 font-mono">{intRatio}%</span>
-                            </div>
-                            <div className="flex justify-between text-sm">
-                               <span className="text-slate-400">外盤 (買)</span>
-                               <span className="text-red-500 font-mono">{extRatio}%</span>
-                            </div>
-                            <div className="h-2.5 w-full flex bg-slate-700 rounded-full mt-1 overflow-hidden">
-                               <div className="h-full bg-green-500 transition-all duration-500" style={{ width: `${intRatio}%` }}></div>
-                               <div className="h-full bg-red-500 transition-all duration-500" style={{ width: `${extRatio}%` }}></div>
-                            </div>
-                            <div className="text-center text-xs text-slate-400 mt-1.5">
-                               {extRatio > intRatio ? "買盤氣勢較強" : extRatio < intRatio ? "賣壓較為沉重" : "勢均力敵"}
-                            </div>
-                         </div>
-                      </Card>
+                    <Card title="內外盤氣勢分析" className="lg:col-span-2">
+                      <div className="flex flex-col gap-2 mt-2 px-2">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-slate-400">內盤 (賣)</span>
+                          <span className="text-green-500 font-mono">{intRatio}%</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-slate-400">外盤 (買)</span>
+                          <span className="text-red-500 font-mono">{extRatio}%</span>
+                        </div>
+                        <div className="h-2.5 w-full flex bg-slate-700 rounded-full mt-1 overflow-hidden">
+                          <div className="h-full bg-green-500 transition-all duration-500" style={{ width: `${intRatio}%` }}></div>
+                          <div className="h-full bg-red-500 transition-all duration-500" style={{ width: `${extRatio}%` }}></div>
+                        </div>
+                        <div className="text-center text-xs text-slate-400 mt-1.5">
+                          {extRatio > intRatio ? "買盤氣勢較強" : extRatio < intRatio ? "賣壓較為沉重" : "勢均力敵"}
+                        </div>
+                      </div>
+                    </Card>
                   </div>
 
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-2">
-                     <Card title="今日 K 線型態辨識">
-                        <div className="grid grid-cols-[1fr_auto_2fr] gap-x-2 gap-y-2.5 text-[11px] md:text-xs mt-2 px-2">
-                           <span className="text-slate-400">型態</span>
-                           <span className="text-slate-400">狀態</span>
-                           <span className="text-slate-400">說明</span>
+                    <Card title="今日 K 線型態辨識">
+                      <div className="grid grid-cols-[1fr_auto_2fr] gap-x-2 gap-y-2.5 text-[11px] md:text-xs mt-2 px-2">
+                        <span className="text-slate-400">型態</span>
+                        <span className="text-slate-400">狀態</span>
+                        <span className="text-slate-400">說明</span>
 
-                           <span className="text-white">紅黑K</span>
-                           <span className={isRedK ? "text-red-500" : "text-green-500"}>{isRedK ? "收紅" : "收黑"}</span>
-                           <span className="text-slate-400 truncate">目前收盤價關係</span>
+                        <span className="text-white">紅黑K</span>
+                        <span className={isRedK ? "text-red-500" : "text-green-500"}>{isRedK ? "收紅" : "收黑"}</span>
+                        <span className="text-slate-400 truncate">目前收盤價關係</span>
 
-                           <span className="text-white">長實體K</span>
-                           <span className={isLongRed || isLongBlack ? "text-yellow-400" : "text-slate-500"}>{isLongRed || isLongBlack ? "成立" : "未成"}</span>
-                           <span className="text-slate-400 truncate">實體大於3%</span>
+                        <span className="text-white">長實體K</span>
+                        <span className={isLongRed || isLongBlack ? "text-yellow-400" : "text-slate-500"}>{isLongRed || isLongBlack ? "成立" : "未成"}</span>
+                        <span className="text-slate-400 truncate">實體大於3%</span>
 
-                           <span className="text-white">帶上影線</span>
-                           <span className={hasUpperShadow ? "text-yellow-400" : "text-slate-500"}>{hasUpperShadow ? "成立" : "未成"}</span>
-                           <span className="text-slate-400 truncate">上影線&gt;實體2倍</span>
+                        <span className="text-white">帶上影線</span>
+                        <span className={hasUpperShadow ? "text-yellow-400" : "text-slate-500"}>{hasUpperShadow ? "成立" : "未成"}</span>
+                        <span className="text-slate-400 truncate">上影線&gt;實體2倍</span>
 
-                           <span className="text-white">帶下影線</span>
-                           <span className={hasLowerShadow ? "text-yellow-400" : "text-slate-500"}>{hasLowerShadow ? "成立" : "未成"}</span>
-                           <span className="text-slate-400 truncate">下影線&gt;實體2倍</span>
+                        <span className="text-white">帶下影線</span>
+                        <span className={hasLowerShadow ? "text-yellow-400" : "text-slate-500"}>{hasLowerShadow ? "成立" : "未成"}</span>
+                        <span className="text-slate-400 truncate">下影線&gt;實體2倍</span>
+                      </div>
+                    </Card>
+
+                    <Card title="動態操作劇本 (以現價推算)" className="lg:col-span-2">
+                      <div className="grid grid-cols-3 gap-2 h-full">
+                        <div className="border border-red-500/30 bg-red-900/10 rounded flex flex-col">
+                          <div className="text-center text-[10px] md:text-xs font-bold text-red-500 py-1.5 border-b border-red-500/30 bg-red-900/20">
+                            ① 強勢突破腳本
+                          </div>
+                          <div className="flex-1 p-2 flex flex-col justify-around text-[10px] md:text-xs">
+                            <div className="flex justify-between"><span className="text-slate-400">進場</span><span className="font-mono text-white">{(stockPrice * 1.01).toFixed(2)}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-400">停損</span><span className="font-mono text-green-400">{(stockPrice * 0.98).toFixed(2)}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-400">目標</span><span className="font-mono text-red-400">{(stockPrice * 1.05).toFixed(2)}</span></div>
+                          </div>
                         </div>
-                     </Card>
 
-                     <Card title="動態操作劇本 (以現價推算)" className="lg:col-span-2">
-                        <div className="grid grid-cols-3 gap-2 h-full">
-                           <div className="border border-red-500/30 bg-red-900/10 rounded flex flex-col">
-                              <div className="text-center text-[10px] md:text-xs font-bold text-red-500 py-1.5 border-b border-red-500/30 bg-red-900/20">
-                                 ① 強勢突破腳本
-                              </div>
-                              <div className="flex-1 p-2 flex flex-col justify-around text-[10px] md:text-xs">
-                                 <div className="flex justify-between"><span className="text-slate-400">進場</span><span className="font-mono text-white">{(stockPrice * 1.01).toFixed(2)}</span></div>
-                                 <div className="flex justify-between"><span className="text-slate-400">停損</span><span className="font-mono text-green-400">{(stockPrice * 0.98).toFixed(2)}</span></div>
-                                 <div className="flex justify-between"><span className="text-slate-400">目標</span><span className="font-mono text-red-400">{(stockPrice * 1.05).toFixed(2)}</span></div>
-                              </div>
-                           </div>
-
-                           <div className="border border-yellow-500/30 bg-yellow-900/10 rounded flex flex-col">
-                              <div className="text-center text-[10px] md:text-xs font-bold text-yellow-500 py-1.5 border-b border-yellow-500/30 bg-yellow-900/20">
-                                 ② 區間震盪腳本
-                              </div>
-                              <div className="flex-1 p-2 flex flex-col justify-around text-[10px] md:text-xs">
-                                 <div className="flex justify-between"><span className="text-slate-400">進場</span><span className="font-mono text-white">{(stockPrice * 0.98).toFixed(2)}</span></div>
-                                 <div className="flex justify-between"><span className="text-slate-400">停損</span><span className="font-mono text-green-400">{(stockPrice * 0.95).toFixed(2)}</span></div>
-                                 <div className="flex justify-between"><span className="text-slate-400">目標</span><span className="font-mono text-red-400">{(stockPrice * 1.02).toFixed(2)}</span></div>
-                              </div>
-                           </div>
-
-                           <div className="border border-green-500/30 bg-green-900/10 rounded flex flex-col">
-                              <div className="text-center text-[10px] md:text-xs font-bold text-green-500 py-1.5 border-b border-green-500/30 bg-green-900/20">
-                                 ③ 弱勢回測腳本
-                              </div>
-                              <div className="flex-1 p-2 flex flex-col justify-around text-[10px] md:text-xs">
-                                 <div className="flex justify-between"><span className="text-slate-400">進場</span><span className="font-mono text-white">{(stockPrice * 0.93).toFixed(2)}</span></div>
-                                 <div className="flex justify-between"><span className="text-slate-400">停損</span><span className="font-mono text-green-400">{(stockPrice * 0.90).toFixed(2)}</span></div>
-                                 <div className="flex justify-between"><span className="text-slate-400">目標</span><span className="font-mono text-red-400">{(stockPrice * 0.97).toFixed(2)}</span></div>
-                              </div>
-                           </div>
+                        <div className="border border-yellow-500/30 bg-yellow-900/10 rounded flex flex-col">
+                          <div className="text-center text-[10px] md:text-xs font-bold text-yellow-500 py-1.5 border-b border-yellow-500/30 bg-yellow-900/20">
+                            ② 區間震盪腳本
+                          </div>
+                          <div className="flex-1 p-2 flex flex-col justify-around text-[10px] md:text-xs">
+                            <div className="flex justify-between"><span className="text-slate-400">進場</span><span className="font-mono text-white">{(stockPrice * 0.98).toFixed(2)}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-400">停損</span><span className="font-mono text-green-400">{(stockPrice * 0.95).toFixed(2)}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-400">目標</span><span className="font-mono text-red-400">{(stockPrice * 1.02).toFixed(2)}</span></div>
+                          </div>
                         </div>
-                     </Card>
+
+                        <div className="border border-green-500/30 bg-green-900/10 rounded flex flex-col">
+                          <div className="text-center text-[10px] md:text-xs font-bold text-green-500 py-1.5 border-b border-green-500/30 bg-green-900/20">
+                            ③ 弱勢回測腳本
+                          </div>
+                          <div className="flex-1 p-2 flex flex-col justify-around text-[10px] md:text-xs">
+                            <div className="flex justify-between"><span className="text-slate-400">進場</span><span className="font-mono text-white">{(stockPrice * 0.93).toFixed(2)}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-400">停損</span><span className="font-mono text-green-400">{(stockPrice * 0.90).toFixed(2)}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-400">目標</span><span className="font-mono text-red-400">{(stockPrice * 0.97).toFixed(2)}</span></div>
+                          </div>
+                        </div>
+                      </div>
+                    </Card>
                   </div>
 
                   <div className="flex flex-col mt-4 relative z-10 bg-slate-800 rounded-xl border border-slate-700 shadow-lg p-4">
                     <div className="flex-none flex items-center justify-between mb-4 flex-wrap gap-2">
-                        <div className="flex items-center flex-wrap gap-2">
-                            <Sparkles className="w-5 h-5 text-purple-400 mr-2 flex-none" />
-                            <h4 className="text-white font-semibold">AI 智能分析與決策</h4>
-                            {usedModel === '雲端自動排程' ? (
-                              <span className="ml-2 text-xs px-2 py-0.5 rounded bg-blue-900/50 text-blue-300 border border-blue-600 shadow-sm">
-                                ☁️ 雲端表單報告 ({cloudReportTime})
-                              </span>
-                            ) : usedModel && (
-                              <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">
-                                {String(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} 
-                                {isCachedResult ? <span className="text-slate-500"> (已快取/同步)</span> : <span className="text-green-400"> (本次生成並同步)</span>}
-                              </span>
+                      <div className="flex items-center flex-wrap gap-2">
+                        <Sparkles className="w-5 h-5 text-purple-400 mr-2 flex-none" />
+                        <h4 className="text-white font-semibold">AI 智能分析與決策</h4>
+                        {usedModel === '雲端自動排程' ? (
+                          <span className="ml-2 text-xs px-2 py-0.5 rounded bg-blue-900/50 text-blue-300 border border-blue-600 shadow-sm">
+                            ☁️ 雲端表單報告 ({cloudReportTime})
+                          </span>
+                        ) : usedModel && (
+                          <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 border border-slate-600">
+                            {String(AVAILABLE_MODELS.find(m => m.id === usedModel)?.name || usedModel)} 
+                            {isCachedResult ? <span className="text-slate-500"> (已快取/同步)</span> : <span className="text-green-400"> (本次生成並同步)</span>}
+                          </span>
+                        )}
+                        {aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center lg:ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
+                        {aiSignals[selectedHistorySymbol] === 'ADD_ALL' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
+                        {aiSignals[selectedHistorySymbol] === 'ADD_BASIC' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎投資</span></div>)}
+                        {aiSignals[selectedHistorySymbol] === 'ADD_BONUS' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼投資</span></div>)}
+                        {aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center lg:ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}
+                      </div>
+                      <div className="flex gap-2 flex-wrap">
+                        {isAiSummarizing && (
+                          <button onClick={() => { if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort(); }} className="text-[10px] md:text-xs bg-red-900/50 hover:bg-red-900/80 text-red-200 border border-red-500/50 px-2 md:px-3 py-1.5 rounded flex items-center transition-colors shadow-sm">
+                            <XCircle className="w-3 h-3 mr-1" />中斷分析
+                          </button>
+                        )}
+                        {!isAiSummarizing && (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <select 
+                              value={aiAnalysisType} 
+                              onChange={(e) => setAiAnalysisType(e.target.value)} 
+                              className="text-[10px] md:text-xs bg-slate-900 border border-slate-600 text-slate-300 rounded px-2 py-1.5 outline-none focus:border-blue-500 max-w-[150px] md:max-w-xs"
+                            >
+                              <option value="DEFAULT">綜合趨勢分析 (預設)</option>
+                              <option value="STRATEGY_BACKTEST">回測交易策略</option>
+                            </select>
+                            <button 
+                              onClick={() => {
+                                console.log("[UI] Triggering Re-analyze for:", selectedHistorySymbol);
+                                const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; 
+                                if (data && data.length > 0) { 
+                                  generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose, aiAnalysisType); 
+                                } else { 
+                                  setToast('無圖表資料，將重新抓取...');
+                                  fetchHistoricalData(selectedHistorySymbol, timeframe).then(() => {
+                                      const newData = historicalData[`${selectedHistorySymbol}_${timeframe}`];
+                                      if (newData && newData.length > 0) {
+                                          generateFullAnalysis(selectedHistorySymbol, newData, true, etfExtraData[selectedHistorySymbol]?.prevClose, aiAnalysisType);
+                                      }
+                                  });
+                                } 
+                              }} 
+                              className="text-[10px] md:text-xs flex items-center transition-colors text-blue-300 hover:text-white bg-blue-600/40 hover:bg-blue-600 border border-blue-500/50 px-2.5 md:px-3 py-1.5 rounded shadow-sm font-medium"
+                            >
+                              <RefreshCw className="w-3 h-3 mr-1" />
+                              {isCachedResult || aiDetail || usedModel === '雲端自動排程' ? '重新分析並同步' : '開始 AI 分析'}
+                            </button>
+                            <button
+                              onClick={async () => {
+                                setToast('☁️ 正在從 Google 表單重新讀取 AI 分析報告...');
+                                localStorage.removeItem('gemini_analysis_cache');
+                                await fetchCloudReports(sheetUrl, reportSheetUrl, gasWebAppUrl);
+                                applyExistingReportForSymbol(selectedHistorySymbol);
+                              }}
+                              className="text-[10px] md:text-xs flex items-center transition-colors text-cyan-300 hover:text-white bg-cyan-900/40 hover:bg-cyan-700 border border-cyan-500/40 px-2.5 py-1.5 rounded shadow-sm"
+                              title="強制從 Google 表單重新抓取最新 AI_分析報告"
+                            >
+                              <Database className="w-3 h-3 mr-1" />
+                              讀取表單報告
+                            </button>
+                            {aiDetail && (
+                              <button
+                                onClick={() => {
+                                  const assetInfo = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol);
+                                  syncReportToSheet(
+                                    selectedHistorySymbol,
+                                    assetInfo?.['名稱'] || selectedHistorySymbol,
+                                    aiSignals[selectedHistorySymbol] || 'HOLD',
+                                    aiSummary,
+                                    aiDetail
+                                  );
+                                }}
+                                disabled={isSyncingCloud}
+                                className="text-[10px] md:text-xs flex items-center transition-colors text-emerald-300 hover:text-white bg-emerald-900/40 hover:bg-emerald-700 border border-emerald-500/40 px-2.5 py-1.5 rounded shadow-sm disabled:opacity-50"
+                                title="將目前顯示的分析報告同步寫入 Google 表單供下次使用"
+                              >
+                                {isSyncingCloud ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Cloud className="w-3 h-3 mr-1" />}
+                                同步至表單
+                              </button>
                             )}
-                            {aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center lg:ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
-                            {aiSignals[selectedHistorySymbol] === 'ADD_ALL' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
-                            {aiSignals[selectedHistorySymbol] === 'ADD_BASIC' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎投資</span></div>)}
-                            {aiSignals[selectedHistorySymbol] === 'ADD_BONUS' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼投資</span></div>)}
-                            {aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center lg:ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}
-                        </div>
-                        <div className="flex gap-2 flex-wrap">
-                            {isAiSummarizing && (
-                                <button onClick={() => { if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort(); }} className="text-[10px] md:text-xs bg-red-900/50 hover:bg-red-900/80 text-red-200 border border-red-500/50 px-2 md:px-3 py-1.5 rounded flex items-center transition-colors shadow-sm">
-                                    <XCircle className="w-3 h-3 mr-1" />中斷分析
-                                </button>
-                            )}
-                            {!isAiSummarizing && (
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <select 
-                                    value={aiAnalysisType} 
-                                    onChange={(e) => setAiAnalysisType(e.target.value)} 
-                                    className="text-[10px] md:text-xs bg-slate-900 border border-slate-600 text-slate-300 rounded px-2 py-1.5 outline-none focus:border-blue-500 max-w-[150px] md:max-w-xs"
-                                  >
-                                    <option value="DEFAULT">綜合趨勢分析 (預設)</option>
-                                    <option value="STRATEGY_BACKTEST">回測交易策略</option>
-                                  </select>
-                                  <button 
-                                    onClick={() => { 
-                                      const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; 
-                                      if (data && data.length > 0) { 
-                                        generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose, aiAnalysisType); 
-                                      } else { 
-                                        fetchHistoricalData(selectedHistorySymbol, timeframe); 
-                                      } 
-                                    }} 
-                                    className="text-[10px] md:text-xs flex items-center transition-colors text-blue-300 hover:text-white bg-blue-600/40 hover:bg-blue-600 border border-blue-500/50 px-2.5 md:px-3 py-1.5 rounded shadow-sm font-medium"
-                                  >
-                                    <RefreshCw className="w-3 h-3 mr-1" />
-                                    {isCachedResult || aiDetail || usedModel === '雲端自動排程' ? '重新分析並同步' : '開始 AI 分析'}
-                                  </button>
-                                  <button
-                                    onClick={async () => {
-                                      setToast('☁️ 正在從 Google 表單重新讀取 AI 分析報告...');
-                                      localStorage.removeItem('gemini_analysis_cache');
-                                      await fetchCloudReports(sheetUrl, reportSheetUrl, gasWebAppUrl);
-                                      applyExistingReportForSymbol(selectedHistorySymbol);
-                                    }}
-                                    className="text-[10px] md:text-xs flex items-center transition-colors text-cyan-300 hover:text-white bg-cyan-900/40 hover:bg-cyan-700 border border-cyan-500/40 px-2.5 py-1.5 rounded shadow-sm"
-                                    title="強制從 Google 表單重新抓取最新 AI_分析報告"
-                                  >
-                                    <Database className="w-3 h-3 mr-1" />
-                                    讀取表單報告
-                                  </button>
-                                  {aiDetail && (
-                                    <button
-                                      onClick={() => {
-                                        const assetInfo = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol);
-                                        syncReportToSheet(
-                                          selectedHistorySymbol,
-                                          assetInfo?.['名稱'] || selectedHistorySymbol,
-                                          aiSignals[selectedHistorySymbol] || 'HOLD',
-                                          aiSummary,
-                                          aiDetail
-                                        );
-                                      }}
-                                      disabled={isSyncingCloud}
-                                      className="text-[10px] md:text-xs flex items-center transition-colors text-emerald-300 hover:text-white bg-emerald-900/40 hover:bg-emerald-700 border border-emerald-500/40 px-2.5 py-1.5 rounded shadow-sm disabled:opacity-50"
-                                      title="將目前顯示的分析報告同步寫入 Google 表單供下次使用"
-                                    >
-                                      {isSyncingCloud ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Cloud className="w-3 h-3 mr-1" />}
-                                      同步至表單
-                                    </button>
-                                  )}
-                                </div>
-                            )}
-                        </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                     <div className="bg-slate-900/50 rounded-lg p-4 md:p-5 border border-slate-700 shadow-inner min-h-[100px]">
                       {isAiSummarizing ? (
@@ -2715,15 +2609,15 @@ ${signalRules}
                         )}
 
                         <div className="mt-3 bg-slate-700/50 p-2 rounded-lg space-y-2">
-                            <div className="flex items-center justify-between"><span className="text-xs text-slate-400">定位</span><select value={classification} onChange={(e) => handleSettingChange(row['標的'], 'type', e.target.value)} className={`text-xs px-2 py-0.5 rounded border focus:outline-none cursor-pointer bg-slate-800 ${ASSET_TYPES[classification].color} ${ASSET_TYPES[classification].border}`} onClick={(e) => e.stopPropagation()}><option value="CORE">核心</option><option value="SATELLITE">衛星</option></select></div>
-                            <div className="flex items-center justify-between"><span className="text-xs text-slate-400 flex items-center"><Repeat className="w-3 h-3 mr-1" />定期定額</span><button onClick={(e) => { e.stopPropagation(); handleSettingChange(row['標的'], 'isDCA', !isDCA); }} className={`w-8 h-4 rounded-full transition-colors relative ${isDCA ? 'bg-green-500' : 'bg-slate-600'}`}><div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${isDCA ? 'translate-x-4' : 'translate-x-0'}`} /></button></div>
-                            {row['類別'] !== '定存' && (
-                              <div className="flex items-center justify-between"><span className="text-xs text-slate-400 flex items-center"><Bot className="w-3 h-3 mr-1 text-purple-400" />自動分析</span><button onClick={(e) => { e.stopPropagation(); handleSettingChange(row['標的'], 'autoAnalyze', !autoAnalyze); }} className={`w-8 h-4 rounded-full transition-colors relative ${autoAnalyze ? 'bg-purple-500' : 'bg-slate-600'}`}><div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${autoAnalyze ? 'translate-x-4' : 'translate-x-0'}`} /></button></div>
-                            )}
-                            <div className="flex flex-col space-y-1 mt-1 border-t border-slate-600/50 pt-1">
-                                <div className="flex items-center justify-between"><span className="text-[10px] text-slate-400 flex items-center"><Crosshair className="w-3 h-3 mr-1 text-blue-400" />加碼 1</span><select value={addonLogic} onChange={(e) => handleSettingChange(row['標的'], 'addon', e.target.value)} className="text-[10px] px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-300 focus:outline-none max-w-[100px]" onClick={(e) => e.stopPropagation()}><option value="NONE">無</option><option value="PYRAMID">跌幅金字塔</option><option value="TECHNICAL">技術指標</option><option value="YIELD_MACRO">殖利率/總經</option></select></div>
-                                <div className="flex items-center justify-between"><span className="text-[10px] text-slate-400 flex items-center"><PlusCircle className="w-3 h-3 mr-1 opacity-50" />加碼 2</span><select value={addon2Logic} onChange={(e) => handleSettingChange(row['標的'], 'addon2', e.target.value)} className="text-[10px] px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-300 focus:outline-none max-w-[100px]" onClick={(e) => e.stopPropagation()}><option value="NONE">無 (None)</option><option value="PYRAMID">跌幅金字塔</option><option value="TECHNICAL">技術指標</option><option value="YIELD_MACRO">殖利率/總經</option></select></div>
-                            </div>
+                          <div className="flex items-center justify-between"><span className="text-xs text-slate-400">定位</span><select value={classification} onChange={(e) => handleSettingChange(row['標的'], 'type', e.target.value)} className={`text-xs px-2 py-0.5 rounded border focus:outline-none cursor-pointer bg-slate-800 ${ASSET_TYPES[classification].color} ${ASSET_TYPES[classification].border}`} onClick={(e) => e.stopPropagation()}><option value="CORE">核心</option><option value="SATELLITE">衛星</option></select></div>
+                          <div className="flex items-center justify-between"><span className="text-xs text-slate-400 flex items-center"><Repeat className="w-3 h-3 mr-1" />定期定額</span><button onClick={(e) => { e.stopPropagation(); handleSettingChange(row['標的'], 'isDCA', !isDCA); }} className={`w-8 h-4 rounded-full transition-colors relative ${isDCA ? 'bg-green-500' : 'bg-slate-600'}`}><div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${isDCA ? 'translate-x-4' : 'translate-x-0'}`} /></button></div>
+                          {row['類別'] !== '定存' && (
+                            <div className="flex items-center justify-between"><span className="text-xs text-slate-400 flex items-center"><Bot className="w-3 h-3 mr-1 text-purple-400" />自動分析</span><button onClick={(e) => { e.stopPropagation(); handleSettingChange(row['標的'], 'autoAnalyze', !autoAnalyze); }} className={`w-8 h-4 rounded-full transition-colors relative ${autoAnalyze ? 'bg-purple-500' : 'bg-slate-600'}`}><div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${autoAnalyze ? 'translate-x-4' : 'translate-x-0'}`} /></button></div>
+                          )}
+                          <div className="flex flex-col space-y-1 mt-1 border-t border-slate-600/50 pt-1">
+                            <div className="flex items-center justify-between"><span className="text-[10px] text-slate-400 flex items-center"><Crosshair className="w-3 h-3 mr-1 text-blue-400" />加碼 1</span><select value={addonLogic} onChange={(e) => handleSettingChange(row['標的'], 'addon', e.target.value)} className="text-[10px] px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-300 focus:outline-none max-w-[100px]" onClick={(e) => e.stopPropagation()}><option value="NONE">無</option><option value="PYRAMID">跌幅金字塔</option><option value="TECHNICAL">技術指標</option><option value="YIELD_MACRO">殖利率/總經</option></select></div>
+                            <div className="flex items-center justify-between"><span className="text-[10px] text-slate-400 flex items-center"><PlusCircle className="w-3 h-3 mr-1 opacity-50" />加碼 2</span><select value={addon2Logic} onChange={(e) => handleSettingChange(row['標的'], 'addon2', e.target.value)} className="text-[10px] px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-300 focus:outline-none max-w-[100px]" onClick={(e) => e.stopPropagation()}><option value="NONE">無 (None)</option><option value="PYRAMID">跌幅金字塔</option><option value="TECHNICAL">技術指標</option><option value="YIELD_MACRO">殖利率/總經</option></select></div>
+                          </div>
                         </div>
                       </div>
                       <div className="flex flex-col items-end"><span className={`text-lg font-bold ${(row.roi || 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>{formatPercent(row.roi)}</span><span className={`text-xs ${(row.profitLoss || 0) >= 0 ? 'text-red-400' : 'text-green-400'}`}>{(row.profitLoss || 0) > 0 ? '+' : ''}{formatCurrency(row.profitLoss)}</span></div>
@@ -2829,16 +2723,16 @@ ${signalRules}
               <div className="pt-4 border-t border-slate-700">
                 <h4 className="text-sm font-semibold text-slate-300 mb-4 flex items-center"><Calculator className="w-4 h-4 mr-2" /> 交易成本設定</h4>
                 <div>
-                   <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
-                   <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
-                   <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
+                  <label className="block text-xs text-slate-400 mb-1">手續費折扣 (例如 6折請輸入 0.6)</label>
+                  <input type="number" step="0.01" min="0" max="1" value={feeDiscount} onChange={(e) => setFeeDiscount(parseFloat(e.target.value))} className="w-24 px-3 py-2 rounded-md bg-slate-900 border border-slate-600 text-white text-sm focus:ring-blue-500 focus:border-blue-500" />
+                  <span className="text-xs text-slate-500 ml-2">目前設定: {feeDiscount === 1 ? '無折扣' : `${(feeDiscount * 10).toFixed(1)} 折`}</span>
                 </div>
               </div>
 
               <div className="pt-4 border-t border-slate-700">
                 <label className="block text-sm font-medium text-slate-300 mb-2">Google Gemini API Key (AI 分析用)</label>
                 <div className="flex gap-2">
-                    <input type="password" value={geminiApiKey} onChange={(e) => setGeminiApiKey(e.target.value)} placeholder="請輸入 API Key (例如: AIzaSy...)" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
+                  <input type="password" value={geminiApiKey} onChange={(e) => setGeminiApiKey(e.target.value)} placeholder="請輸入 API Key (例如: AIzaSy...)" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
                 </div>
                 <p className="mt-2 text-xs text-slate-500">* 單機版需自行申請 API Key 才能使用 AI 功能。<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 ml-1 underline">前往申請</a></p>
               </div>
@@ -2846,7 +2740,7 @@ ${signalRules}
               <div className="pt-4 border-t border-slate-700">
                 <label className="block text-sm font-medium text-slate-300 mb-2">自訂 Proxy 伺服器 (選填)</label>
                 <div className="flex gap-2">
-                    <input type="text" value={customProxyUrl} onChange={(e) => setCustomProxyUrl(e.target.value)} placeholder="例如: https://my-worker.workers.dev" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
+                  <input type="text" value={customProxyUrl} onChange={(e) => setCustomProxyUrl(e.target.value)} placeholder="例如: https://my-worker.workers.dev" className="flex-1 min-w-0 block w-full px-4 py-3 rounded-md bg-slate-900 border border-slate-600 text-white focus:ring-blue-500 focus:border-blue-500 sm:text-sm" />
                 </div>
                 <p className="mt-2 text-xs text-slate-500">* 若您有自行架設 Cloudflare Worker 等 Proxy，請在此輸入網址，儲存後系統將優先使用此節點抓取資料。</p>
               </div>
@@ -2865,7 +2759,7 @@ ${signalRules}
                     ))}
                   </select>
                 </div>
-                <p className="mt-1 text-xs text-slate-500 ml-7">* 預設使用 Gemini 3.8 Flash 穩定版模型。</p>
+                <p className="mt-1 text-xs text-slate-500 ml-7">* 預設使用 Gemini 3.7 Flash 穩定版模型。</p>
               </div>
 
               <div className="pt-4 border-t border-slate-700 mt-4">
@@ -2900,6 +2794,21 @@ ${signalRules}
                 {loading ? '資料載入中...' : '儲存設定並匯入更新股價'}
               </button>
             </div>
+            
+            {/* System Logs */}
+            <div className="pt-4 border-t border-slate-700 mt-8">
+              <h4 className="text-sm font-semibold text-slate-300 mb-2 flex items-center">
+                <Activity className="w-4 h-4 mr-2 text-slate-400" /> 系統執行日誌 (Logs)
+              </h4>
+              <div ref={logsContainerRef} className="bg-slate-900 border border-slate-700 rounded-md p-3 h-48 overflow-y-auto text-[10px] font-mono whitespace-pre-wrap">
+                {appLogs.length > 0 ? appLogs.map((log, i) => (
+                  <div key={i} className={`mb-1 ${log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-yellow-400' : 'text-slate-400'}`}>
+                    <span className="text-slate-500 mr-2">[{log.time}]</span>{log.msg}
+                  </div>
+                )) : <div className="text-slate-600 italic">暫無日誌紀錄...</div>}
+              </div>
+            </div>
+            
           </div>
         )}
       </main>
