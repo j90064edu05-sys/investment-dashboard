@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.05 (修復 handleMouseDown 未定義與雲端設定同步版)
+ * Alpha 投資戰情室 v56.05 (修復 handleMouseDown 未定義、AI 重新分析與雲端設定同步版)
  */
 
 const DEMO_DATA = [
@@ -1311,7 +1311,7 @@ const App = () => {
 
       const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
       const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票'; const assetType = detectAssetType(symbol, stockName, category);
-      const currentMonthPrefix = today.substring(0, 7); const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && item['策略'] === '基礎買入');
+      const currentMonthPrefix = today.substring(0, 7); const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && (item['策略'] === '基礎買入' || item['策略']?.includes('基礎')));
       const isLongBond = isLongTermBond(stockName); const benchmarkYield = isLongBond ? (usBondYields['20Y'] || usBondYields['30Y']) : usBondYields['10Y'];
       
       const etfData = etfExtraData[symbol];
@@ -1332,13 +1332,13 @@ const App = () => {
       let signalRules = "";
 
       if (isDCA && hasBoughtThisMonth) {
-        dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。目前**僅需**評估是否觸發加碼條件，不再產生基礎扣款訊號。`;
+        dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。目前**僅需**評估是否觸發加碼條件(${ADDON_LABELS[settings.addon]}, ${ADDON_LABELS[settings.addon2]})，不再產生基礎扣款訊號。`;
         signalRules = `燈號規則 (本月已扣款，僅評估加碼)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
       } else if (isDCA) {
-        dcaStrategy = `3. 【定期定額 (尋找買點)】：尋找低點扣款。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}。若強制扣款成立，請視為基礎扣款條件成立。`;
+        dcaStrategy = `3. 【定期定額 (尋找買點)】：尋找低點扣款。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}。請依據基礎買入與加碼條件(${ADDON_LABELS[settings.addon]}, ${ADDON_LABELS[settings.addon2]})判定。`;
         signalRules = `燈號規則：\n- REDUCE (轉空未跌)\n- ADD_ALL (基礎+加碼皆成立且未漲)\n- ADD_BASIC (僅基礎成立未漲)\n- ADD_BONUS (僅加碼成立未漲)\n- HOLD (其他或遭鐵律阻擋)`;
       } else {
-        dcaStrategy = `3. 【單筆投入】：純粹依據加碼條件尋找買點。`;
+        dcaStrategy = `3. 【單筆投入】：純粹依據加碼條件(${ADDON_LABELS[settings.addon]}, ${ADDON_LABELS[settings.addon2]})尋找買點。`;
         signalRules = `燈號規則 (單筆投入)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
       }
 
@@ -1383,7 +1383,7 @@ ${signalRules}
 
 【維度 2：看懂市場正在定價什麼】
 「請以股票研究分析師角度，分析［${symbol} (${stockName}) / ${category}］。
-檢視最新財報、財測、估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。
+檢視最新財報、財測, 估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。
 請區分哪些資訊可能已反映在股價中，哪些仍可能讓市場意外。
 最後整理3個最大利多催化因素、3個最大風險，以及接下來應關注的關鍵發展。」
 
