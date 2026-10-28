@@ -18,7 +18,7 @@ import {
  * Alpha 投資戰情室 v56.05
  * 
  * [v55.00 ~ v56.05 核心功能總覽]
- * 1. AI 模型全面升級：支援 gemini-3.7-flash (預設)、gemini-3.6-flash、gemini-3.7-flash-lite。
+ * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
  * 4. 歷史走勢 AI 分析雙模式：「綜合趨勢分析」與「回測交易策略」。
@@ -518,7 +518,7 @@ const App = () => {
 
   const isUiLocked = historyLoading || isAiSummarizing;
 
-  // System Logs Hook
+  // 1. System Logs Hook
   useEffect(() => {
     const originalLog = console.log; const originalWarn = console.warn; const originalError = console.error;
     const handleLog = (level, originalFn, ...args) => {
@@ -752,6 +752,7 @@ const App = () => {
     return merged;
   }, [historicalData, selectedHistorySymbol, timeframe, portfolioData, realTimePrices, etfExtraData, twseHolidays]);
 
+  // Chart Interaction Handlers
   const handleWheel = (e) => {
     if (!currentChartData.length || isUiLocked) return;
     setZoom(prev => {
@@ -762,15 +763,9 @@ const App = () => {
     setHoverIndex(null); 
   };
 
-  const handleMouseDown = (e) => { 
-    if(!isUiLocked) { setIsDragging(true); setStartX(e.clientX); } 
-  };
-  
+  const handleMouseDown = (e) => { if(!isUiLocked) { setIsDragging(true); setStartX(e.clientX); } };
   const handleMouseUp = () => setIsDragging(false);
-  
-  const handleMouseLeave = () => { 
-    setIsDragging(false); setHoverIndex(null); 
-  }; 
+  const handleMouseLeave = () => { setIsDragging(false); setHoverIndex(null); }; 
  
   const handleMouseMove = (e) => {
     if (!currentChartData.length || isUiLocked) return;
@@ -1351,12 +1346,6 @@ const App = () => {
       return; 
     }
     
-    // Prevent duplicate calls if already summarizing the same symbol
-    if (analysisInProgressRef.current[symbol]) {
-        console.log(`[AI] ${symbol} is already being analyzed. Ignoring duplicate trigger.`);
-        return;
-    }
-    
     if (aiAbortControllerRef.current) {
       aiAbortControllerRef.current.abort();
     }
@@ -1387,7 +1376,7 @@ const App = () => {
 
       const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
       const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票'; const assetType = detectAssetType(symbol, stockName, category);
-      const currentMonthPrefix = today.substring(0, 7); const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && (item['策略'] === '基礎買入' || item['策略']?.includes('基礎')));
+      const currentMonthPrefix = today.substring(0, 7); const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && item['策略'] === '基礎買入');
       const isLongBond = isLongTermBond(stockName); const benchmarkYield = isLongBond ? (usBondYields['20Y'] || usBondYields['30Y']) : usBondYields['10Y'];
       
       const etfData = etfExtraData[symbol];
@@ -1408,13 +1397,13 @@ const App = () => {
       let signalRules = "";
 
       if (isDCA && hasBoughtThisMonth) {
-        dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。目前**僅需**評估是否觸發加碼條件(${ADDON_LABELS[settings.addon]}, ${ADDON_LABELS[settings.addon2]})，不再產生基礎扣款訊號。`;
+        dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。目前**僅需**評估是否觸發加碼條件(${ADDON_LABELS[settings.addon]||'無'}, ${ADDON_LABELS[settings.addon2]||'無'})，不再產生基礎扣款訊號。`;
         signalRules = `燈號規則 (本月已扣款，僅評估加碼)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
       } else if (isDCA) {
-        dcaStrategy = `3. 【定期定額 (尋找買點)】：尋找低點扣款。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}。請依據基礎買入與加碼條件(${ADDON_LABELS[settings.addon]}, ${ADDON_LABELS[settings.addon2]})判定。`;
+        dcaStrategy = `3. 【定期定額 (尋找買點)】：尋找低點扣款。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}。若強制扣款成立，請視為基礎扣款條件成立。`;
         signalRules = `燈號規則：\n- REDUCE (轉空未跌)\n- ADD_ALL (基礎+加碼皆成立且未漲)\n- ADD_BASIC (僅基礎成立未漲)\n- ADD_BONUS (僅加碼成立未漲)\n- HOLD (其他或遭鐵律阻擋)`;
       } else {
-        dcaStrategy = `3. 【單筆投入】：純粹依據加碼條件(${ADDON_LABELS[settings.addon]}, ${ADDON_LABELS[settings.addon2]})尋找買點。`;
+        dcaStrategy = `3. 【單筆投入】：純粹依據加碼條件尋找買點。`;
         signalRules = `燈號規則 (單筆投入)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
       }
 
@@ -1513,7 +1502,6 @@ ${signalRules}
           setUsedModel(finalResult.model); setIsDetailExpanded(true); 
         }
         
-        // !important: 如果是強制刷新 (forceUpdate === true)，一定要執行同步上傳至雲端表單！
         if (!signal.aborted) {
           updateAiCache(symbol, { summary: consensusSummary, detail: finalResult.detail, signal: majoritySignal, model: finalResult.model }, dataDate); 
           await syncReportToSheet(symbol, stockName, majoritySignal, consensusSummary, finalResult.detail);
@@ -1852,6 +1840,94 @@ ${signalRules}
 
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
+
+  // -- Render State Computations --
+  const endIdx = zoom.endIndex === null ? currentChartData.length : Math.min(zoom.endIndex, currentChartData.length);
+  const startIdx = Math.max(0, endIdx - zoom.count);
+  const displayChartData = currentChartData.slice(startIdx, endIdx);
+
+  const safeHoverIndex = (hoverIndex !== null && hoverIndex >= 0 && hoverIndex < displayChartData.length) ? hoverIndex : null;
+  const activeIdx = safeHoverIndex !== null ? safeHoverIndex : Math.max(0, displayChartData.length - 1);
+  const activeCandle = displayChartData[activeIdx] || { open: 0, high: 0, low: 0, close: 0, volume: 0, ts: Date.now(), date: '' };
+  const prevC = activeIdx > 0 && displayChartData[activeIdx - 1] ? displayChartData[activeIdx - 1].close : activeCandle.open;
+  
+  const activeChange = activeCandle.close - prevC;
+  const activeChangePercent = prevC > 0 ? (activeChange / prevC) * 100 : 0;
+  const activeColorClass = activeChange > 0 ? 'text-red-500' : activeChange < 0 ? 'text-green-500' : 'text-white';
+  const activeSign = activeChange > 0 ? '▲ ' : activeChange < 0 ? '▼ ' : '';
+  
+  const formattedHoverDate = activeCandle.date ? activeCandle.date.replace(/-/g, '/') : (() => {
+    const dObj = activeCandle.ts ? new Date(activeCandle.ts) : new Date();
+    return `${dObj.getFullYear()}/${String(dObj.getMonth()+1).padStart(2,'0')}/${String(dObj.getDate()).padStart(2,'0')}`;
+  })();
+  const dateStr = safeHoverIndex !== null ? formattedHoverDate : `最新 (${formattedHoverDate})`;
+
+  const currentMA5 = activeCandle.MA5 || 0;
+  const currentMA20 = activeCandle.MA20 || 0;
+  const currentMA60 = activeCandle.MA60 || 0;
+  const currentBBUpper = activeCandle.BBU || 0;
+  const currentBBLower = activeCandle.BBL || 0;
+  const currentMACD = activeCandle.OSC || 0;
+  const currentK = activeCandle.K || 50;
+  const currentD = activeCandle.D || 50;
+  const currentRSI = activeCandle.RSI14 || 50;
+
+  const bias20 = currentMA20 > 0 ? ((activeCandle.close - currentMA20) / currentMA20) * 100 : 0;
+  const stockPrice = currentChartData.length > 0 ? currentChartData[currentChartData.length - 1].close : 0;
+
+  let bbStatus = "區間內震盪";
+  let bbColor = "text-yellow-400";
+  if (stockPrice > activeCandle.BBU && activeCandle.BBU > 0) {
+    bbStatus = "突破上軌 (強勢)";
+    bbColor = "text-red-500";
+  } else if (stockPrice < activeCandle.BBL && activeCandle.BBL > 0) {
+    bbStatus = "跌破下軌 (弱勢)";
+    bbColor = "text-green-500";
+  } else if (stockPrice > currentMA20) {
+    bbStatus = "中軌之上 (偏多)";
+    bbColor = "text-red-400";
+  } else if (stockPrice < currentMA20) {
+    bbStatus = "中軌之下 (偏空)";
+    bbColor = "text-green-400";
+  }
+
+  const latestChangePercent = currentChartData.length > 1 ? ((currentChartData[currentChartData.length - 1].close - currentChartData[currentChartData.length - 2].close) / currentChartData[currentChartData.length - 2].close) * 100 : 0;
+  const extRatio = Math.min(Math.max(Math.round(50 + latestChangePercent * 3), 20), 80);
+  const intRatio = 100 - extRatio;
+  
+  const bodySize = Math.abs(activeCandle.close - activeCandle.open);
+  const upperShadow = activeCandle.high - Math.max(activeCandle.close, activeCandle.open);
+  const lowerShadow = Math.min(activeCandle.close, activeCandle.open) - activeCandle.low;
+  
+  const isRedK = activeCandle.close >= activeCandle.open;
+  const isLongRed = isRedK && activeCandle.open > 0 && (activeCandle.close - activeCandle.open) / activeCandle.open > 0.03;
+  const isLongBlack = !isRedK && activeCandle.open > 0 && (activeCandle.open - activeCandle.close) / activeCandle.open > 0.03;
+  const hasUpperShadow = upperShadow > bodySize * 2 && upperShadow > (activeCandle.open * 0.01);
+  const hasLowerShadow = lowerShadow > bodySize * 2 && lowerShadow > (activeCandle.open * 0.01);
+
+  const last10 = displayChartData.slice(-10);
+  const winDays = last10.filter(d => d.close >= d.open).length;
+  const winRate = last10.length > 0 ? Math.round((winDays / last10.length) * 100) : 50;
+
+  const volMA5 = displayChartData.length >= 5 ? displayChartData.slice(-5).reduce((acc, curr) => acc + (curr.volume || 0), 0) / 5 : activeCandle.volume;
+  const isVolUp = (activeCandle.volume) > volMA5;
+
+  let paddedMin = 0, paddedMax = 0, mapPriceY = () => 0;
+  if (displayChartData.length > 0) {
+    const allLows = displayChartData.map(d => d.low);
+    const allHighs = displayChartData.map(d => d.high);
+    const validMAs = displayChartData.map(d => [d.MA5, d.MA20, d.MA60, d.BBU, d.BBL]).flat().filter(v => v !== null && v !== undefined);
+    
+    const minPrice = Math.min(...allLows, ...validMAs);
+    const maxPrice = Math.max(...allHighs, ...validMAs);
+    const priceRange = maxPrice - minPrice || 1;
+    
+    paddedMin = minPrice - priceRange * 0.05;
+    paddedMax = maxPrice + priceRange * 0.05;
+    const paddedRange = paddedMax - paddedMin || 1;
+    
+    mapPriceY = (val) => 280 - ((val - paddedMin) / paddedRange) * 260;
+  }
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20 md:pb-0">
@@ -2452,7 +2528,6 @@ ${signalRules}
                             </select>
                             <button 
                               onClick={() => {
-                                console.log("[UI] Triggering Re-analyze for:", selectedHistorySymbol);
                                 const data = historicalData[`${selectedHistorySymbol}_${timeframe}`]; 
                                 if (data && data.length > 0) { 
                                   generateFullAnalysis(selectedHistorySymbol, data, true, etfExtraData[selectedHistorySymbol]?.prevClose, aiAnalysisType); 
