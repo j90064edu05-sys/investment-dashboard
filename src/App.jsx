@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.05 (修復 handleMouseDown 未定義、AI 重新分析與雲端設定同步版)
+ * Alpha 投資戰情室 v56.05 (修復 handleMouseDown、AI 重新分析與雲端設定同步版)
  */
 
 const DEMO_DATA = [
@@ -1383,7 +1383,7 @@ ${signalRules}
 
 【維度 2：看懂市場正在定價什麼】
 「請以股票研究分析師角度，分析［${symbol} (${stockName}) / ${category}］。
-檢視最新財報、財測, 估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。
+檢視最新財報、財測、估值、主要催化因素、競爭地位、近期股價走勢，以及相關總體經濟因素。
 請區分哪些資訊可能已反映在股價中，哪些仍可能讓市場意外。
 最後整理3個最大利多催化因素、3個最大風險，以及接下來應關注的關鍵發展。」
 
@@ -1640,7 +1640,6 @@ ${signalRules}
               }
             });
             localStorage.setItem('investment_settings', JSON.stringify(updated));
-            syncSettingsToCloud(updated);
             return updated;
           });
 
@@ -1671,7 +1670,6 @@ ${signalRules}
     localStorage.setItem('investment_sheet_url', sheetUrl); localStorage.setItem('investment_report_sheet_url', reportSheetUrl); localStorage.setItem('gas_webapp_url', gasWebAppUrl); localStorage.setItem('gemini_api_key', geminiApiKey); localStorage.setItem('gemini_model', selectedModel); localStorage.setItem('fee_discount', feeDiscount); localStorage.setItem('custom_proxy_url', customProxyUrl); localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
     if (customOrder.length > 0) localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
     setToast("設定已儲存！開始更新資料..."); 
-    syncSettingsToCloud(investmentSettings);
     if (!sheetUrl) { if (rawData.length > 0) processData(rawData, realTimePrices, etfExtraData); return; } 
     performFetch(sheetUrl); 
   };
@@ -1691,7 +1689,6 @@ ${signalRules}
     const newSettings = { ...investmentSettings, [symbol]: { ...currentSettings, [key]: value } };
     setInvestmentSettings(newSettings); 
     localStorage.setItem('investment_settings', JSON.stringify(newSettings));
-    syncSettingsToCloud(newSettings);
 
     if (key === 'type') { const newClassifications = { ...assetClassifications, [symbol]: value }; setAssetClassifications(newClassifications); localStorage.setItem('investment_asset_classifications', JSON.stringify(newClassifications)); }
     if (key === 'autoAnalyze') {
@@ -2553,7 +2550,7 @@ ${signalRules}
                         <div className="flex gap-2 flex-wrap">
                             {isAiSummarizing && (
                                 <button onClick={() => { if (aiAbortControllerRef.current) aiAbortControllerRef.current.abort(); }} className="text-[10px] md:text-xs bg-red-900/50 hover:bg-red-900/80 text-red-200 border border-red-500/50 px-2 md:px-3 py-1.5 rounded flex items-center transition-colors shadow-sm">
-                                    <XCircle className="w-3 h-3 mr-1" />放棄分析
+                                    <XCircle className="w-3 h-3 mr-1" />中斷分析
                                 </button>
                             )}
                             {!isAiSummarizing && (
