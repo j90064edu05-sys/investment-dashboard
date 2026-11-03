@@ -15,14 +15,15 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.05
+ * Alpha 投資戰情室 v56.06
  * 
- * [v55.00 ~ v56.05 核心功能總覽]
+ * [v55.00 ~ v56.06 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
  * 4. 歷史走勢 AI 分析雙模式：「綜合趨勢分析」與「回測交易策略」。
  * 5. 修正：系統日誌 (Logs) 顯示回歸，並確保「重新分析並同步」按鈕能強制觸發分析與上傳。
+ * 6. 獨立：將「回測交易策略」分離，不與「綜合趨勢分析」混用快取，且回測不執行雲端同步。
  */
 
 const DEMO_DATA = [
@@ -1359,26 +1360,28 @@ const App = () => {
     const signal = aiAbortControllerRef.current.signal;
     analysisInProgressRef.current[symbol] = true;
 
+    const cacheKey = customAnalysisType === 'STRATEGY_BACKTEST' ? `${symbol}_BACKTEST` : symbol;
+
     try {
       const latest = data[data.length - 1]; const prevDay = data.length > 1 ? data[data.length - 2] : null; const dataDate = latest.date;
       const today = getTodayDate(); const cache = getAiCache();
 
-      if (!forceUpdate && customAnalysisType === 'DEFAULT' && cache[symbol] && cache[symbol].date === today && cache[symbol].summary && cache[symbol].detail) {
-        if (activeHistorySymbolRef.current === symbol) {
-          setAiSummary(String(cache[symbol].summary)); setAiDetail(String(cache[symbol].detail));
-          if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
-          setUsedModel(cache[symbol].model); setIsCachedResult(true); setIsDetailExpanded(true); 
+      if (!forceUpdate && cache[cacheKey] && cache[cacheKey].date === today && cache[cacheKey].summary && cache[cacheKey].detail) {
+        if (activeHistorySymbolRef.current === symbol && aiAnalysisType === customAnalysisType) {
+          setAiSummary(String(cache[cacheKey].summary)); setAiDetail(String(cache[cacheKey].detail));
+          if (cache[cacheKey].signal) setAiSignals(prev => ({ ...prev, [cacheKey]: cache[cacheKey].signal }));
+          setUsedModel(cache[cacheKey].model); setIsCachedResult(true); setIsDetailExpanded(true); 
           setIsAiSummarizing(false); 
         }
         delete analysisInProgressRef.current[symbol];
         return;
       }
 
-      if (activeHistorySymbolRef.current === symbol) {
+      if (activeHistorySymbolRef.current === symbol && aiAnalysisType === customAnalysisType) {
         setIsAiSummarizing(true); setAiSummary(null); setAiDetail(null); setUsedModel(null); setIsCachedResult(false); 
         setAiProgressMsg("準備進行多次獨立分析..."); 
       }
-      setAiSignals(prev => { const next = { ...prev }; delete next[symbol]; return next; });
+      setAiSignals(prev => { const next = { ...prev }; delete next[cacheKey]; return next; });
 
       const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
       const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票'; const assetType = detectAssetType(symbol, stockName, category);
@@ -1503,14 +1506,16 @@ ${signalRules}
         const modePrefix = customAnalysisType === 'STRATEGY_BACKTEST' ? '【策略回測】' : '';
         const consensusSummary = `${modePrefix}【多數決共識 (${maxCount}/${results.length})】${finalResult.summary}`;
         
-        if (activeHistorySymbolRef.current === symbol && !signal.aborted) {
-          setAiSummary(consensusSummary); setAiDetail(finalResult.detail); setAiSignals(prev => ({ ...prev, [symbol]: majoritySignal }));
+        if (activeHistorySymbolRef.current === symbol && !signal.aborted && aiAnalysisType === customAnalysisType) {
+          setAiSummary(consensusSummary); setAiDetail(finalResult.detail); setAiSignals(prev => ({ ...prev, [cacheKey]: majoritySignal }));
           setUsedModel(finalResult.model); setIsDetailExpanded(true); 
         }
         
         if (!signal.aborted) {
-          updateAiCache(symbol, { summary: consensusSummary, detail: finalResult.detail, signal: majoritySignal, model: finalResult.model }, dataDate); 
-          await syncReportToSheet(symbol, stockName, majoritySignal, consensusSummary, finalResult.detail);
+          updateAiCache(cacheKey, { summary: consensusSummary, detail: finalResult.detail, signal: majoritySignal, model: finalResult.model }, dataDate); 
+          if (customAnalysisType !== 'STRATEGY_BACKTEST') {
+            await syncReportToSheet(symbol, stockName, majoritySignal, consensusSummary, finalResult.detail);
+          }
         }
       } catch (err) { 
         if (activeHistorySymbolRef.current === symbol) {
@@ -1529,44 +1534,57 @@ ${signalRules}
     }
   };
 
-  const applyExistingReportForSymbol = useCallback((symbol) => {
+  const applyExistingReportForSymbol = useCallback((symbol, type) => {
     if (!symbol) return;
+    const currentType = type || aiAnalysisType;
     const today = getTodayDate();
     const cache = getAiCache();
     const pureCode = getPureCode(symbol);
-    const latestCloudReports = cloudReportsRef.current || {};
-    const cloudRep = latestCloudReports[symbol] || latestCloudReports[pureCode] || cloudReports[symbol] || cloudReports[pureCode];
-
-    if (cache[symbol] && cache[symbol].date === today && (cache[symbol].summary || cache[symbol].detail)) {
-      setAiSummary(String(cache[symbol].summary));
-      setAiDetail(String(cache[symbol].detail));
-      if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
-      setUsedModel(cache[symbol].model);
-      setIsCachedResult(true);
-      setCloudReportTime(null);
-      setIsDetailExpanded(true);
-    } else if (cloudRep && (cloudRep.summary || cloudRep.detail)) {
-      setAiSummary(String(cloudRep.summary));
-      setAiDetail(String(cloudRep.detail));
-      if (cloudRep.signal) setAiSignals(prev => ({ ...prev, [symbol]: cloudRep.signal }));
-      setUsedModel('雲端自動排程');
-      setCloudReportTime(cloudRep.time || '最新');
-      setIsCachedResult(true);
-      setIsDetailExpanded(true);
+    
+    if (currentType === 'STRATEGY_BACKTEST') {
+      const cacheKey = `${symbol}_BACKTEST`;
+      if (cache[cacheKey] && cache[cacheKey].date === today && (cache[cacheKey].summary || cache[cacheKey].detail)) {
+        setAiSummary(String(cache[cacheKey].summary));
+        setAiDetail(String(cache[cacheKey].detail));
+        if (cache[cacheKey].signal) setAiSignals(prev => ({ ...prev, [cacheKey]: cache[cacheKey].signal }));
+        setUsedModel(cache[cacheKey].model);
+        setIsCachedResult(true);
+        setCloudReportTime(null);
+        setIsDetailExpanded(true);
+      } else {
+        setAiSummary(null); setAiDetail(null); setUsedModel(null); setCloudReportTime(null); setIsCachedResult(false);
+      }
     } else {
-      setAiSummary(null);
-      setAiDetail(null);
-      setUsedModel(null);
-      setCloudReportTime(null);
-      setIsCachedResult(false);
+      const latestCloudReports = cloudReportsRef.current || {};
+      const cloudRep = latestCloudReports[symbol] || latestCloudReports[pureCode] || cloudReports[symbol] || cloudReports[pureCode];
+
+      if (cache[symbol] && cache[symbol].date === today && (cache[symbol].summary || cache[symbol].detail)) {
+        setAiSummary(String(cache[symbol].summary));
+        setAiDetail(String(cache[symbol].detail));
+        if (cache[symbol].signal) setAiSignals(prev => ({ ...prev, [symbol]: cache[symbol].signal }));
+        setUsedModel(cache[symbol].model);
+        setIsCachedResult(true);
+        setCloudReportTime(null);
+        setIsDetailExpanded(true);
+      } else if (cloudRep && (cloudRep.summary || cloudRep.detail)) {
+        setAiSummary(String(cloudRep.summary));
+        setAiDetail(String(cloudRep.detail));
+        if (cloudRep.signal) setAiSignals(prev => ({ ...prev, [symbol]: cloudRep.signal }));
+        setUsedModel('雲端自動排程');
+        setCloudReportTime(cloudRep.time || '最新');
+        setIsCachedResult(true);
+        setIsDetailExpanded(true);
+      } else {
+        setAiSummary(null); setAiDetail(null); setUsedModel(null); setCloudReportTime(null); setIsCachedResult(false);
+      }
     }
-  }, [cloudReports]);
+  }, [cloudReports, aiAnalysisType]);
 
   useEffect(() => {
-    if (selectedHistorySymbol && !isAiSummarizing && Object.keys(cloudReports).length > 0) {
-      applyExistingReportForSymbol(selectedHistorySymbol);
+    if (selectedHistorySymbol && !isAiSummarizing) {
+      applyExistingReportForSymbol(selectedHistorySymbol, aiAnalysisType);
     }
-  }, [cloudReports, selectedHistorySymbol, isAiSummarizing, applyExistingReportForSymbol]);
+  }, [cloudReports, selectedHistorySymbol, isAiSummarizing, applyExistingReportForSymbol, aiAnalysisType]);
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
@@ -1641,7 +1659,7 @@ ${signalRules}
         
         if (activeHistorySymbolRef.current === symbol) {
           setHistoryLoading(false);
-          applyExistingReportForSymbol(symbol);
+          applyExistingReportForSymbol(symbol, aiAnalysisType);
         }
       } else { throw new Error('解析不到圖表數據'); }
     } catch (err) { 
@@ -1942,7 +1960,7 @@ ${signalRules}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
-            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.05</span></span>
+            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.06</span></span>
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">{['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (<button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-slate-900 text-blue-400' : 'text-slate-300 hover:bg-slate-700'}`}>{tab === 'overview' ? '資產總覽' : tab === 'history' ? '歷史走勢' : tab === 'chat' ? 'AI 助理' : tab === 'holdings' ? '持股明細' : '設定'}</button>))}</div>
@@ -2510,11 +2528,18 @@ ${signalRules}
                             {isCachedResult ? <span className="text-slate-500"> (已快取/同步)</span> : <span className="text-green-400"> (本次生成並同步)</span>}
                           </span>
                         )}
-                        {aiSignals[selectedHistorySymbol] === 'REDUCE' && (<div className="flex items-center lg:ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
-                        {aiSignals[selectedHistorySymbol] === 'ADD_ALL' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
-                        {aiSignals[selectedHistorySymbol] === 'ADD_BASIC' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎投資</span></div>)}
-                        {aiSignals[selectedHistorySymbol] === 'ADD_BONUS' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼投資</span></div>)}
-                        {aiSignals[selectedHistorySymbol] === 'HOLD' && (<div className="flex items-center lg:ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}
+                        {(() => {
+                          const displayedSignal = aiAnalysisType === 'STRATEGY_BACKTEST' ? aiSignals[`${selectedHistorySymbol}_BACKTEST`] : aiSignals[selectedHistorySymbol];
+                          return (
+                            <>
+                              {displayedSignal === 'REDUCE' && (<div className="flex items-center lg:ml-3 bg-red-900/30 px-2 py-1 rounded border border-red-500/30"><div className="w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2" /><span className="text-xs text-red-400 font-bold">建議減少持股</span></div>)}
+                              {displayedSignal === 'ADD_ALL' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎及加碼投資</span></div>)}
+                              {displayedSignal === 'ADD_BASIC' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議基礎投資</span></div>)}
+                              {displayedSignal === 'ADD_BONUS' && (<div className="flex items-center lg:ml-3 bg-green-900/30 px-2 py-1 rounded border border-green-500/30"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse mr-2" /><span className="text-xs text-green-400 font-bold">建議加碼投資</span></div>)}
+                              {displayedSignal === 'HOLD' && (<div className="flex items-center lg:ml-3 bg-yellow-900/30 px-2 py-1 rounded border border-yellow-500/30"><div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse mr-2" /><span className="text-xs text-yellow-400 font-bold">建議觀望</span></div>)}
+                            </>
+                          );
+                        })()}
                       </div>
                       <div className="flex gap-2 flex-wrap">
                         {isAiSummarizing && (
@@ -2550,22 +2575,27 @@ ${signalRules}
                               className="text-[10px] md:text-xs flex items-center transition-colors text-blue-300 hover:text-white bg-blue-600/40 hover:bg-blue-600 border border-blue-500/50 px-2.5 md:px-3 py-1.5 rounded shadow-sm font-medium"
                             >
                               <RefreshCw className="w-3 h-3 mr-1" />
-                              {isCachedResult || aiDetail || usedModel === '雲端自動排程' ? '重新分析並同步' : '開始 AI 分析'}
+                              {aiAnalysisType === 'STRATEGY_BACKTEST' 
+                                ? (isCachedResult || aiDetail ? '重新回測' : '開始 AI 回測')
+                                : (isCachedResult || aiDetail || usedModel === '雲端自動排程' ? '重新分析並同步' : '開始 AI 分析')
+                              }
                             </button>
-                            <button
-                              onClick={async () => {
-                                setToast('☁️ 正在從 Google 表單重新讀取 AI 分析報告...');
-                                localStorage.removeItem('gemini_analysis_cache');
-                                await fetchCloudReports(sheetUrl, reportSheetUrl, gasWebAppUrl);
-                                applyExistingReportForSymbol(selectedHistorySymbol);
-                              }}
-                              className="text-[10px] md:text-xs flex items-center transition-colors text-cyan-300 hover:text-white bg-cyan-900/40 hover:bg-cyan-700 border border-cyan-500/40 px-2.5 py-1.5 rounded shadow-sm"
-                              title="強制從 Google 表單重新抓取最新 AI_分析報告"
-                            >
-                              <Database className="w-3 h-3 mr-1" />
-                              讀取表單報告
-                            </button>
-                            {aiDetail && (
+                            {aiAnalysisType === 'DEFAULT' && (
+                              <button
+                                onClick={async () => {
+                                  setToast('☁️ 正在從 Google 表單重新讀取 AI 分析報告...');
+                                  localStorage.removeItem('gemini_analysis_cache');
+                                  await fetchCloudReports(sheetUrl, reportSheetUrl, gasWebAppUrl);
+                                  applyExistingReportForSymbol(selectedHistorySymbol);
+                                }}
+                                className="text-[10px] md:text-xs flex items-center transition-colors text-cyan-300 hover:text-white bg-cyan-900/40 hover:bg-cyan-700 border border-cyan-500/40 px-2.5 py-1.5 rounded shadow-sm"
+                                title="強制從 Google 表單重新抓取最新 AI_分析報告"
+                              >
+                                <Database className="w-3 h-3 mr-1" />
+                                讀取表單報告
+                              </button>
+                            )}
+                            {aiDetail && aiAnalysisType === 'DEFAULT' && (
                               <button
                                 onClick={() => {
                                   const assetInfo = tradableSymbols.find(t => t['標的'] === selectedHistorySymbol);
