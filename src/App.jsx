@@ -15,9 +15,9 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.06
+ * Alpha 投資戰情室 v56.07
  * 
- * [v55.00 ~ v56.06 核心功能總覽]
+ * [v55.00 ~ v56.07 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
@@ -1016,9 +1016,30 @@ const App = () => {
         const res = await fetch(gasFetchUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
         if (res.ok) {
           const json = await res.json();
-          if (json && json.status === 'success' && Array.isArray(json.rows)) {
-            const loaded = parseAndStoreCloudRows(json.rows, 'GAS 雲端引擎');
-            if (loaded > 0) return;
+          if (json && json.status === 'success') {
+            if (json.settings) {
+              setInvestmentSettings(prev => {
+                const updated = { ...prev };
+                Object.keys(json.settings).forEach(sym => {
+                  updated[sym] = { ...(updated[sym] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE' }), ...json.settings[sym] };
+                });
+                localStorage.setItem('investment_settings', JSON.stringify(updated));
+                
+                // 同步更新資產類別定位
+                setAssetClassifications(prevClass => {
+                   const newClass = { ...prevClass };
+                   Object.keys(json.settings).forEach(sym => { newClass[sym] = json.settings[sym].type || 'CORE'; });
+                   localStorage.setItem('investment_asset_classifications', JSON.stringify(newClass));
+                   return newClass;
+                });
+                
+                return updated;
+              });
+            }
+            if (Array.isArray(json.rows)) {
+              const loaded = parseAndStoreCloudRows(json.rows, 'GAS 雲端引擎');
+              if (loaded > 0) return;
+            }
           }
         }
       } catch (e) {
@@ -1723,10 +1744,9 @@ ${signalRules}
             const updated = { ...prev };
             validData.forEach(row => {
               const sym = row['標的'];
-              if (sym && row['自動分析'] !== undefined && row['自動分析'] !== '') {
-                const valStr = String(row['自動分析']).trim().toUpperCase();
-                const isAuto = !(valStr === 'OFF' || valStr === 'FALSE' || valStr === '否');
-                updated[sym] = { ...(updated[sym] || { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE' }), autoAnalyze: isAuto };
+              // 取消讀取主表單的自動分析，如果是全新標的給予預設值即可
+              if (sym && !updated[sym]) {
+                updated[sym] = { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE', autoAnalyze: true };
               }
             });
             localStorage.setItem('investment_settings', JSON.stringify(updated));
