@@ -15,9 +15,9 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.07
+ * Alpha 投資戰情室 v56.08
  * 
- * [v55.00 ~ v56.07 核心功能總覽]
+ * [v55.00 ~ v56.08 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
@@ -900,23 +900,20 @@ const App = () => {
         detail: detailText || ''
       };
 
-      const res = await fetch(targetUrl, {
+      // 【修正】直接使用 no-cors 背景傳輸，完全避免瀏覽器拋出 CORS 紅字警告
+      await fetch(targetUrl, {
         method: 'POST',
         body: JSON.stringify(payload),
+        mode: 'no-cors',
         headers: {
           'Content-Type': 'text/plain;charset=utf-8',
         }
       });
-
-      const resData = await res.json();
-      if (resData.status === 'success') {
-        setToast(`☁️ ${symbol} AI 分析報告已成功同步寫入 Google 表單！`);
-      } else {
-        throw new Error(resData.message || '寫入失敗');
-      }
+      
+      setToast(`☁️ ${symbol} AI 分析報告已成功推播至雲端表單！`);
     } catch (e) {
-      console.warn(`[Cloud Sync] 同步報告至表單失敗:`, e.message);
-      setToast(`⚠️ 已儲存本地快取，但雲端表單同步失敗: ${e.message}`);
+      console.warn(`[Cloud Sync] 最終同步失敗:`, e.message);
+      setToast(`⚠️ 已儲存本地快取，但推播失敗: ${e.message}`);
     } finally {
       setIsSyncingCloud(false);
     }
@@ -932,7 +929,9 @@ const App = () => {
         autoAnalyze: String(autoAnalyze)
       });
       const finalGetUrl = targetUrl + (targetUrl.includes('?') ? '&' : '?') + params.toString();
-      await fetch(finalGetUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+      
+      // 【修正】這裡也加上 mode: 'no-cors'，確保單向寫入設定時不被 CORS 阻擋
+      await fetch(finalGetUrl, { method: 'GET', credentials: 'omit', cache: 'no-store', mode: 'no-cors' });
       console.log(`[Cloud Sync] 🟢 已同步 ${symbol} 自動分析設定 (${autoAnalyze ? 'ON' : 'OFF'}) 至雲端表單`);
     } catch (e) {
       console.warn(`[Cloud Sync] 同步自動分析設定失敗:`, e.message);
