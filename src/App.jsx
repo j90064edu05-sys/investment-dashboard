@@ -15,15 +15,16 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.09
+ * Alpha 投資戰情室 v56.10 (完整整合版)
  * 
- * [v55.00 ~ v56.09 核心功能總覽]
+ * [v55.00 ~ v56.10 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
  * 4. 歷史走勢 AI 分析雙模式：「綜合趨勢分析」與「回測交易策略」。
- * 5. 修正：系統日誌 (Logs) 顯示回歸，並確保「重新分析並同步」按鈕能強制觸發分析與上傳。
- * 6. 獨立：將「回測交易策略」分離，不與「綜合趨勢分析」混用快取，且回測不執行雲端同步。
+ * 5. 獨立：將「回測交易策略」分離，不與「綜合趨勢分析」混用快取，且回測不執行雲端同步。
+ * 6. 雲端同步 POST：完全採用 URLSearchParams 表單格式提交，徹底解決 CORS 阻擋。
+ * 7. 自動排程器整合：內建網頁端 08:30 與 12:00 自動背景批次 AI 分析功能。
  */
 
 const DEMO_DATA = [
@@ -518,6 +519,10 @@ const App = () => {
   const aiAbortControllerRef = useRef(null); 
 
   const isUiLocked = historyLoading || isAiSummarizing;
+
+  // -- Cron Job State --
+  const [isAutoBatchRunning, setIsAutoBatchRunning] = useState(false);
+  const [autoBatchProgress, setAutoBatchProgress] = useState('');
 
   // 1. System Logs Hook
   useEffect(() => {
@@ -1022,7 +1027,6 @@ const App = () => {
                 });
                 localStorage.setItem('investment_settings', JSON.stringify(updated));
                 
-                // 同步更新資產類別定位
                 setAssetClassifications(prevClass => {
                    const newClass = { ...prevClass };
                    Object.keys(json.settings).forEach(sym => { newClass[sym] = json.settings[sym].type || 'CORE'; });
@@ -1403,7 +1407,35 @@ const App = () => {
 
       const assetInfo = tradableSymbols.find(t => t['標的'] === symbol);
       const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票'; const assetType = detectAssetType(symbol, stockName, category);
-      const currentMonthPrefix = today.substring(0, 7); const hasBoughtThisMonth = portfolioData.some(item => item['標的'] === symbol && String(item['日期'] || '').startsWith(currentMonthPrefix) && item['策略'] === '基礎買入');
+      const currentMonthPrefix = today.substring(0, 7); 
+      
+      // 計算近一個月的交易紀錄
+      const nowMs = Date.now();
+      const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+      let hasBoughtThisMonth = false;
+      let addOnCount30d = 0;
+      let maxPrice30d = 0;
+      
+      portfolioData.forEach(item => {
+        if (item['標的'] === symbol) {
+          const dateStr = String(item['日期'] || '').replace(/\//g, '-');
+          const strat = String(item['策略'] || '');
+          const price = parseFloat(item['價格']) || 0;
+          
+          if (dateStr.startsWith(currentMonthPrefix) && (strat === '基礎買入' || strat.includes('基礎'))) {
+            hasBoughtThisMonth = true;
+          }
+          
+          const tradeDateMs = new Date(dateStr).getTime();
+          if (!isNaN(tradeDateMs) && (nowMs - tradeDateMs <= thirtyDaysMs)) {
+            if (price > maxPrice30d) maxPrice30d = price;
+            if (strat && !strat.includes('基礎') && strat !== '定存') { 
+               addOnCount30d++;
+            }
+          }
+        }
+      });
+
       const isLongBond = isLongTermBond(stockName); const benchmarkYield = isLongBond ? (usBondYields['20Y'] || usBondYields['30Y']) : usBondYields['10Y'];
       
       const etfData = etfExtraData[symbol];
@@ -1422,6 +1454,7 @@ const App = () => {
 
       let dcaStrategy = "";
       let signalRules = "";
+      let addOnConstraint = `\n加碼鐵律：近一個月已加碼 ${addOnCount30d} 次 (上限2次)，近一個月最高買價 ${maxPrice30d > 0 ? maxPrice30d.toFixed(2) : '無'}。若現價大於近一個月最高買價，或加碼次數已達2次，絕對禁止加碼(僅能輸出HOLD/REDUCE)。`;
 
       if (isDCA && hasBoughtThisMonth) {
         dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。目前**僅需**評估是否觸發加碼條件(${ADDON_LABELS[settings.addon]||'無'}, ${ADDON_LABELS[settings.addon2]||'無'})，不再產生基礎扣款訊號。`;
@@ -1430,7 +1463,7 @@ const App = () => {
         dcaStrategy = `3. 【定期定額 (尋找買點)】：尋找低點扣款。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}。若強制扣款成立，請視為基礎扣款條件成立。`;
         signalRules = `燈號規則：\n- REDUCE (轉空未跌)\n- ADD_ALL (基礎+加碼皆成立且未漲)\n- ADD_BASIC (僅基礎成立未漲)\n- ADD_BONUS (僅加碼成立未漲)\n- HOLD (其他或遭鐵律阻擋)`;
       } else {
-        dcaStrategy = `3. 【單筆投入】：純粹依據加碼條件尋找買點。`;
+        dcaStrategy = `3. 【單筆投入】：純粹依據加碼條件(${ADDON_LABELS[settings.addon]||'無'}, ${ADDON_LABELS[settings.addon2]||'無'})尋找買點。`;
         signalRules = `燈號規則 (單筆投入)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
       }
 
@@ -1452,7 +1485,7 @@ const App = () => {
 最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}
 數據：${keyMetrics}
 指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}
-鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。
+鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。${addOnConstraint}
 ${signalRules}
 
 嚴格格式輸出(無Markdown)：
@@ -1469,7 +1502,7 @@ ${signalRules}
 最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}
 數據：${keyMetrics}
 指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}
-鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。
+鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。${addOnConstraint}
 濾網：1.大波動(MACD綠柱收斂/DIF金叉) 2.小波動(布林下緣) 3.大盤ETF(KD<20) 4.科技ETF(折價/RSI<30) 5.債券ETF(殖利率創高)。
 策略要求：根據技術支撐提供【預估目標價】。
 
@@ -1603,6 +1636,82 @@ ${signalRules}
       applyExistingReportForSymbol(selectedHistorySymbol, aiAnalysisType);
     }
   }, [cloudReports, selectedHistorySymbol, isAiSummarizing, applyExistingReportForSymbol, aiAnalysisType]);
+
+  // 定時排程器 (Cron Job Tracker)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (isUiLocked || isAutoBatchRunning) return; 
+
+      const now = new Date();
+      const h = now.getHours();
+      const m = now.getMinutes();
+
+      const isMorningRun = (h === 8 && m === 30);
+      const isNoonRun = (h === 12 && m === 0);
+
+      if (isMorningRun || isNoonRun) {
+        const todayStr = getTodayDate();
+        const runType = isMorningRun ? 'morning' : 'noon';
+        const lockKey = `auto_run_${todayStr}_${runType}`;
+
+        if (!localStorage.getItem(lockKey)) {
+          localStorage.setItem(lockKey, 'true');
+          startAutoBatchAnalysis(runType);
+        }
+      }
+    }, 60000);
+
+    return () => clearInterval(timer);
+  }, [tradableSymbols, isUiLocked, isAutoBatchRunning]);
+
+  // 序列化批次執行引擎
+  const startAutoBatchAnalysis = async (runType) => {
+    if (tradableSymbols.length === 0 || !geminiApiKey) return;
+    
+    setIsAutoBatchRunning(true);
+    setToast(`🕒 開始執行 ${runType === 'morning' ? '早晨 08:30' : '午間 12:00'} 全自動持股 AI 分析...`);
+    
+    try {
+      await fetchRealTimePrices(rawData, true);
+      
+      for (let i = 0; i < tradableSymbols.length; i++) {
+        const symbol = tradableSymbols[i]['標的'];
+        setAutoBatchProgress(`自動分析中 (${i+1}/${tradableSymbols.length}): ${symbol}`);
+        
+        const tf = '1y_1d'; 
+        let range = '1y'; let interval = '1d';
+        
+        try {
+            const result = await smartFetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}`, 'json', 8000);
+            const chartData = result?.chart?.result?.[0];
+            const metaPrevClose = chartData?.meta?.previousClose; 
+            
+            if (chartData && chartData.timestamp) {
+              const timestamps = chartData.timestamp; const quote = chartData.indicators.quote[0];
+              let rawPoints = timestamps.map((ts, idx) => ({ date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date(ts * 1000)), close: quote.close[idx], high: quote.high[idx], low: quote.low[idx], open: quote.open[idx] })).filter(d => d.close != null && d.high != null);
+              rawPoints.sort((a, b) => new Date(a.date) - new Date(b.date));
+              
+              const processedData = processTechnicalData(rawPoints);
+              await generateFullAnalysis(symbol, processedData, true, metaPrevClose);
+            }
+        } catch (e) {
+            console.error(`自動分析失敗 [${symbol}]:`, e);
+        }
+
+        if (i < tradableSymbols.length - 1) {
+            setAutoBatchProgress(`等待冷卻，準備分析下一檔...`);
+            await delay(15000); 
+        }
+      }
+      setToast("✅ 全盤自動分析與儲存完成！");
+    } catch (e) {
+      console.error("批次分析發生錯誤:", e);
+      setToast("❌ 自動分析中斷發生錯誤");
+    } finally {
+      setIsAutoBatchRunning(false);
+      setAutoBatchProgress('');
+    }
+  };
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
@@ -1741,7 +1850,6 @@ ${signalRules}
             const updated = { ...prev };
             validData.forEach(row => {
               const sym = row['標的'];
-              // 取消讀取主表單的自動分析，如果是全新標的給予預設值即可
               if (sym && !updated[sym]) {
                 updated[sym] = { type: 'CORE', isDCA: false, addon: 'PYRAMID', addon2: 'NONE', autoAnalyze: true };
               }
@@ -1882,94 +1990,6 @@ ${signalRules}
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
 
-  // -- Render State Computations --
-  const endIdx = zoom.endIndex === null ? currentChartData.length : Math.min(zoom.endIndex, currentChartData.length);
-  const startIdx = Math.max(0, endIdx - zoom.count);
-  const displayChartData = currentChartData.slice(startIdx, endIdx);
-
-  const safeHoverIndex = (hoverIndex !== null && hoverIndex >= 0 && hoverIndex < displayChartData.length) ? hoverIndex : null;
-  const activeIdx = safeHoverIndex !== null ? safeHoverIndex : Math.max(0, displayChartData.length - 1);
-  const activeCandle = displayChartData[activeIdx] || { open: 0, high: 0, low: 0, close: 0, volume: 0, ts: Date.now(), date: '' };
-  const prevC = activeIdx > 0 && displayChartData[activeIdx - 1] ? displayChartData[activeIdx - 1].close : activeCandle.open;
-  
-  const activeChange = activeCandle.close - prevC;
-  const activeChangePercent = prevC > 0 ? (activeChange / prevC) * 100 : 0;
-  const activeColorClass = activeChange > 0 ? 'text-red-500' : activeChange < 0 ? 'text-green-500' : 'text-white';
-  const activeSign = activeChange > 0 ? '▲ ' : activeChange < 0 ? '▼ ' : '';
-  
-  const formattedHoverDate = activeCandle.date ? activeCandle.date.replace(/-/g, '/') : (() => {
-    const dObj = activeCandle.ts ? new Date(activeCandle.ts) : new Date();
-    return `${dObj.getFullYear()}/${String(dObj.getMonth()+1).padStart(2,'0')}/${String(dObj.getDate()).padStart(2,'0')}`;
-  })();
-  const dateStr = safeHoverIndex !== null ? formattedHoverDate : `最新 (${formattedHoverDate})`;
-
-  const currentMA5 = activeCandle.MA5 || 0;
-  const currentMA20 = activeCandle.MA20 || 0;
-  const currentMA60 = activeCandle.MA60 || 0;
-  const currentBBUpper = activeCandle.BBU || 0;
-  const currentBBLower = activeCandle.BBL || 0;
-  const currentMACD = activeCandle.OSC || 0;
-  const currentK = activeCandle.K || 50;
-  const currentD = activeCandle.D || 50;
-  const currentRSI = activeCandle.RSI14 || 50;
-
-  const bias20 = currentMA20 > 0 ? ((activeCandle.close - currentMA20) / currentMA20) * 100 : 0;
-  const stockPrice = currentChartData.length > 0 ? currentChartData[currentChartData.length - 1].close : 0;
-
-  let bbStatus = "區間內震盪";
-  let bbColor = "text-yellow-400";
-  if (stockPrice > activeCandle.BBU && activeCandle.BBU > 0) {
-    bbStatus = "突破上軌 (強勢)";
-    bbColor = "text-red-500";
-  } else if (stockPrice < activeCandle.BBL && activeCandle.BBL > 0) {
-    bbStatus = "跌破下軌 (弱勢)";
-    bbColor = "text-green-500";
-  } else if (stockPrice > currentMA20) {
-    bbStatus = "中軌之上 (偏多)";
-    bbColor = "text-red-400";
-  } else if (stockPrice < currentMA20) {
-    bbStatus = "中軌之下 (偏空)";
-    bbColor = "text-green-400";
-  }
-
-  const latestChangePercent = currentChartData.length > 1 ? ((currentChartData[currentChartData.length - 1].close - currentChartData[currentChartData.length - 2].close) / currentChartData[currentChartData.length - 2].close) * 100 : 0;
-  const extRatio = Math.min(Math.max(Math.round(50 + latestChangePercent * 3), 20), 80);
-  const intRatio = 100 - extRatio;
-  
-  const bodySize = Math.abs(activeCandle.close - activeCandle.open);
-  const upperShadow = activeCandle.high - Math.max(activeCandle.close, activeCandle.open);
-  const lowerShadow = Math.min(activeCandle.close, activeCandle.open) - activeCandle.low;
-  
-  const isRedK = activeCandle.close >= activeCandle.open;
-  const isLongRed = isRedK && activeCandle.open > 0 && (activeCandle.close - activeCandle.open) / activeCandle.open > 0.03;
-  const isLongBlack = !isRedK && activeCandle.open > 0 && (activeCandle.open - activeCandle.close) / activeCandle.open > 0.03;
-  const hasUpperShadow = upperShadow > bodySize * 2 && upperShadow > (activeCandle.open * 0.01);
-  const hasLowerShadow = lowerShadow > bodySize * 2 && lowerShadow > (activeCandle.open * 0.01);
-
-  const last10 = displayChartData.slice(-10);
-  const winDays = last10.filter(d => d.close >= d.open).length;
-  const winRate = last10.length > 0 ? Math.round((winDays / last10.length) * 100) : 50;
-
-  const volMA5 = displayChartData.length >= 5 ? displayChartData.slice(-5).reduce((acc, curr) => acc + (curr.volume || 0), 0) / 5 : activeCandle.volume;
-  const isVolUp = (activeCandle.volume) > volMA5;
-
-  let paddedMin = 0, paddedMax = 0, mapPriceY = () => 0;
-  if (displayChartData.length > 0) {
-    const allLows = displayChartData.map(d => d.low);
-    const allHighs = displayChartData.map(d => d.high);
-    const validMAs = displayChartData.map(d => [d.MA5, d.MA20, d.MA60, d.BBU, d.BBL]).flat().filter(v => v !== null && v !== undefined);
-    
-    const minPrice = Math.min(...allLows, ...validMAs);
-    const maxPrice = Math.max(...allHighs, ...validMAs);
-    const priceRange = maxPrice - minPrice || 1;
-    
-    paddedMin = minPrice - priceRange * 0.05;
-    paddedMax = maxPrice + priceRange * 0.05;
-    const paddedRange = paddedMax - paddedMin || 1;
-    
-    mapPriceY = (val) => 280 - ((val - paddedMin) / paddedRange) * 260;
-  }
-
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20 md:pb-0">
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
@@ -1977,7 +1997,7 @@ ${signalRules}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
-            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.06</span></span>
+            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.08</span></span>
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">{['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (<button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-slate-900 text-blue-400' : 'text-slate-300 hover:bg-slate-700'}`}>{tab === 'overview' ? '資產總覽' : tab === 'history' ? '歷史走勢' : tab === 'chat' ? 'AI 助理' : tab === 'holdings' ? '持股明細' : '設定'}</button>))}</div>
@@ -2163,6 +2183,16 @@ ${signalRules}
                         </div>
                         <TextRow label="布林上" value={currentBBUpper > 0 ? currentBBUpper.toFixed(2) : '--'} valueColor="text-slate-300" />
                         <TextRow label="布林下" value={currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'} valueColor="text-slate-300" />
+                        
+                        {activeCandle.buyAction && (
+                          <div className="mt-2 border-t border-slate-700 pt-1 bg-slate-900/50 -mx-1 px-1 rounded shadow-inner">
+                            <div className="text-[10px] text-purple-400 font-bold mb-0.5">交易紀錄</div>
+                            <TextRow label="日期" value={String(activeCandle.buyAction['日期'] || '').substring(5)} valueColor="text-white" />
+                            <TextRow label="策略" value={activeCandle.buyAction['策略'] || '單筆'} valueColor="text-white" />
+                            <TextRow label="買價" value={activeCandle.buyAction['價格']} valueColor="text-yellow-400" />
+                            <TextRow label="股數" value={activeCandle.buyAction['股數']} valueColor="text-slate-300" />
+                          </div>
+                        )}
                         
                         <div className="flex gap-1 mb-1 mt-2">
                           <button onClick={() => setActiveSubChart('MACD')} className={`flex-1 py-1 rounded text-[10px] ${activeSubChart === 'MACD' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>MACD</button>
@@ -2928,7 +2958,7 @@ ${signalRules}
               <h4 className="text-sm font-semibold text-slate-300 mb-2 flex items-center">
                 <Activity className="w-4 h-4 mr-2 text-slate-400" /> 系統執行日誌 (Logs)
               </h4>
-              <div ref={logsContainerRef} className="bg-slate-900 border border-slate-700 rounded-md p-3 h-48 overflow-y-auto text-[10px] font-mono whitespace-pre-wrap">
+              <div ref={logsContainerRef} className="bg-slate-900 border border-slate-700 rounded-md p-3 h-48 overflow-y-auto text-[10px] font-mono whitespace-pre-wrap custom-scrollbar">
                 {appLogs.length > 0 ? appLogs.map((log, i) => (
                   <div key={i} className={`mb-1 ${log.level === 'error' ? 'text-red-400' : log.level === 'warn' ? 'text-yellow-400' : 'text-slate-400'}`}>
                     <span className="text-slate-500 mr-2">[{log.time}]</span>{log.msg}
