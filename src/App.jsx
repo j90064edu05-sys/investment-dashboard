@@ -15,9 +15,9 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.10 (完整整合版)
+ * Alpha 投資戰情室 v56.11 (完整整合版)
  * 
- * [v55.00 ~ v56.10 核心功能總覽]
+ * [v55.00 ~ v56.11 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
@@ -1990,6 +1990,93 @@ ${signalRules}
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
 
+  const endIdx = zoom.endIndex === null ? currentChartData.length : Math.min(zoom.endIndex, currentChartData.length);
+  const startIdx = Math.max(0, endIdx - zoom.count);
+  const displayChartData = currentChartData.slice(startIdx, endIdx);
+
+  const safeHoverIndex = (hoverIndex !== null && hoverIndex >= 0 && hoverIndex < displayChartData.length) ? hoverIndex : null;
+  const activeIdx = safeHoverIndex !== null ? safeHoverIndex : Math.max(0, displayChartData.length - 1);
+  const activeCandle = displayChartData[activeIdx] || { open: 0, high: 0, low: 0, close: 0, volume: 0, ts: Date.now(), date: '' };
+  const prevC = activeIdx > 0 && displayChartData[activeIdx - 1] ? displayChartData[activeIdx - 1].close : activeCandle.open;
+  
+  const activeChange = activeCandle.close - prevC;
+  const activeChangePercent = prevC > 0 ? (activeChange / prevC) * 100 : 0;
+  const activeColorClass = activeChange > 0 ? 'text-red-500' : activeChange < 0 ? 'text-green-500' : 'text-white';
+  const activeSign = activeChange > 0 ? '▲ ' : activeChange < 0 ? '▼ ' : '';
+  
+  const formattedHoverDate = activeCandle.date ? activeCandle.date.replace(/-/g, '/') : (() => {
+    const dObj = activeCandle.ts ? new Date(activeCandle.ts) : new Date();
+    return `${dObj.getFullYear()}/${String(dObj.getMonth()+1).padStart(2,'0')}/${String(dObj.getDate()).padStart(2,'0')}`;
+  })();
+  const dateStr = safeHoverIndex !== null ? formattedHoverDate : `最新 (${formattedHoverDate})`;
+
+  const currentMA5 = activeCandle.MA5 || 0;
+  const currentMA20 = activeCandle.MA20 || 0;
+  const currentMA60 = activeCandle.MA60 || 0;
+  const currentBBUpper = activeCandle.BBU || 0;
+  const currentBBLower = activeCandle.BBL || 0;
+  const currentMACD = activeCandle.OSC || 0;
+  const currentK = activeCandle.K || 50;
+  const currentD = activeCandle.D || 50;
+  const currentRSI = activeCandle.RSI14 || 50;
+
+  const bias20 = currentMA20 > 0 ? ((activeCandle.close - currentMA20) / currentMA20) * 100 : 0;
+  const stockPrice = currentChartData.length > 0 ? currentChartData[currentChartData.length - 1].close : 0;
+
+  let bbStatus = "區間內震盪";
+  let bbColor = "text-yellow-400";
+  if (stockPrice > activeCandle.BBU && activeCandle.BBU > 0) {
+    bbStatus = "突破上軌 (強勢)";
+    bbColor = "text-red-500";
+  } else if (stockPrice < activeCandle.BBL && activeCandle.BBL > 0) {
+    bbStatus = "跌破下軌 (弱勢)";
+    bbColor = "text-green-500";
+  } else if (stockPrice > currentMA20) {
+    bbStatus = "中軌之上 (偏多)";
+    bbColor = "text-red-400";
+  } else if (stockPrice < currentMA20) {
+    bbStatus = "中軌之下 (偏空)";
+    bbColor = "text-green-400";
+  }
+
+  const latestChangePercent = currentChartData.length > 1 ? ((currentChartData[currentChartData.length - 1].close - currentChartData[currentChartData.length - 2].close) / currentChartData[currentChartData.length - 2].close) * 100 : 0;
+  const extRatio = Math.min(Math.max(Math.round(50 + latestChangePercent * 3), 20), 80);
+  const intRatio = 100 - extRatio;
+  
+  const bodySize = Math.abs(activeCandle.close - activeCandle.open);
+  const upperShadow = activeCandle.high - Math.max(activeCandle.close, activeCandle.open);
+  const lowerShadow = Math.min(activeCandle.close, activeCandle.open) - activeCandle.low;
+  
+  const isRedK = activeCandle.close >= activeCandle.open;
+  const isLongRed = isRedK && activeCandle.open > 0 && (activeCandle.close - activeCandle.open) / activeCandle.open > 0.03;
+  const isLongBlack = !isRedK && activeCandle.open > 0 && (activeCandle.open - activeCandle.close) / activeCandle.open > 0.03;
+  const hasUpperShadow = upperShadow > bodySize * 2 && upperShadow > (activeCandle.open * 0.01);
+  const hasLowerShadow = lowerShadow > bodySize * 2 && lowerShadow > (activeCandle.open * 0.01);
+
+  const last10 = displayChartData.slice(-10);
+  const winDays = last10.filter(d => d.close >= d.open).length;
+  const winRate = last10.length > 0 ? Math.round((winDays / last10.length) * 100) : 50;
+
+  const volMA5 = displayChartData.length >= 5 ? displayChartData.slice(-5).reduce((acc, curr) => acc + (curr.volume || 0), 0) / 5 : activeCandle.volume;
+  const isVolUp = (activeCandle.volume) > volMA5;
+
+  let paddedMin = 0, paddedMax = 0, mapPriceY = () => 0;
+  if (displayChartData.length > 0) {
+    const allLows = displayChartData.map(d => d.low);
+    const allHighs = displayChartData.map(d => d.high);
+    const validMAs = displayChartData.map(d => [d.MA5, d.MA20, d.MA60, d.BBU, d.BBL]).flat().filter(v => v !== null && v !== undefined);
+    
+    const minPrice = Math.min(...allLows, ...validMAs);
+    const maxPrice = Math.max(...allHighs, ...validMAs);
+    const priceRange = maxPrice - minPrice || 1;
+    
+    paddedMin = minPrice - priceRange * 0.05;
+    paddedMax = maxPrice + priceRange * 0.05;
+    const paddedRange = paddedMax - paddedMin || 1;
+    
+    mapPriceY = (val) => 280 - ((val - paddedMin) / paddedRange) * 260;
+  }
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 font-sans pb-20 md:pb-0">
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
@@ -1997,7 +2084,7 @@ ${signalRules}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
-            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.08</span></span>
+            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.11</span></span>
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">{['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (<button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-slate-900 text-blue-400' : 'text-slate-300 hover:bg-slate-700'}`}>{tab === 'overview' ? '資產總覽' : tab === 'history' ? '歷史走勢' : tab === 'chat' ? 'AI 助理' : tab === 'holdings' ? '持股明細' : '設定'}</button>))}</div>
