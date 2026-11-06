@@ -2460,33 +2460,34 @@ ${signalRules}
                               Vol
                             </div>
                             <div style={{ height: '3.85%' }}></div>
-                            <div className="flex flex-col justify-between pt-1 pb-1" style={{ height: '19.23%' }}>
-                              {activeSubChart === 'MACD' && <div className="h-full flex items-center text-blue-400">MACD</div>}
-                              {activeSubChart === 'KD' && (
-                                <><span className="text-yellow-400">80</span><span className="text-slate-600">KD</span><span className="text-yellow-400">20</span></>
-                              )}
-                              {activeSubChart === 'RSI' && (
-                                <><span className="text-purple-400">70</span><span className="text-slate-600">RSI</span><span className="text-purple-400">30</span></>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 px-2 py-1.5 border-t border-slate-700/50 text-[10px] text-slate-400 bg-slate-900/50">
-                      <span className="font-semibold text-slate-300">圖例說明:</span>
-                      {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
-                        <div key={key} className="flex items-center">
-                          <svg width="14" height="14" className="mr-1 overflow-visible">{renderShape(config.shape, 7, 7, config.color, 4)}</svg>
-                          {String(config.label)}
+							<div className="flex flex-col justify-between pt-1 pb-1" style={{ height: '19.23%' }}>
+							{activeSubChart === 'MACD' && <div className="h-full flex items-center text-blue-400">MACD</div>}
+							{activeSubChart === 'KD' && (
+								<><span className="text-yellow-400">80</span><span className="text-slate-600">KD</span><span className="text-yellow-400">20</span></>
+							)}
+							{activeSubChart === 'RSI' && (
+								<><span className="text-purple-400">70</span><span className="text-slate-600">RSI</span><span className="text-purple-400">30</span></>
+							)}
                         </div>
-                      ))}
-                    </div>
-                  </Card>
+                      </div>
+                    )}
+                  </div>
+                </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-2">
-                    <Card title="動態技術分析">
+                <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-3 px-3 py-3 border-t border-slate-700 text-xs text-slate-300 bg-slate-900">
+                  <span className="font-bold text-white flex items-center"><Info className="w-4 h-4 mr-1 text-blue-400"/>歷史投資紀錄圖例:</span>
+                  {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
+                    <div key={key} className="flex items-center bg-slate-800 px-2 py-1 rounded border border-slate-700 shadow-sm">
+                      <svg width="16" height="16" className="mr-1.5 overflow-visible">{renderShape(config.shape, 8, 8, config.color, 5)}</svg>
+                      <span className="font-medium text-slate-200">{String(config.label)}</span>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-2">
+                <Card title="動態技術分析">
+                  <div className="flex flex-col gap-1.5 mt-1">
                       <div className="flex flex-col gap-1.5 mt-1">
                         <TextRow label="布林軌道" value={bbStatus} valueColor={bbColor} />
                         <TextRow label="多空排列" value={stockPrice > currentMA20 ? "站上月線" : "跌破月線"} valueColor={stockPrice > currentMA20 ? "text-red-500" : "text-green-500"} />
@@ -2508,15 +2509,15 @@ ${signalRules}
                           <span className="text-lg font-mono text-white">{currentBBUpper > 0 ? currentBBUpper.toFixed(2) : '--'}</span>
                         </div>
                         <div className="bg-green-900/20 border border-green-500/30 p-2 rounded flex justify-between items-center mt-2">
-                          <span className="text-xs text-green-400 font-bold">下檔支撐 (布林下軌)</span>
-                          <span className="text-lg font-mono text-white">{currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'}</span>
-                        </div>
-                      </div>
-                    </Card>
-                  </div>
+							<span className="text-xs text-green-400 font-bold">下檔支撐 (布林下軌)</span>
+							<span className="text-lg font-mono text-white">{currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'}</span>
+						</div>
+					   </div>
+					</Card>
+			  </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 mt-2">
-                    <Card title="主力出貨警示" className="items-center justify-center py-2 lg:col-span-2">
+              <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 mt-2">
+                <Card title="主力出貨警示" className="items-center justify-center py-2 lg:col-span-2">
                       <div className="flex justify-around w-full px-4 mb-3 mt-1">
                         <div className="flex flex-col items-center gap-1">
                           <span className="text-[10px] text-slate-400">主力動向</span>
