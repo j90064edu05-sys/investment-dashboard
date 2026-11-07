@@ -15,9 +15,9 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.11 (完整整合版)
+ * Alpha 投資戰情室 v56.12 (完整整合版)
  * 
- * [v55.00 ~ v56.11 核心功能總覽]
+ * [v55.00 ~ v56.12 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
@@ -411,7 +411,6 @@ const processTechnicalData = (rawData) => {
   d = calculateSMA(d, 240); 
   d = calculateKD(d, 9); 
   d = calculateMACD(d); 
-  const rsi6 = calculateRSI(d, 6);
   const rsi6 = calculateRSI(d, 6); 
   const rsi12 = calculateRSI(d, 12); 
   const rsi14 = calculateRSI(d, 14);
@@ -2088,7 +2087,7 @@ ${signalRules}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
-            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.11</span></span>
+            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.12</span></span>
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">{['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (<button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-slate-900 text-blue-400' : 'text-slate-300 hover:bg-slate-700'}`}>{tab === 'overview' ? '資產總覽' : tab === 'history' ? '歷史走勢' : tab === 'chat' ? 'AI 助理' : tab === 'holdings' ? '持股明細' : '設定'}</button>))}</div>
@@ -2513,7 +2512,8 @@ ${signalRules}
                         <TextRow label="月線乖離" value={`${bias20.toFixed(2)}%`} valueColor={Math.abs(bias20) > 8 ? "text-yellow-400" : "text-white"} />
                         <TextRow label="KD 狀態" value={currentK > 80 ? "高檔鈍化" : currentK < 20 ? "低檔超跌" : "中性區間"} valueColor={currentK > 80 ? "text-red-400" : currentK < 20 ? "text-green-400" : "text-white"} />
                       </div>
-                    </Card>
+				   </div>	  
+                </Card>
                     <Card title="籌碼動態模擬">
                       <div className="flex flex-col gap-1.5 mt-1">
                         <TextRow label="當前力道" value={activeChangePercent > 0 ? "買盤轉強" : "賣壓湧現"} valueColor={activeColorClass} />
