@@ -408,8 +408,10 @@ const processTechnicalData = (rawData) => {
   d = calculateSMA(d, 20); 
   d = calculateSMA(d, 60); 
   d = calculateSMA(d, 120); 
+  d = calculateSMA(d, 240); 
   d = calculateKD(d, 9); 
   d = calculateMACD(d); 
+  const rsi6 = calculateRSI(d, 6);
   const rsi6 = calculateRSI(d, 6); 
   const rsi12 = calculateRSI(d, 12); 
   const rsi14 = calculateRSI(d, 14);
@@ -2013,6 +2015,8 @@ ${signalRules}
   const currentMA5 = activeCandle.MA5 || 0;
   const currentMA20 = activeCandle.MA20 || 0;
   const currentMA60 = activeCandle.MA60 || 0;
+  const currentMA120 = activeCandle.MA120 || 0;
+  const currentMA240 = activeCandle.MA240 || 0;
   const currentBBUpper = activeCandle.BBU || 0;
   const currentBBLower = activeCandle.BBL || 0;
   const currentMACD = activeCandle.OSC || 0;
@@ -2064,7 +2068,7 @@ ${signalRules}
   if (displayChartData.length > 0) {
     const allLows = displayChartData.map(d => d.low);
     const allHighs = displayChartData.map(d => d.high);
-    const validMAs = displayChartData.map(d => [d.MA5, d.MA20, d.MA60, d.BBU, d.BBL]).flat().filter(v => v !== null && v !== undefined);
+    const validMAs = displayChartData.map(d => [d.MA5, d.MA20, d.MA60, d.MA120, d.MA240, d.BBU, d.BBL]).flat().filter(v => v !== null && v !== undefined);
     
     const minPrice = Math.min(...allLows, ...validMAs);
     const maxPrice = Math.max(...allHighs, ...validMAs);
@@ -2247,6 +2251,8 @@ ${signalRules}
                         <span className="text-yellow-500 font-mono flex items-center">MA5: {currentMA5 > 0 ? currentMA5.toFixed(2) : '--'}</span>
                         <span className="text-cyan-400 font-mono flex items-center">MA20: {currentMA20 > 0 ? currentMA20.toFixed(2) : '--'}</span>
                         <span className="text-purple-400 font-mono flex items-center">MA60: {currentMA60 > 0 ? currentMA60.toFixed(2) : '--'}</span>
+                        <span className="text-blue-500 font-mono flex items-center hidden sm:flex">MA120: {currentMA120 > 0 ? currentMA120.toFixed(2) : '--'}</span>
+                        <span className="text-rose-500 font-mono flex items-center hidden md:flex">MA240: {currentMA240 > 0 ? currentMA240.toFixed(2) : '--'}</span>
                       </div>
                       <div className="hidden md:flex text-slate-400 items-center gap-2">
                         <span className="animate-pulse text-blue-400 opacity-70">💡 滾輪/雙指可縮放，拖曳可平移</span>
@@ -2395,6 +2401,8 @@ ${signalRules}
                                 <path d={buildPath('MA5', mapPriceY)} stroke="#eab308" />
                                 <path d={buildPath('MA20', mapPriceY)} stroke="#22d3ee" />
                                 <path d={buildPath('MA60', mapPriceY)} stroke="#c084fc" />
+                                <path d={buildPath('MA120', mapPriceY)} stroke="#3b82f6" />
+                                <path d={buildPath('MA240', mapPriceY)} stroke="#f43f5e" />
                                 
                                 {activeSubChart === 'MACD' && (
                                   <>
@@ -2474,16 +2482,27 @@ ${signalRules}
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-3 px-3 py-3 border-t border-slate-700 text-xs text-slate-300 bg-slate-900">
-                  <span className="font-bold text-white flex items-center"><Info className="w-4 h-4 mr-1 text-blue-400"/>歷史投資紀錄圖例:</span>
-                  {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
-                    <div key={key} className="flex items-center bg-slate-800 px-2 py-1 rounded border border-slate-700 shadow-sm">
-                      <svg width="16" height="16" className="mr-1.5 overflow-visible">{renderShape(config.shape, 8, 8, config.color, 5)}</svg>
-                      <span className="font-medium text-slate-200">{String(config.label)}</span>
+                <div className="flex flex-col gap-2 px-3 py-2 border-t border-slate-700/50 text-[10px] text-slate-400 bg-slate-900/50">
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                        <span className="font-semibold text-slate-300">主圖線型說明:</span>
+                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#eab308] mr-1"></div>MA5(週)</span>
+                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#22d3ee] mr-1"></div>MA20(月)</span>
+                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#c084fc] mr-1"></div>MA60(季)</span>
+                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#3b82f6] mr-1"></div>MA120(半年)</span>
+                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#f43f5e] mr-1"></div>MA240(年)</span>
+                        <span className="flex items-center"><div className="w-3 h-0.5 border-t border-dashed border-[#8b5cf6] mr-1"></div>布林帶</span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                        <span className="font-semibold text-slate-300">過往交易策略:</span>
+                        {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
+                          <div key={key} className="flex items-center">
+                            <svg width="14" height="14" className="mr-1 overflow-visible">{renderShape(config.shape, 7, 7, config.color, 4)}</svg>
+                            {String(config.label)}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  ))}
-                </div>
-              </Card>
+                  </Card>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-2">
                 <Card title="動態技術分析">
