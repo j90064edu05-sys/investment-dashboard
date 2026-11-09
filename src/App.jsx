@@ -1657,7 +1657,7 @@ ${signalRules}
 
         if (!localStorage.getItem(lockKey)) {
           localStorage.setItem(lockKey, 'true');
-          startAutoBatchAnalysis(runType);
+          //startAutoBatchAnalysis(runType);
         }
       }
     }, 60000);
@@ -1666,7 +1666,7 @@ ${signalRules}
   }, [tradableSymbols, isUiLocked, isAutoBatchRunning]);
 
   // 序列化批次執行引擎
-  const startAutoBatchAnalysis = async (runType) => {
+  /*const startAutoBatchAnalysis = async (runType) => {
     if (tradableSymbols.length === 0 || !geminiApiKey) return;
     
     setIsAutoBatchRunning(true);
@@ -1712,7 +1712,7 @@ ${signalRules}
       setIsAutoBatchRunning(false);
       setAutoBatchProgress('');
     }
-  };
+  };*/
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
