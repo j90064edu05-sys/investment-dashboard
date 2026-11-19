@@ -15,16 +15,16 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.13 (完整整合版)
+ * Alpha 投資戰情室 v56.14 (完整整合版)
  * 
- * [v55.00 ~ v56.13 核心功能總覽]
+ * [v55.00 ~ v56.14 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
  * 4. 歷史走勢 AI 分析雙模式：「綜合趨勢分析」與「回測交易策略」。
  * 5. 獨立：將「回測交易策略」分離，不與「綜合趨勢分析」混用快取，且回測不執行雲端同步。
  * 6. 雲端同步 POST：完全採用 URLSearchParams 表單格式提交，徹底解決 CORS 阻擋。
- * 7. 自動排程器整合：內建網頁端 08:30 與 12:00 自動背景批次 AI 分析功能。
+ * 7. 自動排程器整合：內建網頁端自動背景批次 AI 分析功能。
  */
 
 const DEMO_DATA = [
@@ -463,6 +463,8 @@ const App = () => {
   const [etfExtraData, setEtfExtraData] = useState({}); 
   const [usdRate, setUsdRate] = useState(1); 
   const [usBondYields, setUsBondYields] = useState({ '10Y': null, '20Y': null, '30Y': null }); 
+  const [macroData, setMacroData] = useState(null);
+  const [macroLoading, setMacroLoading] = useState(false);
   const [updateError, setUpdateError] = useState(null);
   const [historicalData, setHistoricalData] = useState({});
   const [selectedHistorySymbol, setSelectedHistorySymbol] = useState(null);
@@ -1104,6 +1106,119 @@ const App = () => {
     } catch (e) {}
   }, [gasWebAppUrl, reportSheetUrl, sheetUrl, parseAndStoreCloudRows]);
 
+  const formatMacroPromptText = useCallback((m) => {
+    if (!m) return '總體經濟數據：暫無最新數據';
+    const parts = [];
+    if (m.fedRate) parts.push(`Fed基準利率=${m.fedRate.value}% (${m.fedRate.date})`);
+    if (m.usCpiYoY) parts.push(`美國CPI年增率=${m.usCpiYoY.value}% (${m.usCpiYoY.date})`);
+    if (m.usUnrate) parts.push(`美國失業率=${m.usUnrate.value}% (${m.usUnrate.date})`);
+    if (m.us10Y) parts.push(`10年期美債殖利率=${m.us10Y.value}%`);
+    if (m.spread10Y2Y) parts.push(`美債10Y-2Y利差=${m.spread10Y2Y.value}%${m.spread10Y2Y.value < 0 ? ' (殖利率倒掛警戒)' : ''}`);
+    if (m.vix) parts.push(`VIX恐慌指數=${m.vix.value}`);
+    if (m.dxy) parts.push(`美元指數DXY=${m.dxy.value}`);
+    if (m.twii) parts.push(`台灣加權指數=${m.twii.value}`);
+    return parts.length > 0 ? `【最新全球總體經濟數據 (${m.updatedAt || ''})】：${parts.join('、')}` : '總體經濟數據：暫無最新數據';
+  }, []);
+
+  const fetchMacroData = useCallback(async (forceRefresh = false, customGasUrl = '') => {
+    const today = getTodayDate();
+    if (!forceRefresh) {
+      try {
+        const cached = JSON.parse(localStorage.getItem('alpha_macro_data_cache') || 'null');
+        if (cached && cached.cacheDate === today && cached.data) {
+          setMacroData(cached.data);
+          return cached.data;
+        }
+      } catch (e) {}
+    }
+
+    setMacroLoading(true);
+    try {
+      const targetGasUrl = (customGasUrl || gasWebAppUrl || localStorage.getItem('gas_webapp_url') || '').trim();
+      if (targetGasUrl) {
+        try {
+          const gasMacroUrl = targetGasUrl + (targetGasUrl.includes('?') ? '&' : '?') + `action=GET_MACRO&_t=${Date.now()}`;
+          const res = await fetch(gasMacroUrl, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+          if (res.ok) {
+            const json = await res.json();
+            if (json && json.status === 'success' && json.macro) {
+              setMacroData(json.macro);
+              localStorage.setItem('alpha_macro_data_cache', JSON.stringify({ cacheDate: today, data: json.macro }));
+              console.log('[Macro API] 🟢 已透過 GAS 雲端引擎載入最新總經數據');
+              setMacroLoading(false);
+              return json.macro;
+            }
+          }
+        } catch (e) {
+          console.log('[Macro API] 🟡 GAS 總經讀取略過，改由前端直接串接 FRED / Yahoo API');
+        }
+      }
+
+      const startYear = new Date().getFullYear() - 2;
+      const fetchFred = async (seriesId, calcYoY = false) => {
+        try {
+          const csv = await smartFetch(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${encodeURIComponent(seriesId)}&cosd=${startYear}-01-01`, 'text', 6000);
+          if (!csv || typeof csv !== 'string') return null;
+          const lines = csv.trim().split('\n');
+          const valid = [];
+          for (let i = 1; i < lines.length; i++) {
+            const parts = lines[i].split(',');
+            if (parts.length >= 2) {
+              const val = parseFloat(parts[1]);
+              if (!isNaN(val)) valid.push({ date: parts[0].trim(), value: val });
+            }
+          }
+          if (valid.length === 0) return null;
+          const latest = valid[valid.length - 1];
+          if (calcYoY && valid.length >= 13) {
+            const prevYear = valid[valid.length - 13];
+            const yoy = ((latest.value - prevYear.value) / prevYear.value) * 100;
+            return { value: parseFloat(yoy.toFixed(2)), date: latest.date };
+          }
+          return { value: parseFloat(latest.value.toFixed(2)), date: latest.date };
+        } catch (e) { return null; }
+      };
+
+      const fetchYahooMacro = async (sym) => {
+        try {
+          const json = await smartFetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`, 'json', 6000);
+          const meta = json?.chart?.result?.[0]?.meta;
+          if (!meta || meta.regularMarketPrice == null) return null;
+          const price = parseFloat(meta.regularMarketPrice);
+          const prev = meta.chartPreviousClose ?? meta.previousClose ?? price;
+          const changePct = prev > 0 ? ((price - prev) / prev) * 100 : 0;
+          return { value: parseFloat(price.toFixed(2)), changePct: parseFloat(changePct.toFixed(2)) };
+        } catch (e) { return null; }
+      };
+
+      const [fedRate, usCpiYoY, usUnrate, spread10Y2Y, us10Y, vix, dxy, twii] = await Promise.all([
+        fetchFred('FEDFUNDS', false),
+        fetchFred('CPIAUCSL', true),
+        fetchFred('UNRATE', false),
+        fetchFred('T10Y2Y', false),
+        fetchYahooMacro('^TNX'),
+        fetchYahooMacro('^VIX'),
+        fetchYahooMacro('DX-Y.NYB'),
+        fetchYahooMacro('^TWII')
+      ]);
+
+      const updatedAt = new Intl.DateTimeFormat('sv-SE', {
+        timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+      }).format(new Date());
+
+      const result = { updatedAt, fedRate, usCpiYoY, usUnrate, spread10Y2Y, us10Y, vix, dxy, twii };
+      setMacroData(result);
+      localStorage.setItem('alpha_macro_data_cache', JSON.stringify({ cacheDate: today, data: result }));
+      console.log('[Macro API] 🟢 已完成全球總經數據更新');
+      return result;
+    } catch (e) {
+      console.warn('[Macro API] 總經數據更新失敗:', e.message);
+      return null;
+    } finally {
+      setMacroLoading(false);
+    }
+  }, [gasWebAppUrl]);
+
   const processData = (data, pricesMap, extraMap = {}) => {
     const currentUsdRate = pricesMap['TWD=X'] || 30; 
     const enrichedData = data.map((item, index) => {
@@ -1347,11 +1462,13 @@ const App = () => {
     const totalAsset = summary.totalValue;
     const allHoldingsWithPct = sortedHoldings.map(h => `${h['名稱']}(${h['標的']}): ${formatPercent(h.marketValue / totalAsset)}`).join(', ');
     const allocationStr = allocationData.map(d => `${d.name} ${formatPercent(d.percentage)}`).join(', ');
+    const macroContextStr = formatMacroPromptText(macroData);
     
     const prompt = `角色：首席風險經理與投資長。
 評估投資組合：總資產${formatCurrency(summary.totalValue)}, 總損益${formatCurrency(summary.totalPL)}, 類別配置：${allocationStr}。
+${macroContextStr}
 
-請結合以下任務進行深度分析：
+請結合上述總體經濟環境與以下任務進行深度分析：
 【對投資組合進行壓力測試】
 分析這個投資組合：［${allHoldingsWithPct}］。
 找出集中風險、產業曝險、地區曝險、重複押注、隱藏關聯，以及市場拋售時可能同步反應的部位。
@@ -1483,6 +1600,7 @@ const App = () => {
       const timeframeMap = { '1y_1d': '1年日線', '5y_1wk': '5年週線', '10y_1mo': '10年月線' };
       const periodStr = `${timeframeMap[timeframe] || timeframe} (${startDate} 至 ${endDate})`;
       const strategyDesc = `${classLabel} / ${isDCA ? '定期定額' : '單筆投入'} / 加碼1:${ADDON_LABELS[settings.addon] || '無'} / 加碼2:${ADDON_LABELS[settings.addon2] || '無'}`;
+      const macroContextStr = formatMacroPromptText(macroData);
 
       let prompt = "";
       if (customAnalysisType === 'STRATEGY_BACKTEST') {
@@ -1492,9 +1610,10 @@ const App = () => {
 計算交易次數、勝率、平均獲利、平均虧損、最大回撤、獲利因子，以及不同市場環境下的績效。
 接著找出策略最有效與失效的情況，並提出下一步可測試、但不過度擬合歷史資料的規則。」
 
-當前最新技術面參考：
+當前最新技術面與總經環境參考：
 最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}
 數據：${keyMetrics}
+${macroContextStr}
 指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}
 鐵律：現價>=昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。${addOnConstraint}
 ${signalRules}
@@ -1512,6 +1631,7 @@ ${signalRules}
 投資定位：${classLabel}。模式：${dcaStrategy}
 最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}
 數據：${keyMetrics}
+${macroContextStr}
 指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}
 鐵律：現價>=昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。${addOnConstraint}
 濾網：1.大波動(MACD綠柱收斂/DIF金叉) 2.小波動(布林下緣) 3.大盤ETF(KD<20) 4.科技ETF(折價/RSI<30) 5.債券ETF(殖利率創高)。
@@ -1936,7 +2056,8 @@ ${signalRules}
     if (!chatInput.trim() || !geminiApiKey) return;
     const userMsg = { role: 'user', content: chatInput }; setChatMessages(prev => [...prev, userMsg]); setChatInput(''); setIsChatLoading(true);
     const contextData = { totalAssets: summary.totalValue, totalProfit: summary.totalPL, roi: summary.totalROI, holdings: aggregatedHoldings.map(h => ({ symbol: h['標的'], name: h['名稱'], value: h.marketValue, roi: h.roi, type: assetClassifications[h['標的']] || 'CORE' })) };
-    const prompt = `角色：專業投資顧問。使用者數據：${JSON.stringify(contextData)}。核心(追求穩健)、衛星(追求波段)。使用者問題：${userMsg.content} 請簡短、專業回答。`;
+    const macroContextStr = formatMacroPromptText(macroData);
+    const prompt = `角色：專業投資顧問。使用者數據：${JSON.stringify(contextData)}。${macroContextStr}。核心(追求穩健)、衛星(追求波段)。使用者問題：${userMsg.content} 請簡短、專業回答。`;
     try {
       const { text: reply } = await callGeminiWithFallback(prompt); setChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
     } catch (err) { setChatMessages(prev => [...prev, { role: 'assistant', content: `抱歉，AI 暫時無法回應 (${String(err.message)})` }]); } finally { setIsChatLoading(false); }
@@ -2033,6 +2154,7 @@ ${signalRules}
     const cache = getAiCache(); const signals = {}; Object.keys(cache).forEach(key => { if (cache[key].signal) signals[key] = cache[key].signal; }); setAiSignals(signals);
     const today = getTodayDate(); let cacheModified = false; Object.keys(cache).forEach(key => { if (cache[key].date !== today) { delete cache[key]; cacheModified = true; } }); if (cacheModified) localStorage.setItem('gemini_analysis_cache', JSON.stringify(cache));
 
+    fetchMacroData(false, savedGasUrl || '');
     if (savedUrl) { setSheetUrl(savedUrl); performFetch(savedUrl); } else { processData(DEMO_DATA, {}); fetchRealTimePrices(DEMO_DATA); }
   }, []);
 
@@ -2153,6 +2275,148 @@ ${signalRules}
               {[ { label: '總資產現值', value: formatCurrency(summary.totalValue), icon: DollarSign, color: 'text-yellow-400', bg: 'bg-blue-900/50', iColor: 'text-blue-400' }, { label: '投入成本', value: formatCurrency(summary.totalCost), icon: Briefcase, color: 'text-white', bg: 'bg-purple-900/50', iColor: 'text-purple-400' }, { label: '未實現淨損益 (已扣稅費)', value: `${summary.totalPL > 0 ? '+' : ''}${formatCurrency(summary.totalPL)}`, icon: summary.totalPL >= 0 ? ArrowUpCircle : ArrowDownCircle, color: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500', bg: summary.totalPL >= 0 ? 'bg-red-900/30' : 'bg-green-900/30', iColor: summary.totalPL >= 0 ? 'text-red-500' : 'text-green-500' }, { label: '投資報酬率 (ROI)', value: `${summary.totalROI > 0 ? '+' : ''}${formatPercent(summary.totalROI)}`, icon: PieIcon, color: summary.totalROI >= 0 ? 'text-red-500' : 'text-green-500', bg: 'bg-slate-700', iColor: 'text-slate-300' } ].map((item, idx) => (
                 <div key={idx} className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow flex items-center"><div className={`flex-shrink-0 ${item.bg} rounded-md p-3`}><item.icon className={`h-6 w-6 ${item.iColor}`} /></div><div className="ml-5 flex-1 min-w-0"><p className="text-sm font-medium text-slate-400 truncate">{String(item.label)}</p><p className={`${getResponsiveFontSize(item.value)} font-bold ${item.color} whitespace-nowrap overflow-hidden text-ellipsis`}>{String(item.value)}</p></div></div>
               ))}
+            </div>
+
+            {/* 全球總體經濟儀表板 (Macro Dashboard) */}
+            <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-lg">
+              <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
+                <div className="flex items-center">
+                  <Globe className="w-5 h-5 mr-2 text-cyan-400" />
+                  <h3 className="text-lg font-semibold text-white">全球總體經濟儀表板</h3>
+                  <span className="ml-3 text-[11px] text-slate-400 bg-slate-900/70 px-2 py-0.5 rounded border border-slate-700">
+                    FRED 官方數據 + 市場即時指標
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  {macroData?.updatedAt && (
+                    <span className="text-xs text-slate-500 hidden sm:inline">更新於: {macroData.updatedAt}</span>
+                  )}
+                  <button
+                    onClick={() => fetchMacroData(true)}
+                    disabled={macroLoading}
+                    className="text-xs flex items-center px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-cyan-300 border border-slate-600 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${macroLoading ? 'animate-spin' : ''}`} />
+                    {macroLoading ? '更新總經中...' : '更新總經'}
+                  </button>
+                </div>
+              </div>
+
+              {macroLoading && !macroData ? (
+                <div className="flex items-center justify-center py-8 text-slate-400 text-sm">
+                  <Loader2 className="w-5 h-5 animate-spin mr-2 text-cyan-400" /> 正在串接 FRED 與市場總經 API...
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
+                    <div className="text-xs text-slate-400 flex justify-between">
+                      <span>Fed 基準利率</span>
+                      <span className="text-[10px] text-slate-500">{macroData?.fedRate?.date || '--'}</span>
+                    </div>
+                    <div className="text-xl font-bold font-mono text-white mt-1">
+                      {macroData?.fedRate ? `${macroData.fedRate.value.toFixed(2)}%` : '--'}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">美國聯邦基金利率</div>
+                  </div>
+
+                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
+                    <div className="text-xs text-slate-400 flex justify-between">
+                      <span>美國 CPI 年增率</span>
+                      <span className="text-[10px] text-slate-500">{macroData?.usCpiYoY?.date || '--'}</span>
+                    </div>
+                    <div className={`text-xl font-bold font-mono mt-1 ${macroData?.usCpiYoY?.value > 3 ? 'text-red-400' : macroData?.usCpiYoY?.value <= 2.2 ? 'text-green-400' : 'text-yellow-400'}`}>
+                      {macroData?.usCpiYoY ? `${macroData.usCpiYoY.value.toFixed(2)}%` : '--'}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">通膨壓力指標 (目標 2%)</div>
+                  </div>
+
+                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
+                    <div className="text-xs text-slate-400 flex justify-between">
+                      <span>美國失業率</span>
+                      <span className="text-[10px] text-slate-500">{macroData?.usUnrate?.date || '--'}</span>
+                    </div>
+                    <div className={`text-xl font-bold font-mono mt-1 ${macroData?.usUnrate?.value >= 4.5 ? 'text-red-400' : 'text-white'}`}>
+                      {macroData?.usUnrate ? `${macroData.usUnrate.value.toFixed(1)}%` : '--'}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">就業市場健康度</div>
+                  </div>
+
+                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
+                    <div className="text-xs text-slate-400 flex justify-between">
+                      <span>美債 10Y-2Y 利差</span>
+                      {macroData?.spread10Y2Y && (
+                        <span className={`text-[10px] px-1.5 rounded ${macroData.spread10Y2Y.value < 0 ? 'bg-red-900/50 text-red-300' : 'bg-green-900/50 text-green-300'}`}>
+                          {macroData.spread10Y2Y.value < 0 ? '倒掛警戒' : '正常'}
+                        </span>
+                      )}
+                    </div>
+                    <div className={`text-xl font-bold font-mono mt-1 ${macroData?.spread10Y2Y?.value < 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                      {macroData?.spread10Y2Y ? `${macroData.spread10Y2Y.value > 0 ? '+' : ''}${macroData.spread10Y2Y.value.toFixed(2)}%` : '--'}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">景氣衰退領先指標</div>
+                  </div>
+
+                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
+                    <div className="text-xs text-slate-400 flex justify-between">
+                      <span>10年期美債殖利率</span>
+                      {macroData?.us10Y && (
+                        <span className={`text-[10px] font-mono ${macroData.us10Y.changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                          {macroData.us10Y.changePct >= 0 ? '+' : ''}{macroData.us10Y.changePct}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xl font-bold font-mono text-purple-300 mt-1">
+                      {macroData?.us10Y ? `${macroData.us10Y.value.toFixed(2)}%` : (usBondYields['10Y'] ? `${Number(usBondYields['10Y']).toFixed(2)}%` : '--')}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">全球無風險定價之錨</div>
+                  </div>
+
+                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
+                    <div className="text-xs text-slate-400 flex justify-between">
+                      <span>VIX 恐慌指數</span>
+                      {macroData?.vix && (
+                        <span className={`text-[10px] px-1.5 rounded ${macroData.vix.value >= 25 ? 'bg-red-900/50 text-red-300' : macroData.vix.value <= 15 ? 'bg-green-900/50 text-green-300' : 'bg-yellow-900/50 text-yellow-300'}`}>
+                          {macroData.vix.value >= 25 ? '恐慌警戒' : macroData.vix.value <= 15 ? '低波動' : '中性'}
+                        </span>
+                      )}
+                    </div>
+                    <div className={`text-xl font-bold font-mono mt-1 ${macroData?.vix?.value >= 25 ? 'text-red-400' : macroData?.vix?.value <= 15 ? 'text-green-400' : 'text-yellow-400'}`}>
+                      {macroData?.vix ? macroData.vix.value.toFixed(2) : '--'}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">美股市場波動情緒</div>
+                  </div>
+
+                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
+                    <div className="text-xs text-slate-400 flex justify-between">
+                      <span>美元指數 (DXY)</span>
+                      {macroData?.dxy && (
+                        <span className={`text-[10px] font-mono ${macroData.dxy.changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                          {macroData.dxy.changePct >= 0 ? '+' : ''}{macroData.dxy.changePct}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xl font-bold font-mono text-blue-300 mt-1">
+                      {macroData?.dxy ? macroData.dxy.value.toFixed(2) : '--'}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">全球資金強弱風向球</div>
+                  </div>
+
+                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
+                    <div className="text-xs text-slate-400 flex justify-between">
+                      <span>台灣加權指數</span>
+                      {macroData?.twii && (
+                        <span className={`text-[10px] font-mono ${macroData.twii.changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                          {macroData.twii.changePct >= 0 ? '+' : ''}{macroData.twii.changePct}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xl font-bold font-mono text-yellow-400 mt-1">
+                      {macroData?.twii ? macroData.twii.value.toLocaleString() : '--'}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">台股大盤基準走勢</div>
+                  </div>
+                </div>
+              )}
             </div>
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
