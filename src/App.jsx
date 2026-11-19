@@ -15,9 +15,9 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.12 (完整整合版)
+ * Alpha 投資戰情室 v56.13 (完整整合版)
  * 
- * [v55.00 ~ v56.12 核心功能總覽]
+ * [v55.00 ~ v56.13 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
@@ -44,6 +44,7 @@ const STRATEGY_CONFIG = {
   'K值超賣': { color: '#3B82F6', label: 'K值超賣', shape: 'diamond' },
   'MA60有撐': { color: '#8B5CF6', label: 'MA60有撐', shape: 'star' },
   'MA120有撐': { color: '#06B6D4', label: 'MA120有撐', shape: 'square' },
+  'MA240有撐': { color: '#F43F5E', label: 'MA240有撐', shape: 'hexagon' },
   'default': { color: '#64748B', label: '其他策略', shape: 'cross' }
 };
 
@@ -236,6 +237,10 @@ const renderShape = (shape, cx, cy, color, size = 5) => {
       const s = size * 1.2;
       return <path d={`M${cx},${cy-s} L${cx+s*0.3},${cy-s*0.3} L${cx+s},${cy-s*0.3} L${cx+s*0.5},${cy+s*0.2} L${cx+s*0.7},${cy+s} L${cx},${cy+s*0.5} L${cx-s*0.7},${cy+s} L${cx-s*0.5},${cy+s*0.2} L${cx-s},${cy-s*0.3} L${cx-s*0.3},${cy-s*0.3} Z`} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
     }
+    case 'hexagon': {
+      const s = size * 1.1;
+      return <path d={`M${cx},${cy-s} L${cx+s*0.866},${cy-s*0.5} L${cx+s*0.866},${cy+s*0.5} L${cx},${cy+s} L${cx-s*0.866},${cy+s*0.5} L${cx-s*0.866},${cy-s*0.5} Z`} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
+    }
     case 'square': return <rect x={cx-size} y={cy-size} width={size*2} height={size*2} fill={color} stroke={stroke} strokeWidth={strokeWidth} />;
     default: return <g stroke={color} strokeWidth={2}><line x1={cx-size} y1={cy-size} x2={cx+size} y2={cy+size} /><line x1={cx-size} y1={cy+size} x2={cx+size} y2={cy-size} /></g>;
   }
@@ -408,7 +413,6 @@ const processTechnicalData = (rawData) => {
   d = calculateSMA(d, 20); 
   d = calculateSMA(d, 60); 
   d = calculateSMA(d, 120); 
-  d = calculateSMA(d, 240); 
   d = calculateKD(d, 9); 
   d = calculateMACD(d); 
   const rsi6 = calculateRSI(d, 6); 
@@ -524,6 +528,7 @@ const App = () => {
   // -- Cron Job State --
   const [isAutoBatchRunning, setIsAutoBatchRunning] = useState(false);
   const [autoBatchProgress, setAutoBatchProgress] = useState('');
+  const [enableWebAutoAnalysis, setEnableWebAutoAnalysis] = useState(false);
 
   // 1. System Logs Hook
   useEffect(() => {
@@ -1410,28 +1415,30 @@ const App = () => {
       const stockName = assetInfo?.['名稱'] || symbol; const category = assetInfo?.['類別'] || '股票'; const assetType = detectAssetType(symbol, stockName, category);
       const currentMonthPrefix = today.substring(0, 7); 
       
-      // 計算近一個月的交易紀錄
-      const nowMs = Date.now();
-      const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+      // 計算當月的交易紀錄
       let hasBoughtThisMonth = false;
-      let addOnCount30d = 0;
-      let maxPrice30d = 0;
+      let addOnCountThisMonth = 0;
+      let maxPriceThisMonth = 0;
       
       portfolioData.forEach(item => {
         if (item['標的'] === symbol) {
-          const dateStr = String(item['日期'] || '').replace(/\//g, '-');
+          const rawDate = String(item['日期'] || '').trim();
+          const parts = rawDate.split(/[\/\-]/);
+          let datePrefix = "";
+          if (parts.length >= 2) {
+            datePrefix = `${parts[0]}-${parts[1].padStart(2, '0')}`;
+          }
+          
           const strat = String(item['策略'] || '');
           const price = parseFloat(item['價格']) || 0;
           
-          if (dateStr.startsWith(currentMonthPrefix) && (strat === '基礎買入' || strat.includes('基礎'))) {
-            hasBoughtThisMonth = true;
-          }
-          
-          const tradeDateMs = new Date(dateStr).getTime();
-          if (!isNaN(tradeDateMs) && (nowMs - tradeDateMs <= thirtyDaysMs)) {
-            if (price > maxPrice30d) maxPrice30d = price;
+          if (datePrefix === currentMonthPrefix) {
+            if (strat === '基礎買入' || strat.includes('基礎')) {
+              hasBoughtThisMonth = true;
+            }
+            if (price > maxPriceThisMonth) maxPriceThisMonth = price;
             if (strat && !strat.includes('基礎') && strat !== '定存') { 
-               addOnCount30d++;
+               addOnCountThisMonth++;
             }
           }
         }
@@ -1455,17 +1462,20 @@ const App = () => {
 
       let dcaStrategy = "";
       let signalRules = "";
-      let addOnConstraint = `\n加碼鐵律：近一個月已加碼 ${addOnCount30d} 次 (上限2次)，近一個月最高買價 ${maxPrice30d > 0 ? maxPrice30d.toFixed(2) : '無'}。若現價大於近一個月最高買價，或加碼次數已達2次，絕對禁止加碼(僅能輸出HOLD/REDUCE)。`;
+      let restrictAddAll = false; // 防呆旗標
+      let addOnConstraint = `\n加碼鐵律：當月已加碼 ${addOnCountThisMonth} 次 (上限2次)，當月最高買價 ${maxPriceThisMonth > 0 ? maxPriceThisMonth.toFixed(2) : '無'}。若現價大於當月最高買價，或加碼次數已達2次，絕對禁止加碼(僅能輸出HOLD/REDUCE)。`;
 
       if (isDCA && hasBoughtThisMonth) {
+        restrictAddAll = true;
         dcaStrategy = `3. 【定期定額 (本月已扣款)】：本月已完成基礎買入。目前**僅需**評估是否觸發加碼條件(${ADDON_LABELS[settings.addon]||'無'}, ${ADDON_LABELS[settings.addon2]||'無'})，不再產生基礎扣款訊號。`;
-        signalRules = `燈號規則 (本月已扣款，僅評估加碼)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
+        signalRules = `【絕對強制規則】本月已完成扣款！\n嚴格限制只能輸出以下三者之一：REDUCE、ADD_BONUS、HOLD。\n**禁止輸出 ADD_ALL 或 ADD_BASIC**（違者判定為重大分析失誤）。`;
       } else if (isDCA) {
         dcaStrategy = `3. 【定期定額 (尋找買點)】：尋找低點扣款。月底強制扣款判斷: ${isLastTradingDay?'是':'否'}。若強制扣款成立，請視為基礎扣款條件成立。`;
         signalRules = `燈號規則：\n- REDUCE (轉空未跌)\n- ADD_ALL (基礎+加碼皆成立且未漲)\n- ADD_BASIC (僅基礎成立未漲)\n- ADD_BONUS (僅加碼成立未漲)\n- HOLD (其他或遭鐵律阻擋)`;
       } else {
+        restrictAddAll = true;
         dcaStrategy = `3. 【單筆投入】：純粹依據加碼條件(${ADDON_LABELS[settings.addon]||'無'}, ${ADDON_LABELS[settings.addon2]||'無'})尋找買點。`;
-        signalRules = `燈號規則 (單筆投入)：\n- REDUCE (轉空未跌)\n- ADD_BONUS (加碼邏輯成立且今日未漲)\n- HOLD (加碼不成立或遭鐵律阻擋)\n* 絕對不可輸出 ADD_ALL 或 ADD_BASIC。`;
+        signalRules = `【單筆投入規則】\n嚴格限制只能輸出以下三者之一：REDUCE、ADD_BONUS、HOLD。\n**禁止輸出 ADD_ALL 或 ADD_BASIC**。`;
       }
 
       const startDate = data[0]?.date || '未知';
@@ -1486,7 +1496,7 @@ const App = () => {
 最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}
 數據：${keyMetrics}
 指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}
-鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。${addOnConstraint}
+鐵律：現價>=昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。${addOnConstraint}
 ${signalRules}
 
 嚴格格式輸出(無Markdown)：
@@ -1503,7 +1513,7 @@ ${signalRules}
 最新K線日期:${dataDate} 昨收:${formatPrice(prevClose)} 現價:${formatPrice(currentPrice)}
 數據：${keyMetrics}
 指標：MA20=${latest.MA20?formatPrice(latest.MA20):'-'}, MA60=${latest.MA60?formatPrice(latest.MA60):'-'}, KD(${latest.K?formatPrice(latest.K):'-'},${latest.D?formatPrice(latest.D):'-'}), MACD=${latest.OSC?formatPrice(latest.OSC):'-'}, RSI=${latest.RSI6?formatPrice(latest.RSI6):'-'}, 布林下=${latest.BBL?formatPrice(latest.BBL):'-'}
-鐵律：現價>昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。${addOnConstraint}
+鐵律：現價>=昨收絕對禁買(HOLD/REDUCE)；現價<昨收絕對禁賣(HOLD/ADD)。${addOnConstraint}
 濾網：1.大波動(MACD綠柱收斂/DIF金叉) 2.小波動(布林下緣) 3.大盤ETF(KD<20) 4.科技ETF(折價/RSI<30) 5.債券ETF(殖利率創高)。
 策略要求：根據技術支撐提供【預估目標價】。
 
@@ -1541,20 +1551,46 @@ ${signalRules}
             const detailMatch = text.match(/\[DETAIL\]\s*([\s\S]*?)\s*(?=\[SIGNAL\]|$)/i);
             const signalMatch = text.match(/\[SIGNAL\]\s*[:：\-]?\s*(ADD_ALL|ADD_BASIC|ADD_BONUS|REDUCE|HOLD)/i);
             results.push({ summary: summaryMatch ? String(summaryMatch[1]).trim().replace(/[`*#]/g, '').replace(/\n/g, ' ') : "分析完成", detail: detailMatch ? String(detailMatch[1]).trim() : String(text), signal: signalMatch ? String(signalMatch[1]).toUpperCase() : 'HOLD', model });
-          } catch (err) {
-            if (String(err.message).includes('AbortError')) throw err;
+          } catch (e) {
+            console.warn(`Vote ${i} failed:`, e);
+            if (String(e.message).includes('AbortError')) throw e;
           }
-          if (i < MAX_VOTES && !signal.aborted) await delay(3000);
         }
         
-        if (signal.aborted) throw new Error('AbortError: 手動中止');
-        if (results.length === 0) throw new Error("所有獨立分析皆失敗");
+        if (results.length === 0) throw new Error("所有 AI 分析投票皆失敗");
 
-        const signalCounts = {}; results.forEach(r => { signalCounts[r.signal] = (signalCounts[r.signal] || 0) + 1; });
-        let majoritySignal = results[0].signal; let maxCount = 0;
-        for (const sig in signalCounts) { if (signalCounts[sig] > maxCount) { maxCount = signalCounts[sig]; majoritySignal = sig; } }
+        let signalCounts = {};
+        let maxCount = 0;
+        let majoritySignal = 'HOLD';
+        
+        results.forEach(r => {
+          signalCounts[r.signal] = (signalCounts[r.signal] || 0) + 1;
+        });
+
+        Object.keys(signalCounts).forEach(sig => {
+          if (signalCounts[sig] > maxCount) { maxCount = signalCounts[sig]; majoritySignal = sig; }
+        });
 
         const finalResult = results.find(r => r.signal === majoritySignal) || results[0];
+        
+        const blockAddByPrice = currentPrice >= prevClose;
+        const blockAddByRule = (addOnCountThisMonth >= 2) || (maxPriceThisMonth > 0 && currentPrice > maxPriceThisMonth);
+
+        // 【系統防呆】強制攔截違反鐵律的加碼 (直接凌駕於 AI 判斷之上)
+        if (blockAddByPrice && finalResult.signal.includes('ADD')) {
+            finalResult.signal = 'HOLD';
+            finalResult.summary = "【系統防呆攔截】現價未低於昨收，強制禁買觀望。 " + finalResult.summary;
+            majoritySignal = 'HOLD';
+        } else if (blockAddByRule && finalResult.signal.includes('ADD')) {
+            finalResult.signal = 'HOLD';
+            finalResult.summary = "【系統防呆攔截】觸發當月加碼鐵律(次數或買價上限)，強制觀望。 " + finalResult.summary;
+            majoritySignal = 'HOLD';
+        } else if (restrictAddAll && (finalResult.signal === 'ADD_ALL' || finalResult.signal === 'ADD_BASIC')) {
+            finalResult.signal = 'ADD_BONUS';
+            finalResult.summary = "【系統防呆修正】" + finalResult.summary;
+            majoritySignal = 'ADD_BONUS';
+        }
+
         const modePrefix = customAnalysisType === 'STRATEGY_BACKTEST' ? '【策略回測】' : '';
         const consensusSummary = `${modePrefix}【多數決共識 (${maxCount}/${results.length})】${finalResult.summary}`;
         
@@ -1641,7 +1677,7 @@ ${signalRules}
   // 定時排程器 (Cron Job Tracker)
   useEffect(() => {
     const timer = setInterval(() => {
-      if (isUiLocked || isAutoBatchRunning) return; 
+      if (isUiLocked || isAutoBatchRunning || !enableWebAutoAnalysis) return; 
 
       const now = new Date();
       const h = now.getHours();
@@ -1657,7 +1693,7 @@ ${signalRules}
 
         if (!localStorage.getItem(lockKey)) {
           localStorage.setItem(lockKey, 'true');
-          //startAutoBatchAnalysis(runType);
+          startAutoBatchAnalysis(runType);
         }
       }
     }, 60000);
@@ -1666,7 +1702,7 @@ ${signalRules}
   }, [tradableSymbols, isUiLocked, isAutoBatchRunning]);
 
   // 序列化批次執行引擎
-  /*const startAutoBatchAnalysis = async (runType) => {
+  const startAutoBatchAnalysis = async (runType) => {
     if (tradableSymbols.length === 0 || !geminiApiKey) return;
     
     setIsAutoBatchRunning(true);
@@ -1677,6 +1713,11 @@ ${signalRules}
       
       for (let i = 0; i < tradableSymbols.length; i++) {
         const symbol = tradableSymbols[i]['標的'];
+        const settings = investmentSettings[symbol] || {};
+        
+        // 略過設定為「不自動分析」的標的
+        if (settings.autoAnalyze === false) continue;
+
         setAutoBatchProgress(`自動分析中 (${i+1}/${tradableSymbols.length}): ${symbol}`);
         
         const tf = '1y_1d'; 
@@ -1712,7 +1753,7 @@ ${signalRules}
       setIsAutoBatchRunning(false);
       setAutoBatchProgress('');
     }
-  };*/
+  };
 
   const fetchHistoricalData = async (symbol, tf) => {
     if (!symbol || symbol.includes('TD') || symbol === '定存') return;
@@ -1885,6 +1926,7 @@ ${signalRules}
   const handleFetchButton = () => { 
     localStorage.setItem('gemini_api_key', geminiApiKey); localStorage.setItem('gemini_model', selectedModel); localStorage.setItem('fee_discount', feeDiscount); localStorage.setItem('custom_proxy_url', customProxyUrl); localStorage.setItem('gas_webapp_url', gasWebAppUrl); localStorage.setItem('investment_report_sheet_url', reportSheetUrl); localStorage.setItem('investment_sort_config', JSON.stringify(sortConfig));
     if (customOrder.length > 0) localStorage.setItem('investment_custom_order', JSON.stringify(customOrder));
+    localStorage.setItem('enable_web_auto_analysis', String(enableWebAutoAnalysis));
     setToast("設定已儲存！開始更新資料..."); 
     if (!sheetUrl) { if (rawData.length > 0) processData(rawData, realTimePrices, etfExtraData); return; } 
     performFetch(sheetUrl); 
@@ -1966,6 +2008,8 @@ ${signalRules}
 
   useEffect(() => {
     const savedUrl = localStorage.getItem('investment_sheet_url'); const savedReportUrl = localStorage.getItem('investment_report_sheet_url'); const savedGasUrl = localStorage.getItem('gas_webapp_url'); const savedKey = localStorage.getItem('gemini_api_key'); const savedModel = localStorage.getItem('gemini_model'); const savedDiscount = localStorage.getItem('fee_discount'); const savedSort = localStorage.getItem('investment_sort_config'); const savedOrder = localStorage.getItem('investment_custom_order'); const savedSettings = localStorage.getItem('investment_settings'); const savedClassifications = localStorage.getItem('investment_asset_classifications'); const savedProxyUrl = localStorage.getItem('custom_proxy_url'); const savedManualKLines = localStorage.getItem('investment_manual_klines'); const savedSyncedReports = localStorage.getItem('alpha_synced_cloud_reports');
+    const savedWebAuto = localStorage.getItem('enable_web_auto_analysis');
+    
     if (savedKey) setGeminiApiKey(savedKey);
     if (savedReportUrl) setReportSheetUrl(savedReportUrl);
     if (savedGasUrl) setGasWebAppUrl(savedGasUrl);
@@ -1978,6 +2022,7 @@ ${signalRules}
     }
     const isValidModel = AVAILABLE_MODELS.some(m => m.id === savedModel); if (savedModel && isValidModel) { setSelectedModel(savedModel); } else { setSelectedModel(AVAILABLE_MODELS[0].id); }
     if (savedDiscount) setFeeDiscount(parseFloat(savedDiscount)); if (savedSort) setSortConfig(JSON.parse(savedSort)); if (savedOrder) setCustomOrder(JSON.parse(savedOrder)); if (savedProxyUrl) setCustomProxyUrl(savedProxyUrl); if (savedManualKLines) setManualKLinesState(JSON.parse(savedManualKLines));
+    if (savedWebAuto !== null) setEnableWebAutoAnalysis(savedWebAuto === 'true');
 
     let initialSettings = {};
     if (savedSettings) { initialSettings = JSON.parse(savedSettings); Object.keys(initialSettings).forEach(key => { if(!initialSettings[key].addon2) initialSettings[key].addon2 = 'NONE'; if(initialSettings[key].autoAnalyze === undefined) initialSettings[key].autoAnalyze = true; });
@@ -2014,8 +2059,6 @@ ${signalRules}
   const currentMA5 = activeCandle.MA5 || 0;
   const currentMA20 = activeCandle.MA20 || 0;
   const currentMA60 = activeCandle.MA60 || 0;
-  const currentMA120 = activeCandle.MA120 || 0;
-  const currentMA240 = activeCandle.MA240 || 0;
   const currentBBUpper = activeCandle.BBU || 0;
   const currentBBLower = activeCandle.BBL || 0;
   const currentMACD = activeCandle.OSC || 0;
@@ -2067,7 +2110,7 @@ ${signalRules}
   if (displayChartData.length > 0) {
     const allLows = displayChartData.map(d => d.low);
     const allHighs = displayChartData.map(d => d.high);
-    const validMAs = displayChartData.map(d => [d.MA5, d.MA20, d.MA60, d.MA120, d.MA240, d.BBU, d.BBL]).flat().filter(v => v !== null && v !== undefined);
+    const validMAs = displayChartData.map(d => [d.MA5, d.MA20, d.MA60, d.BBU, d.BBL]).flat().filter(v => v !== null && v !== undefined);
     
     const minPrice = Math.min(...allLows, ...validMAs);
     const maxPrice = Math.max(...allHighs, ...validMAs);
@@ -2087,7 +2130,7 @@ ${signalRules}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
-            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.12</span></span>
+            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.08</span></span>
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">{['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (<button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-slate-900 text-blue-400' : 'text-slate-300 hover:bg-slate-700'}`}>{tab === 'overview' ? '資產總覽' : tab === 'history' ? '歷史走勢' : tab === 'chat' ? 'AI 助理' : tab === 'holdings' ? '持股明細' : '設定'}</button>))}</div>
@@ -2250,8 +2293,6 @@ ${signalRules}
                         <span className="text-yellow-500 font-mono flex items-center">MA5: {currentMA5 > 0 ? currentMA5.toFixed(2) : '--'}</span>
                         <span className="text-cyan-400 font-mono flex items-center">MA20: {currentMA20 > 0 ? currentMA20.toFixed(2) : '--'}</span>
                         <span className="text-purple-400 font-mono flex items-center">MA60: {currentMA60 > 0 ? currentMA60.toFixed(2) : '--'}</span>
-                        <span className="text-blue-500 font-mono flex items-center hidden sm:flex">MA120: {currentMA120 > 0 ? currentMA120.toFixed(2) : '--'}</span>
-                        <span className="text-rose-500 font-mono flex items-center hidden md:flex">MA240: {currentMA240 > 0 ? currentMA240.toFixed(2) : '--'}</span>
                       </div>
                       <div className="hidden md:flex text-slate-400 items-center gap-2">
                         <span className="animate-pulse text-blue-400 opacity-70">💡 滾輪/雙指可縮放，拖曳可平移</span>
@@ -2277,8 +2318,8 @@ ${signalRules}
                         <TextRow label="布林下" value={currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'} valueColor="text-slate-300" />
                         
                         {activeCandle.buyAction && (
-                          <div className="mt-2 border-t border-slate-700 pt-1 bg-slate-900/50 -mx-1 px-1 rounded shadow-inner">
-                            <div className="text-[10px] text-purple-400 font-bold mb-0.5">交易紀錄</div>
+                          <div className="mt-2 border-t border-slate-700 pt-2 bg-slate-900/80 -mx-1 px-1.5 pb-1 rounded shadow-inner">
+                            <div className="text-[11px] text-purple-400 font-bold mb-1 border-b border-purple-500/30 pb-0.5">💰 投資紀錄</div>
                             <TextRow label="日期" value={String(activeCandle.buyAction['日期'] || '').substring(5)} valueColor="text-white" />
                             <TextRow label="策略" value={activeCandle.buyAction['策略'] || '單筆'} valueColor="text-white" />
                             <TextRow label="買價" value={activeCandle.buyAction['價格']} valueColor="text-yellow-400" />
@@ -2400,8 +2441,6 @@ ${signalRules}
                                 <path d={buildPath('MA5', mapPriceY)} stroke="#eab308" />
                                 <path d={buildPath('MA20', mapPriceY)} stroke="#22d3ee" />
                                 <path d={buildPath('MA60', mapPriceY)} stroke="#c084fc" />
-                                <path d={buildPath('MA120', mapPriceY)} stroke="#3b82f6" />
-                                <path d={buildPath('MA240', mapPriceY)} stroke="#f43f5e" />
                                 
                                 {activeSubChart === 'MACD' && (
                                   <>
@@ -2467,53 +2506,40 @@ ${signalRules}
                               Vol
                             </div>
                             <div style={{ height: '3.85%' }}></div>
-							<div className="flex flex-col justify-between pt-1 pb-1" style={{ height: '19.23%' }}>
-							{activeSubChart === 'MACD' && <div className="h-full flex items-center text-blue-400">MACD</div>}
-							{activeSubChart === 'KD' && (
-								<><span className="text-yellow-400">80</span><span className="text-slate-600">KD</span><span className="text-yellow-400">20</span></>
-							)}
-							{activeSubChart === 'RSI' && (
-								<><span className="text-purple-400">70</span><span className="text-slate-600">RSI</span><span className="text-purple-400">30</span></>
-							)}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex flex-col gap-2 px-3 py-2 border-t border-slate-700/50 text-[10px] text-slate-400 bg-slate-900/50">
-                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                        <span className="font-semibold text-slate-300">主圖線型說明:</span>
-                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#eab308] mr-1"></div>MA5(週)</span>
-                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#22d3ee] mr-1"></div>MA20(月)</span>
-                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#c084fc] mr-1"></div>MA60(季)</span>
-                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#3b82f6] mr-1"></div>MA120(半年)</span>
-                        <span className="flex items-center"><div className="w-3 h-0.5 bg-[#f43f5e] mr-1"></div>MA240(年)</span>
-                        <span className="flex items-center"><div className="w-3 h-0.5 border-t border-dashed border-[#8b5cf6] mr-1"></div>布林帶</span>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                        <span className="font-semibold text-slate-300">過往交易策略:</span>
-                        {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
-                          <div key={key} className="flex items-center">
-                            <svg width="14" height="14" className="mr-1 overflow-visible">{renderShape(config.shape, 7, 7, config.color, 4)}</svg>
-                            {String(config.label)}
+                            <div className="flex flex-col justify-between pt-1 pb-1" style={{ height: '19.23%' }}>
+                              {activeSubChart === 'MACD' && <div className="h-full flex items-center text-blue-400">MACD</div>}
+                              {activeSubChart === 'KD' && (
+                                <><span className="text-yellow-400">80</span><span className="text-slate-600">KD</span><span className="text-yellow-400">20</span></>
+                              )}
+                              {activeSubChart === 'RSI' && (
+                                <><span className="text-purple-400">70</span><span className="text-slate-600">RSI</span><span className="text-purple-400">30</span></>
+                              )}
+                            </div>
                           </div>
-                        ))}
+                        )}
                       </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 px-2 py-1.5 border-t border-slate-700/50 text-[10px] text-slate-400 bg-slate-900/50">
+                      <span className="font-semibold text-slate-300">圖例說明:</span>
+                      {Object.entries(STRATEGY_CONFIG).map(([key, config]) => key === 'default' ? null : (
+                        <div key={key} className="flex items-center">
+                          <svg width="14" height="14" className="mr-1 overflow-visible">{renderShape(config.shape, 7, 7, config.color, 4)}</svg>
+                          {String(config.label)}
+                        </div>
+                      ))}
                     </div>
                   </Card>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-2">
-                <Card title="動態技術分析">
-                  <div className="flex flex-col gap-1.5 mt-1">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-2">
+                    <Card title="動態技術分析">
                       <div className="flex flex-col gap-1.5 mt-1">
                         <TextRow label="布林軌道" value={bbStatus} valueColor={bbColor} />
                         <TextRow label="多空排列" value={stockPrice > currentMA20 ? "站上月線" : "跌破月線"} valueColor={stockPrice > currentMA20 ? "text-red-500" : "text-green-500"} />
                         <TextRow label="月線乖離" value={`${bias20.toFixed(2)}%`} valueColor={Math.abs(bias20) > 8 ? "text-yellow-400" : "text-white"} />
                         <TextRow label="KD 狀態" value={currentK > 80 ? "高檔鈍化" : currentK < 20 ? "低檔超跌" : "中性區間"} valueColor={currentK > 80 ? "text-red-400" : currentK < 20 ? "text-green-400" : "text-white"} />
                       </div>
-				   </div>	  
-                </Card>
+                    </Card>
                     <Card title="籌碼動態模擬">
                       <div className="flex flex-col gap-1.5 mt-1">
                         <TextRow label="當前力道" value={activeChangePercent > 0 ? "買盤轉強" : "賣壓湧現"} valueColor={activeColorClass} />
@@ -2528,15 +2554,13 @@ ${signalRules}
                           <span className="text-lg font-mono text-white">{currentBBUpper > 0 ? currentBBUpper.toFixed(2) : '--'}</span>
                         </div>
                         <div className="bg-green-900/20 border border-green-500/30 p-2 rounded flex justify-between items-center mt-2">
-							<span className="text-xs text-green-400 font-bold">下檔支撐 (布林下軌)</span>
-							<span className="text-lg font-mono text-white">{currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'}</span>
-						</div>
-					   </div>
-					</Card>
-			  </div>
+                          <span className="text-xs text-green-400 font-bold">下檔支撐 (布林下軌)</span>
+                          <span className="text-lg font-mono text-white">{currentBBLower > 0 ? currentBBLower.toFixed(2) : '--'}</span>
+                        </div>
+                      </div>
+                    </Card>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 mt-2">
-                <Card title="主力出貨警示" className="items-center justify-center py-2 lg:col-span-2">
+                    <Card title="主力出貨警示" className="items-center justify-center py-2 lg:col-span-2">
                       <div className="flex justify-around w-full px-4 mb-3 mt-1">
                         <div className="flex flex-col items-center gap-1">
                           <span className="text-[10px] text-slate-400">主力動向</span>
@@ -3028,11 +3052,28 @@ ${signalRules}
               </div>
 
               <div className="pt-4 border-t border-slate-700 mt-4">
-                <h4 className="text-sm font-semibold text-slate-300 mb-2 flex items-center">
-                  <Cloud className="w-4 h-4 mr-2 text-blue-400" /> 雲端自動排程與表單雙向同步
-                </h4>
-                <div className="mb-3">
-                  <label className="block text-xs text-slate-400 mb-1">「AI_分析報告」分頁 CSV 連結 或 試算表共用連結</label>
+            <h4 className="text-sm font-semibold text-slate-300 mb-2 flex items-center">
+              <Cloud className="w-4 h-4 mr-2 text-blue-400" /> 雲端自動排程與表單雙向同步
+            </h4>
+            <div className="mb-4 flex items-center justify-between bg-slate-900/50 p-3 rounded-md border border-slate-600">
+              <div>
+                <label className="block text-sm font-medium text-slate-300">啟用網頁端背景定時分析</label>
+                <p className="text-[10px] text-slate-500 mt-1">每日 08:30 與 12:00 自動執行。若您已部署 GAS 雲端腳本，建議<span className="text-yellow-400 font-bold ml-1">關閉</span>此項以免雙邊重複執行浪費額度。</p>
+              </div>
+              <button
+                onClick={() => {
+                  const newVal = !enableWebAutoAnalysis;
+                  setEnableWebAutoAnalysis(newVal);
+                  localStorage.setItem('enable_web_auto_analysis', String(newVal));
+                  setToast(newVal ? "✅ 已啟用網頁端定時分析" : "⏸️ 已關閉網頁端定時分析，交由雲端 GAS 執行");
+                }}
+                className={`w-12 h-6 rounded-full transition-colors relative flex-shrink-0 ${enableWebAutoAnalysis ? 'bg-blue-600' : 'bg-slate-600'}`}
+              >
+                <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ${enableWebAutoAnalysis ? 'translate-x-6' : 'translate-x-0'}`} />
+              </button>
+            </div>
+            <div className="mb-3">
+              <label className="block text-xs text-slate-400 mb-1">「AI_分析報告」分頁 CSV 連結 或 試算表共用連結</label>
                   <input
                     type="text"
                     value={reportSheetUrl}
