@@ -15,16 +15,16 @@ import {
 } from 'lucide-react';
 
 /**
- * Alpha 投資戰情室 v56.14 (完整整合版)
+ * Alpha 投資戰情室 v56.15 (完整整合版)
  * 
- * [v55.00 ~ v56.14 核心功能總覽]
+ * [v55.00 ~ v56.15 核心功能總覽]
  * 1. AI 模型全面升級：支援 gemini-3.8-flash (預設)、gemini-3.6-flash、gemini-3.5-flash-lite。
  * 2. 台股非交易時段精準校正：假日、週末、早於 09:00 或晚於 13:30 自動對齊最近一次交易日。
  * 3. 支援完整 OHLCV 手動修正歷史 K 線（開、高、低、收、量）。
  * 4. 歷史走勢 AI 分析雙模式：「綜合趨勢分析」與「回測交易策略」。
  * 5. 獨立：將「回測交易策略」分離，不與「綜合趨勢分析」混用快取，且回測不執行雲端同步。
  * 6. 雲端同步 POST：完全採用 URLSearchParams 表單格式提交，徹底解決 CORS 阻擋。
- * 7. 自動排程器整合：內建網頁端自動背景批次 AI 分析功能。
+ * 7. 自動排程器整合：內建網頁端 08:30 與 12:00 自動背景批次 AI 分析功能。
  */
 
 const DEMO_DATA = [
@@ -97,10 +97,406 @@ const IndicatorDot = ({ color }) => {
   const colorMap = {
     green: "bg-green-500 shadow-[0_0_8px_#22c55e]",
     red: "bg-red-500 shadow-[0_0_8px_#ef4444]",
-    yellow: "bg-yellow-500 shadow-[0_0_8px_#eab308]",
-    gray: "bg-slate-600"
+    yellow: "bg-yellow-500 shadow-[0_0_8px_#eab308]"
   };
-  return <div className={`w-3 h-3 md:w-4 md:h-4 rounded-full ${colorMap[color]}`}></div>;
+  return <div className={`w-3 h-3 rounded-full ${colorMap[color] || 'bg-slate-500'}`} />;
+};
+
+// 警示燈號圖示元件 (紅 / 黃 / 綠 發光警示燈)
+const SirenBeacon = ({ level = 'green' }) => {
+  const palette = {
+    red: { main: '#ef4444', light: '#fca5a5', glow: 'rgba(239, 68, 68, 0.65)' },
+    yellow: { main: '#f59e0b', light: '#fde68a', glow: 'rgba(245, 158, 11, 0.65)' },
+    green: { main: '#22c55e', light: '#86efac', glow: 'rgba(34, 197, 94, 0.65)' }
+  }[level] || { main: '#64748b', light: '#cbd5e1', glow: 'rgba(100, 116, 139, 0.4)' };
+
+  return (
+    <div className="relative flex items-center justify-center w-11 h-11 shrink-0">
+      <div
+        className="absolute inset-1 rounded-full blur-md opacity-70 animate-pulse"
+        style={{ backgroundColor: palette.glow }}
+      />
+      <svg viewBox="0 0 40 40" className="w-10 h-10 relative z-10 overflow-visible">
+        {/* 放射光束 */}
+        <g stroke={palette.light} strokeWidth="1.8" strokeLinecap="round" opacity="0.9">
+          <line x1="20" y1="3" x2="20" y2="7" />
+          <line x1="8" y1="9" x2="11" y2="12" />
+          <line x1="32" y1="9" x2="29" y2="12" />
+          <line x1="5" y1="20" x2="9" y2="20" />
+          <line x1="35" y1="20" x2="31" y2="20" />
+        </g>
+        {/* 燈罩 */}
+        <path
+          d="M 13 27 L 13 18 A 7 7 0 0 1 27 18 L 27 27 Z"
+          fill={palette.main}
+          stroke={palette.light}
+          strokeWidth="1.2"
+        />
+        {/* 內部高光 */}
+        <path
+          d="M 16 24 L 16 18.5 A 4 4 0 0 1 20 14.5"
+          fill="none"
+          stroke="#ffffff"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          opacity="0.7"
+        />
+        {/* 底座 */}
+        <rect x="10" y="27" width="20" height="4" rx="1.5" fill="#1e293b" stroke={palette.main} strokeWidth="1.2" />
+      </svg>
+    </div>
+  );
+};
+
+// 參考圖示設計的「目前財經景氣指標儀表板」
+const EconomicCycleDashboard = ({ macroData, advice, macroLoading, onRefresh }) => {
+  const angle = advice.cycleAngle ?? 62;
+  const badgeStyleMap = {
+    red: 'bg-red-950/80 text-red-300 border border-red-500/50',
+    yellow: 'bg-amber-950/80 text-amber-300 border border-amber-500/50',
+    green: 'bg-emerald-950/80 text-emerald-300 border border-emerald-500/50'
+  };
+  const pillColorMap = {
+    red: 'border-red-500/80 bg-red-950/90 text-red-100 shadow-[0_0_16px_rgba(239,68,68,0.45)]',
+    yellow: 'border-amber-400/80 bg-amber-950/90 text-amber-100 shadow-[0_0_16px_rgba(245,158,11,0.45)]',
+    green: 'border-emerald-400/80 bg-emerald-950/90 text-emerald-100 shadow-[0_0_16px_rgba(34,197,94,0.45)]',
+    purple: 'border-purple-400/80 bg-purple-950/90 text-purple-100 shadow-[0_0_16px_rgba(168,85,247,0.45)]'
+  };
+
+  return (
+    <div className="bg-gradient-to-b from-[#0b1528] via-[#0d1930] to-[#091224] p-4 sm:p-6 rounded-2xl border border-slate-600/70 shadow-[0_0_30px_rgba(15,23,42,0.85)] relative overflow-hidden">
+      {/* 背景微光裝飾 */}
+      <div className="absolute -top-24 left-1/2 -translate-x-1/2 w-96 h-32 bg-cyan-500/10 blur-3xl pointer-events-none" />
+
+      {/* 頂部標題與控制列 */}
+      <div className="relative flex flex-col sm:flex-row items-center justify-between gap-3 mb-5 pb-3 border-b border-slate-700/60">
+        <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400 min-w-[150px]">
+          {macroData?.twii && (
+            <span className="bg-slate-900/80 border border-slate-700 px-2.5 py-1 rounded-md font-mono text-slate-300">
+              加權 {macroData.twii.value.toLocaleString()}
+            </span>
+          )}
+        </div>
+
+        <h3 className="text-xl sm:text-2xl font-extrabold tracking-wider text-white text-center drop-shadow-[0_2px_10px_rgba(56,189,248,0.25)]">
+          目前財經景氣指標儀表板
+        </h3>
+
+        <div className="flex items-center gap-2 sm:min-w-[150px] justify-end">
+          {macroData?.updatedAt && (
+            <span className="text-[11px] text-slate-400 font-mono hidden md:inline">{macroData.updatedAt}</span>
+          )}
+          <button
+            onClick={onRefresh}
+            disabled={macroLoading}
+            className="text-xs flex items-center px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-cyan-300 border border-slate-600/80 transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${macroLoading ? 'animate-spin' : ''}`} />
+            {macroLoading ? '更新中...' : '更新總經'}
+          </button>
+        </div>
+      </div>
+
+      {macroLoading && !macroData ? (
+        <div className="flex items-center justify-center py-14 text-slate-400 text-sm">
+          <Loader2 className="w-5 h-5 animate-spin mr-2 text-cyan-400" /> 正在串接 FRED 與市場總經 API...
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {/* 主體左右分欄 */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+            {/* 左側：景氣循環定位四象限雷達圓盤 */}
+            <div className="lg:col-span-6 bg-[#0d1a33]/80 border border-slate-600/60 rounded-xl p-4 sm:p-5 flex flex-col items-center justify-between relative">
+              <div className="text-base sm:text-lg font-bold text-slate-100 tracking-wide mb-2">
+                景氣循環定位
+              </div>
+
+              <div className="relative w-full max-w-[340px] aspect-square flex items-center justify-center my-1">
+                <svg viewBox="0 0 320 320" className="w-full h-full overflow-visible">
+                  <defs>
+                    {/* 四象限漸層 */}
+                    <radialGradient id="quad-recovery" cx="50%" cy="50%" r="55%">
+                      <stop offset="0%" stopColor="#1e3a34" stopOpacity="0.35" />
+                      <stop offset="85%" stopColor="#4ade80" stopOpacity="0.65" />
+                      <stop offset="100%" stopColor="#86efac" stopOpacity="0.9" />
+                    </radialGradient>
+                    <radialGradient id="quad-expansion" cx="50%" cy="50%" r="55%">
+                      <stop offset="0%" stopColor="#3b2f14" stopOpacity="0.35" />
+                      <stop offset="85%" stopColor="#f59e0b" stopOpacity="0.7" />
+                      <stop offset="100%" stopColor="#fcd34d" stopOpacity="0.95" />
+                    </radialGradient>
+                    <radialGradient id="quad-recession" cx="50%" cy="50%" r="55%">
+                      <stop offset="0%" stopColor="#3b151a" stopOpacity="0.35" />
+                      <stop offset="85%" stopColor="#ef4444" stopOpacity="0.7" />
+                      <stop offset="100%" stopColor="#fca5a5" stopOpacity="0.9" />
+                    </radialGradient>
+                    <radialGradient id="quad-depression" cx="50%" cy="50%" r="55%">
+                      <stop offset="0%" stopColor="#27193d" stopOpacity="0.35" />
+                      <stop offset="85%" stopColor="#9333ea" stopOpacity="0.7" />
+                      <stop offset="100%" stopColor="#d8b4fe" stopOpacity="0.9" />
+                    </radialGradient>
+                    <filter id="needle-glow" x="-40%" y="-40%" width="180%" height="180%">
+                      <feGaussianBlur stdDeviation="3.5" result="blur" />
+                      <feMerge>
+                        <feMergeNode in="blur" />
+                        <feMergeNode in="SourceGraphic" />
+                      </feMerge>
+                    </filter>
+                  </defs>
+
+                  {/* 外層雙圈裝飾環 */}
+                  <circle cx="160" cy="160" r="142" fill="none" stroke="#38bdf8" strokeWidth="1" opacity="0.2" />
+                  <circle cx="160" cy="160" r="134" fill="none" stroke="#64748b" strokeWidth="1.5" opacity="0.45" />
+
+                  {/* 左上象限：復甦期 */}
+                  <path
+                    d="M 160 160 L 160 32 A 128 128 0 0 0 32 160 Z"
+                    fill="url(#quad-recovery)"
+                    stroke="#86efac"
+                    strokeWidth={advice.cyclePhase === 'RECOVERY' ? 2.5 : 1}
+                    opacity={advice.cyclePhase === 'RECOVERY' ? 1 : 0.8}
+                  />
+                  {/* 右上象限：繁榮期 */}
+                  <path
+                    d="M 160 160 L 160 32 A 128 128 0 0 1 288 160 Z"
+                    fill="url(#quad-expansion)"
+                    stroke="#fcd34d"
+                    strokeWidth={advice.cyclePhase === 'EXPANSION' ? 2.5 : 1}
+                    opacity={advice.cyclePhase === 'EXPANSION' ? 1 : 0.8}
+                  />
+                  {/* 右下象限：衰退期 */}
+                  <path
+                    d="M 160 160 L 288 160 A 128 128 0 0 1 160 288 Z"
+                    fill="url(#quad-recession)"
+                    stroke="#fca5a5"
+                    strokeWidth={advice.cyclePhase === 'RECESSION' ? 2.5 : 1}
+                    opacity={advice.cyclePhase === 'RECESSION' ? 1 : 0.8}
+                  />
+                  {/* 左下象限：蕭條期 */}
+                  <path
+                    d="M 160 160 L 160 288 A 128 128 0 0 1 32 160 Z"
+                    fill="url(#quad-depression)"
+                    stroke="#d8b4fe"
+                    strokeWidth={advice.cyclePhase === 'DEPRESSION' ? 2.5 : 1}
+                    opacity={advice.cyclePhase === 'DEPRESSION' ? 1 : 0.8}
+                  />
+
+                  {/* 十字分隔線 */}
+                  <line x1="160" y1="32" x2="160" y2="288" stroke="#cbd5e1" strokeWidth="1.2" opacity="0.6" />
+                  <line x1="32" y1="160" x2="288" y2="160" stroke="#cbd5e1" strokeWidth="1.2" opacity="0.6" />
+
+                  {/* 象限文字 */}
+                  <text x="104" y="112" textAnchor="middle" fill="#ffffff" fontSize="19" fontWeight="700" style={{ textShadow: '0 2px 6px rgba(0,0,0,0.85)' }}>復甦期</text>
+                  <text x="216" y="112" textAnchor="middle" fill="#ffffff" fontSize="19" fontWeight="700" style={{ textShadow: '0 2px 6px rgba(0,0,0,0.85)' }}>繁榮期</text>
+                  <text x="104" y="218" textAnchor="middle" fill="#ffffff" fontSize="19" fontWeight="700" style={{ textShadow: '0 2px 6px rgba(0,0,0,0.85)' }}>蕭條期</text>
+                  <text x="216" y="218" textAnchor="middle" fill="#ffffff" fontSize="19" fontWeight="700" style={{ textShadow: '0 2px 6px rgba(0,0,0,0.85)' }}>衰退期</text>
+
+                  {/* 動態發光指針 (0度朝12點鐘方向，順時針旋轉) */}
+                  <g
+                    transform={`translate(160, 160) rotate(${angle})`}
+                    filter="url(#needle-glow)"
+                    className="transition-transform duration-700 ease-out"
+                  >
+                    <polygon points="-6,0 6,0 0,-112" fill="#fef3c7" stroke="#f59e0b" strokeWidth="1.2" />
+                    <circle cx="0" cy="0" r="11" fill="#0f172a" stroke="#fde68a" strokeWidth="3" />
+                    <circle cx="0" cy="0" r="4" fill="#fbbf24" />
+                  </g>
+                </svg>
+
+                {/* 目前位置發光提示膠囊 */}
+                <div className="mt-2 sm:mt-0 sm:absolute sm:bottom-3 sm:right-0">
+                  <div className={`px-3.5 py-1.5 rounded-full border text-xs sm:text-sm font-bold whitespace-nowrap ${pillColorMap[advice.positionTone] || pillColorMap.red}`}>
+                    目前位置：{advice.positionLabel}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 右側：6 項總經發光警示燈號卡片 (含美元指數 DXY) */}
+            <div className="lg:col-span-6 flex flex-col justify-between gap-2">
+              {advice.cards.map((card, idx) => (
+                <div
+                  key={idx}
+                  className="bg-[#0d1a33]/90 hover:bg-[#112242] border border-slate-600/60 hover:border-cyan-400/50 rounded-xl px-3.5 py-2 flex items-center justify-between gap-3 transition-all shadow-sm"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <SirenBeacon level={card.level} />
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-slate-300">{card.title}</div>
+                      <div className="text-sm sm:text-base font-extrabold font-mono text-white tracking-tight truncate mt-0.5">
+                        {card.mainText}
+                        {card.accentText && (
+                          <span className={`ml-1.5 ${card.accentColorClass || 'text-amber-300'}`}>
+                            {card.accentText}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <span className={`text-[11px] sm:text-xs font-semibold px-2.5 py-1 rounded-md whitespace-nowrap shrink-0 self-start sm:self-center ${badgeStyleMap[card.level] || badgeStyleMap.green}`}>
+                    {card.badge}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 底部全寬策略提示橫幅 */}
+          <div className="bg-[#0d1a33]/95 border border-slate-500/60 rounded-xl px-4 py-3 text-center shadow-[0_0_15px_rgba(56,189,248,0.12)]">
+            <span className="text-sm sm:text-base font-bold text-slate-100 tracking-wide">
+              策略提示：<span className="text-cyan-200">{advice.strategyTip}</span>
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const evaluateMacroAdvice = (m, fallback10Y) => {
+  const cpi = m?.usCpiYoY?.value ?? null;
+  const fed = m?.fedRate?.value ?? null;
+  const y10 = m?.us10Y?.value ?? (fallback10Y != null ? Number(fallback10Y) : null);
+  const vix = m?.vix?.value ?? null;
+  const twiiPct = m?.twii?.changePct ?? null;
+  const spread = m?.spread10Y2Y?.value ?? null;
+  const unrate = m?.usUnrate?.value ?? null;
+  const dxy = m?.dxy?.value ?? null;
+  const dxyPct = m?.dxy?.changePct ?? null;
+
+  // 1. 通膨壓力卡片
+  let inflationLevel = 'green';
+  let inflationBadge = '綠燈：通膨受控';
+  if (cpi != null && ((fed != null && cpi > fed) || cpi >= 3.3)) {
+    inflationLevel = 'red';
+    inflationBadge = cpi >= 3.5 ? '紅燈：通膨反彈' : '紅燈：通膨偏高';
+  } else if (cpi != null && cpi > 2.4) {
+    inflationLevel = 'yellow';
+    inflationBadge = '黃燈：通膨黏著';
+  }
+  const cpiCompare = cpi != null && fed != null ? (cpi > fed ? '>' : cpi < fed ? '<' : '=') : '/';
+  const inflationText = cpi != null || fed != null
+    ? `CPI ${cpi != null ? cpi.toFixed(2) + '%' : '--'} ${cpiCompare} Fed ${fed != null ? fed.toFixed(2) + '%' : '--'}`
+    : 'CPI -- / Fed --';
+
+  // 2. 長債殖利率卡片
+  let bondLevel = 'green';
+  let bondBadge = '綠燈：估值友善';
+  if (y10 != null && y10 >= 4.5) {
+    bondLevel = 'red';
+    bondBadge = '紅燈：壓抑估值';
+  } else if (y10 != null && y10 >= 3.8) {
+    bondLevel = 'yellow';
+    bondBadge = '黃燈：高檔震盪';
+  }
+  const bondText = `10Y 美債 ${y10 != null ? y10.toFixed(2) + '%' : '--'}`;
+
+  // 3. 市場情緒卡片
+  let sentimentLevel = 'green';
+  let sentimentBadge = '綠燈：情緒平穩';
+  if ((vix != null && vix >= 25) || (twiiPct != null && twiiPct <= -2.0)) {
+    sentimentLevel = 'red';
+    sentimentBadge = '紅燈：恐慌警戒';
+  } else if ((vix != null && vix >= 18) || (twiiPct != null && twiiPct <= -0.8)) {
+    sentimentLevel = 'yellow';
+    sentimentBadge = '黃燈：波動升溫';
+  }
+  const sentimentMain = `VIX ${vix != null ? vix.toFixed(2) : '--'} / 台股`;
+  const sentimentAccent = twiiPct != null ? `${twiiPct >= 0 ? '+' : ''}${twiiPct.toFixed(2)}%` : '--';
+  const sentimentAccentColor = twiiPct != null ? (twiiPct >= 0 ? 'text-red-400' : 'text-emerald-400') : 'text-slate-400';
+
+  // 4. 殖利率利差卡片
+  let spreadLevel = 'green';
+  let spreadBadge = '綠燈：曲線健康';
+  if (spread != null && spread < 0) {
+    spreadLevel = 'red';
+    spreadBadge = '紅燈：倒掛警戒';
+  } else if (spread != null && (spread <= 0.4 || (y10 != null && y10 >= 4.5))) {
+    spreadLevel = 'yellow';
+    spreadBadge = y10 != null && y10 >= 4.5 ? '黃燈：熊陡結構' : '黃燈：利差偏窄';
+  }
+  const spreadAccent = spread != null ? `${spread >= 0 ? '+' : ''}${spread.toFixed(2)}%` : '--';
+  const spreadAccentColor = spreadLevel === 'red' ? 'text-red-400' : spreadLevel === 'yellow' ? 'text-amber-300' : 'text-emerald-400';
+
+  // 5. 就業市場卡片
+  let jobLevel = 'green';
+  let jobBadge = '綠燈：實體支撐';
+  if (unrate != null && unrate >= 4.8) {
+    jobLevel = 'red';
+    jobBadge = '紅燈：就業惡化';
+  } else if (unrate != null && unrate >= 4.3) {
+    jobLevel = 'yellow';
+    jobBadge = '黃燈：就業降溫';
+  }
+  const jobAccent = unrate != null ? `${unrate.toFixed(1)}%` : '--';
+  const jobAccentColor = jobLevel === 'red' ? 'text-red-400' : jobLevel === 'yellow' ? 'text-amber-300' : 'text-emerald-400';
+
+  // 6. 美元指數 (DXY) 卡片
+  let dxyLevel = 'green';
+  let dxyBadge = '綠燈：資金寬鬆';
+  if (dxy != null && dxy >= 106) {
+    dxyLevel = 'red';
+    dxyBadge = '紅燈：強勢吸金';
+  } else if (dxy != null && dxy >= 102) {
+    dxyLevel = 'yellow';
+    dxyBadge = '黃燈：美元偏強';
+  }
+  const dxyMain = `DXY ${dxy != null ? dxy.toFixed(2) : '--'}`;
+  const dxyAccent = dxyPct != null ? `(${dxyPct >= 0 ? '+' : ''}${dxyPct.toFixed(2)}%)` : '';
+  const dxyAccentColor = dxyLevel === 'red' ? 'text-red-400' : dxyLevel === 'yellow' ? 'text-amber-300' : 'text-emerald-400';
+
+  const cards = [
+    { title: '通膨壓力', mainText: inflationText, level: inflationLevel, badge: inflationBadge },
+    { title: '長債殖利率', mainText: bondText, level: bondLevel, badge: bondBadge },
+    { title: '市場情緒', mainText: sentimentMain, accentText: sentimentAccent, accentColorClass: sentimentAccentColor, level: sentimentLevel, badge: sentimentBadge },
+    { title: '殖利率利差', mainText: '10Y-2Y', accentText: spreadAccent, accentColorClass: spreadAccentColor, level: spreadLevel, badge: spreadBadge },
+    { title: '美元指數 (資金流向)', mainText: dxyMain, accentText: dxyAccent, accentColorClass: dxyAccentColor, level: dxyLevel, badge: dxyBadge },
+    { title: '就業市場', mainText: '失業率', accentText: jobAccent, accentColorClass: jobAccentColor, level: jobLevel, badge: jobBadge }
+  ];
+
+  const redCount = cards.filter(c => c.level === 'red').length;
+  const yellowCount = cards.filter(c => c.level === 'yellow').length;
+
+  // 景氣循環四象限動態定位 (0°=12點鐘方向, 順時針: 0-90 繁榮期, 90-180 衰退期, 180-270 蕭條期, 270-360 復甦期)
+  let cyclePhase = 'EXPANSION';
+  let cycleAngle = 55;
+  let positionLabel = '溫和擴張．觀察區';
+  let positionTone = 'yellow';
+  let strategyTip = '股債平衡 ｜ 核心紀律定期定額 ｜ 衛星逢低分批加碼';
+
+  if (unrate != null && unrate >= 5.0 && (spread != null && spread < 0 || (vix != null && vix >= 28))) {
+    cyclePhase = 'DEPRESSION';
+    cycleAngle = 225;
+    positionLabel = '景氣築底．深蹲佈局';
+    positionTone = 'purple';
+    strategyTip = '現金為王 ｜ 佈局長債鎖定高息 ｜ 等待極端超跌分批承接';
+  } else if ((spread != null && spread < 0 && unrate != null && unrate >= 4.5) || redCount >= 4) {
+    cyclePhase = 'RECESSION';
+    cycleAngle = 132;
+    positionLabel = '景氣放緩．衰退警戒';
+    positionTone = 'red';
+    strategyTip = '高度防禦 ｜ 降低衛星高波動持股 ｜ 拉高長債與現金比重';
+  } else if (redCount >= 2 || inflationLevel === 'red' || bondLevel === 'red') {
+    cyclePhase = 'EXPANSION';
+    cycleAngle = 66;
+    positionLabel = '高通膨修正．警戒區';
+    positionTone = 'red';
+    strategyTip = '防禦優先 ｜ 衛星嚴守停損 ｜ 核心保留現金分批佈局';
+  } else if ((fed != null && fed <= 3.5) && inflationLevel === 'green' && spreadLevel === 'green') {
+    cyclePhase = 'RECOVERY';
+    cycleAngle = 315;
+    positionLabel = '寬鬆復甦．起漲佈局';
+    positionTone = 'green';
+    strategyTip = '積極偏多 ｜ 核心與成長股同步加碼 ｜ 把握景氣復甦主升段';
+  } else if (redCount === 0 && yellowCount <= 1) {
+    cyclePhase = 'EXPANSION';
+    cycleAngle = 38;
+    positionLabel = '穩健擴張．順風區';
+    positionTone = 'green';
+    strategyTip = '順勢偏多 ｜ 核心續抱放大獲利 ｜ 留意高檔乖離控管風險';
+  }
+
+  return { cyclePhase, cycleAngle, positionLabel, positionTone, strategyTip, cards };
 };
 
 const formatCurrency = (value) => new Intl.NumberFormat('zh-TW', { style: 'currency', currency: 'TWD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value || 0);
@@ -2252,7 +2648,7 @@ ${signalRules}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
           <div className="flex items-center">
             <div className="bg-blue-600 p-2 rounded-lg"><TrendingUp className="h-6 w-6 text-white" /></div>
-            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.08</span></span>
+            <span className="ml-3 text-xl font-bold tracking-wider">Alpha 投資戰情室 <span className="text-xs font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-500/30 ml-1">v56.15</span></span>
             {usdRate !== 1 && <span className="ml-4 text-xs bg-slate-700 px-2 py-1 rounded text-slate-300 flex items-center"><Globe className="w-3 h-3 mr-1"/> USD/TWD: {usdRate.toFixed(2)}</span>}
           </div>
           <div className="flex space-x-4">{['overview', 'history', 'chat', 'holdings', 'config'].map(tab => (<button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === tab ? 'bg-slate-900 text-blue-400' : 'text-slate-300 hover:bg-slate-700'}`}>{tab === 'overview' ? '資產總覽' : tab === 'history' ? '歷史走勢' : tab === 'chat' ? 'AI 助理' : tab === 'holdings' ? '持股明細' : '設定'}</button>))}</div>
@@ -2278,146 +2674,18 @@ ${signalRules}
             </div>
 
             {/* 全球總體經濟儀表板 (Macro Dashboard) */}
-            <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-lg">
-              <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-                <div className="flex items-center">
-                  <Globe className="w-5 h-5 mr-2 text-cyan-400" />
-                  <h3 className="text-lg font-semibold text-white">全球總體經濟儀表板</h3>
-                  <span className="ml-3 text-[11px] text-slate-400 bg-slate-900/70 px-2 py-0.5 rounded border border-slate-700">
-                    FRED 官方數據 + 市場即時指標
-                  </span>
-                </div>
-                <div className="flex items-center gap-3">
-                  {macroData?.updatedAt && (
-                    <span className="text-xs text-slate-500 hidden sm:inline">更新於: {macroData.updatedAt}</span>
-                  )}
-                  <button
-                    onClick={() => fetchMacroData(true)}
-                    disabled={macroLoading}
-                    className="text-xs flex items-center px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-cyan-300 border border-slate-600 transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${macroLoading ? 'animate-spin' : ''}`} />
-                    {macroLoading ? '更新總經中...' : '更新總經'}
-                  </button>
-                </div>
-              </div>
-
-              {macroLoading && !macroData ? (
-                <div className="flex items-center justify-center py-8 text-slate-400 text-sm">
-                  <Loader2 className="w-5 h-5 animate-spin mr-2 text-cyan-400" /> 正在串接 FRED 與市場總經 API...
-                </div>
-              ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
-                    <div className="text-xs text-slate-400 flex justify-between">
-                      <span>Fed 基準利率</span>
-                      <span className="text-[10px] text-slate-500">{macroData?.fedRate?.date || '--'}</span>
-                    </div>
-                    <div className="text-xl font-bold font-mono text-white mt-1">
-                      {macroData?.fedRate ? `${macroData.fedRate.value.toFixed(2)}%` : '--'}
-                    </div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">美國聯邦基金利率</div>
-                  </div>
-
-                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
-                    <div className="text-xs text-slate-400 flex justify-between">
-                      <span>美國 CPI 年增率</span>
-                      <span className="text-[10px] text-slate-500">{macroData?.usCpiYoY?.date || '--'}</span>
-                    </div>
-                    <div className={`text-xl font-bold font-mono mt-1 ${macroData?.usCpiYoY?.value > 3 ? 'text-red-400' : macroData?.usCpiYoY?.value <= 2.2 ? 'text-green-400' : 'text-yellow-400'}`}>
-                      {macroData?.usCpiYoY ? `${macroData.usCpiYoY.value.toFixed(2)}%` : '--'}
-                    </div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">通膨壓力指標 (目標 2%)</div>
-                  </div>
-
-                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
-                    <div className="text-xs text-slate-400 flex justify-between">
-                      <span>美國失業率</span>
-                      <span className="text-[10px] text-slate-500">{macroData?.usUnrate?.date || '--'}</span>
-                    </div>
-                    <div className={`text-xl font-bold font-mono mt-1 ${macroData?.usUnrate?.value >= 4.5 ? 'text-red-400' : 'text-white'}`}>
-                      {macroData?.usUnrate ? `${macroData.usUnrate.value.toFixed(1)}%` : '--'}
-                    </div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">就業市場健康度</div>
-                  </div>
-
-                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
-                    <div className="text-xs text-slate-400 flex justify-between">
-                      <span>美債 10Y-2Y 利差</span>
-                      {macroData?.spread10Y2Y && (
-                        <span className={`text-[10px] px-1.5 rounded ${macroData.spread10Y2Y.value < 0 ? 'bg-red-900/50 text-red-300' : 'bg-green-900/50 text-green-300'}`}>
-                          {macroData.spread10Y2Y.value < 0 ? '倒掛警戒' : '正常'}
-                        </span>
-                      )}
-                    </div>
-                    <div className={`text-xl font-bold font-mono mt-1 ${macroData?.spread10Y2Y?.value < 0 ? 'text-red-400' : 'text-emerald-400'}`}>
-                      {macroData?.spread10Y2Y ? `${macroData.spread10Y2Y.value > 0 ? '+' : ''}${macroData.spread10Y2Y.value.toFixed(2)}%` : '--'}
-                    </div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">景氣衰退領先指標</div>
-                  </div>
-
-                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
-                    <div className="text-xs text-slate-400 flex justify-between">
-                      <span>10年期美債殖利率</span>
-                      {macroData?.us10Y && (
-                        <span className={`text-[10px] font-mono ${macroData.us10Y.changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
-                          {macroData.us10Y.changePct >= 0 ? '+' : ''}{macroData.us10Y.changePct}%
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-xl font-bold font-mono text-purple-300 mt-1">
-                      {macroData?.us10Y ? `${macroData.us10Y.value.toFixed(2)}%` : (usBondYields['10Y'] ? `${Number(usBondYields['10Y']).toFixed(2)}%` : '--')}
-                    </div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">全球無風險定價之錨</div>
-                  </div>
-
-                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
-                    <div className="text-xs text-slate-400 flex justify-between">
-                      <span>VIX 恐慌指數</span>
-                      {macroData?.vix && (
-                        <span className={`text-[10px] px-1.5 rounded ${macroData.vix.value >= 25 ? 'bg-red-900/50 text-red-300' : macroData.vix.value <= 15 ? 'bg-green-900/50 text-green-300' : 'bg-yellow-900/50 text-yellow-300'}`}>
-                          {macroData.vix.value >= 25 ? '恐慌警戒' : macroData.vix.value <= 15 ? '低波動' : '中性'}
-                        </span>
-                      )}
-                    </div>
-                    <div className={`text-xl font-bold font-mono mt-1 ${macroData?.vix?.value >= 25 ? 'text-red-400' : macroData?.vix?.value <= 15 ? 'text-green-400' : 'text-yellow-400'}`}>
-                      {macroData?.vix ? macroData.vix.value.toFixed(2) : '--'}
-                    </div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">美股市場波動情緒</div>
-                  </div>
-
-                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
-                    <div className="text-xs text-slate-400 flex justify-between">
-                      <span>美元指數 (DXY)</span>
-                      {macroData?.dxy && (
-                        <span className={`text-[10px] font-mono ${macroData.dxy.changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
-                          {macroData.dxy.changePct >= 0 ? '+' : ''}{macroData.dxy.changePct}%
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-xl font-bold font-mono text-blue-300 mt-1">
-                      {macroData?.dxy ? macroData.dxy.value.toFixed(2) : '--'}
-                    </div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">全球資金強弱風向球</div>
-                  </div>
-
-                  <div className="bg-slate-900/60 p-3.5 rounded-lg border border-slate-700/70">
-                    <div className="text-xs text-slate-400 flex justify-between">
-                      <span>台灣加權指數</span>
-                      {macroData?.twii && (
-                        <span className={`text-[10px] font-mono ${macroData.twii.changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
-                          {macroData.twii.changePct >= 0 ? '+' : ''}{macroData.twii.changePct}%
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-xl font-bold font-mono text-yellow-400 mt-1">
-                      {macroData?.twii ? macroData.twii.value.toLocaleString() : '--'}
-                    </div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">台股大盤基準走勢</div>
-                  </div>
-                </div>
-              )}
-            </div>
+            {(() => {
+              const y10Val = macroData?.us10Y?.value ?? (usBondYields['10Y'] ? Number(usBondYields['10Y']) : null);
+              const advice = evaluateMacroAdvice(macroData, y10Val);
+              return (
+                <EconomicCycleDashboard
+                  macroData={macroData}
+                  advice={advice}
+                  macroLoading={macroLoading}
+                  onRefresh={() => fetchMacroData(true)}
+                />
+              );
+            })()}
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
               <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
